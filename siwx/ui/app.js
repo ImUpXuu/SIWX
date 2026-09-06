@@ -1,6 +1,6 @@
 /* stories-in-wx 壳：hash 路由 + 模块化页面加载器（pages/<name>.html/js/css） */
 (function () {
-  const PAGES = ['guide', 'chat', 'export', 'settings'];
+  const PAGES = ['guide', 'chat', 'export', 'logs', 'settings'];
   let current = null;      // { name, mod }
   let loadedCss = {};
 

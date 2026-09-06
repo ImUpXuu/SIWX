@@ -91,28 +91,24 @@ function renderResult(job) {
   const lines = [];
 
   if (job.error) {
-    // 失败：显示错误 + 全部日志
     lines.push(`<div class="res-row res-err">❌ 导出失败：${esc(job.error)}</div>`);
-    lines.push(`<div class="res-logs"><b>运行日志：</b></div>`);
-    for (const [, m] of job.logs || []) {
-      lines.push(`<div class="log-line dim">${esc(m)}</div>`);
-    }
+    lines.push(`<details class="res-logs-detail" open><summary>📋 运行日志 (${(job.logs||[]).length} 条)</summary>`);
+    for (const [, m] of job.logs || []) lines.push(`<div class="log-line dim">${esc(m)}</div>`);
+    lines.push(`</details>`);
     box.innerHTML = lines.join('');
     return;
   }
 
   const r = job.report || {};
   if (!r || !r.format) {
-    // 没有报告（异常）
     lines.push(`<div class="res-row res-err">⚠️ 无导出结果</div>`);
-    for (const [, m] of job.logs || []) {
-      lines.push(`<div class="log-line dim">${esc(m)}</div>`);
-    }
+    lines.push(`<details class="res-logs-detail" open><summary>📋 运行日志 (${(job.logs||[]).length} 条)</summary>`);
+    for (const [, m] of job.logs || []) lines.push(`<div class="log-line dim">${esc(m)}</div>`);
+    lines.push(`</details>`);
     box.innerHTML = lines.join('');
     return;
   }
 
-  // 成功
   const dur = r.duration_ms ?? '?';
   lines.push(`<div class="res-row res-ok">✔ 导出完成（${esc(String(dur))} ms）</div>`);
   lines.push(`<div class="res-meta">`);
@@ -126,11 +122,11 @@ function renderResult(job) {
     lines.push(`<div class="res-actions"><a href="/api/export/download?path=${dl}">📥 下载 ZIP</a> · ` +
       `<a href="#" onclick="openDir('${esc(r.export_dir)}');return false">📂 打开目录</a></div>`);
   }
-  // 始终显示日志（含媒体解密详情）
-  lines.push(`<div class="res-logs"><b>运行日志：</b></div>`);
-  for (const [, m] of job.logs || []) {
-    lines.push(`<div class="log-line dim">${esc(m)}</div>`);
-  }
+  // 日志可折叠（不重复显示——进度阶段已实时展示，这里是归档）
+  const logs = job.logs || [];
+  lines.push(`<details class="res-logs-detail"><summary>📋 运行日志 (${logs.length} 条)</summary>`);
+  for (const [, m] of logs) lines.push(`<div class="log-line dim">${esc(m)}</div>`);
+  lines.push(`</details>`);
   box.innerHTML = lines.join('');
 }
 

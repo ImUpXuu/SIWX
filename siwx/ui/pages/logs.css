@@ -1,0 +1,9 @@
+.logs { max-width: 900px; margin: 0 auto; }
+.log-actions { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+.log-actions .btn { padding: 6px 14px; font-size: 13px; }
+.log-actions .chk { font-size: 12.5px; color: var(--muted); cursor: pointer; margin-left: auto; }
+#log-box { height: calc(100vh - 200px); max-height: 600px; }
+.log-line.warn { color: var(--warn-fg); }
+.log-line.err { color: var(--err-fg); }
+.log-line.ok { color: var(--ok-fg); }
+.log-line.dim { color: var(--muted); }

@@ -363,7 +363,9 @@ def messages():
 
     # 每个分片单独查（分片内按 create_time 有序），合并后取最新的 limit 条
     candidates = []
+    shard_idx = 0
     for db in sorted((acc / "message").glob("message_*.db"), reverse=True):
+        shard_idx += 1
         conn = sqlite3.connect(db)
         try:
             exists = conn.execute(
@@ -372,7 +374,6 @@ def messages():
             if not exists:
                 continue
             smap = _sender_map(conn)
-            # 分片内用 LIMIT 取候选（多取一些保证合并后够数）
             sql = (f"SELECT local_id, server_id, local_type, create_time, "
                    f"origin_source, real_sender_id, message_content, "
                    f"packed_info_data FROM [{table}]")
@@ -381,7 +382,10 @@ def messages():
                 sql += " WHERE create_time < ?"
                 params.append(before)
             sql += f" ORDER BY create_time DESC LIMIT {limit * 2}"
-            for r in conn.execute(sql, params):
+            rows = list(conn.execute(sql, params))
+            if rows:
+                _log(f"[msg] 分片{shard_idx} {db.name}: 取 {len(rows)} 条候选")
+            for r in rows:
                 candidates.append((r, smap))
         except sqlite3.Error:
             pass
