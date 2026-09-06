@@ -1,7 +1,7 @@
 {
   "version": "0.2.3",
-  "date": "2026-09-06 07:50:04",
-  "notes": "v0.2.3\n\n- 修复：输出目录彻底与 cwd 解耦（源码/打包均锚定应用根目录）",
+  "date": "2026-09-06 08:39:55",
+  "notes": "fix: HTML 导出改为交互式查看器（数据驱动渲染），修复 frozen 路径/作用域/导入问题",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.3/stories-in-wx-v0.2.3-windows-x64.exe",
     "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.3/stories-in-wx-v0.2.3-macos.dmg"
