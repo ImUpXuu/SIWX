@@ -30,8 +30,11 @@ FALLBACK_LABEL = {3: "[图片]", 6: "[文件]", 34: "[语音]", 42: "[名片]",
 SENDER_PREFIX_RE = re.compile(r"^([a-zA-Z0-9_\-]+):\n")
 
 
+from siwx import paths as _paths
+
+
 def _out_root() -> Path:
-    return Path.cwd() / "output"
+    return _paths.out_root()
 
 
 def _accounts() -> list:

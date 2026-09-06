@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from siwx import media
+from siwx import paths as _paths
 from siwx.api_chat import build_messages, _contact_names
 
 GENERATOR = "stories-in-wx"
@@ -353,7 +354,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     display = display or names.get(chat, chat) or chat
     safe = _safe_name(display)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    root = (export_root or Path.cwd() / "exports")
+    root = (export_root or _paths.exports_root())
     export_dir = root / f"{stamp}_{safe}"
     export_dir.mkdir(parents=True, exist_ok=True)
 
