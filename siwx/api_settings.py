@@ -9,8 +9,11 @@ from siwx import keystore
 bp = Blueprint("settings_api", __name__, url_prefix="/api/settings")
 
 
+from siwx import paths as _paths
+
+
 def _out_root() -> Path:
-    return Path.cwd() / "output"
+    return _paths.out_root()
 
 
 def _dir_size(p: Path) -> int:

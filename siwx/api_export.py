@@ -4,6 +4,8 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
 
+from siwx import paths as _paths
+
 bp = Blueprint("export_api", __name__, url_prefix="/api/export")
 
 
@@ -13,7 +15,8 @@ def download():
     p = request.args.get("path", "")
     if not p:
         return jsonify({"error": "缺少 path"}), 400
-    root = (Path.cwd() / "exports").resolve()
+    from siwx import paths as _paths
+    root = _paths.exports_root().resolve()
     target = Path(p).resolve()
     if not target.is_relative_to(root) or not target.is_file():
         return jsonify({"error": "文件不存在"}), 404
@@ -27,7 +30,7 @@ def open_dir():
     import subprocess
     data = request.get_json(silent=True) or {}
     p = Path(data.get("path", ""))
-    root = (Path.cwd() / "exports").resolve()
+    root = _paths.exports_root().resolve()
     target = Path(p).resolve()
     if not target.is_relative_to(root) or not target.exists():
         return jsonify({"error": "路径无效"}), 404
@@ -40,7 +43,7 @@ def open_dir():
 
 @bp.get("/list")
 def list_exports():
-    root = Path.cwd() / "exports"
+    root = _paths.exports_root()
     out = []
     if root.is_dir():
         for d in sorted(root.iterdir(), reverse=True):
@@ -57,7 +60,7 @@ def render():
     """读取一个导出 JSON 的前 N 条消息（预览用）。"""
     data = request.get_json(silent=True) or {}
     p = Path(data.get("path", ""))
-    root = (Path.cwd() / "exports").resolve()
+    root = _paths.exports_root().resolve()
     target = (root / p).resolve() if not Path(p).is_absolute() else Path(p)
     try:
         if not target.is_relative_to(root) or not target.is_file():
