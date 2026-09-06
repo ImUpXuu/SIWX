@@ -133,6 +133,7 @@ def accounts():
 
 @bp.get("/sessions")
 def sessions():
+    """轻量会话列表：只读 session.db（最新预览+排序时间），秒出。"""
     account = request.args.get("account", "")
     acc = _out_root() / account
     if not (acc / "message").is_dir():
@@ -141,7 +142,6 @@ def sessions():
     names = _contact_names(acc)
     items = {}
 
-    # session.db：会话摘要与排序时间
     sdb = acc / "session" / "session.db"
     if sdb.is_file():
         conn = sqlite3.connect(sdb)
@@ -151,51 +151,33 @@ def sessions():
                 un = (un or "").strip()
                 if un:
                     items[un] = {"username": un, "summary": (summary or "").strip(),
-                                 "last_time": ts or 0, "msg_count": 0}
+                                 "last_time": ts or 0}
         except sqlite3.Error:
             pass
         conn.close()
 
-    # message_*.db：聚合 Msg_ 表（count / last_time），Name2Id 反查 username
-    for db in sorted((acc / "message").glob("message_*.db")):
-        conn = sqlite3.connect(db)
-        try:
-            id_map = {}
-            for (un,) in conn.execute("SELECT user_name FROM Name2Id"):
-                if un:
-                    id_map[hashlib.md5(un.encode()).hexdigest()] = un
-            tables = [r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'")]
-            for t in tables:
-                un = id_map.get(t[4:])
-                if not un:
-                    continue
-                row = conn.execute(
-                    f"SELECT COUNT(*), MAX(create_time) FROM [{t}]").fetchone()
-                cnt, last = row[0] or 0, row[1] or 0
-                it = items.setdefault(un, {"username": un, "summary": "",
-                                           "last_time": 0, "msg_count": 0})
-                it["msg_count"] += cnt
-                it["last_time"] = max(it["last_time"], last or 0)
-        except sqlite3.Error:
-            pass
-        finally:
-            conn.close()
+    if not items:
+        for db in sorted((acc / "message").glob("message_*.db")):
+            conn = sqlite3.connect(db)
+            try:
+                for (un,) in conn.execute("SELECT user_name FROM Name2Id"):
+                    if un and un not in items:
+                        items[un] = {"username": un, "summary": "", "last_time": 0}
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
 
     out = []
     for it in items.values():
-        if it["msg_count"] == 0 and not it["summary"]:
-            continue
         un = it["username"]
         display = names.get(un) or (it["summary"].split(":")[0].strip()
                                     if ":" in it["summary"] else "") or un
         out.append({
-            "username": un,
-            "display": display,
+            "username": un, "display": display,
             "is_group": un.endswith("@chatroom"),
             "preview": (it["summary"] or "")[:60],
-            "last_time": it["last_time"],
-            "msg_count": it["msg_count"],
+            "last_time": it["last_time"], "msg_count": 0,
         })
     out.sort(key=lambda x: x["last_time"], reverse=True)
     return jsonify({"account": account, "sessions": out})
@@ -365,6 +347,7 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
 
 @bp.get("/messages")
 def messages():
+    """分页加载聊天消息：SQL LIMIT/OFFSET，不载入全部消息。"""
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
     before = int(request.args.get("before", "0") or 0)
@@ -373,21 +356,102 @@ def messages():
     if not (acc / "message").is_dir():
         return jsonify({"error": "账号不存在或未解密"}), 404
 
-    all_msgs = build_messages(acc, chat, account=account)
-    all_msgs.sort(key=lambda m: m["ts"] or 0)
-    if before:
-        all_msgs = [m for m in all_msgs if (m["ts"] or 0) < before]
-    has_more = len(all_msgs) > limit
-    msgs = all_msgs[-limit:]
-
-    display = next((m["sender_name"] for m in msgs if m["sender_name"]), "") \
-        or (all_msgs[0]["sender_name"] if all_msgs else "")
+    table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     names = _contact_names(acc)
-    display = names.get(chat, chat) or display
+    my_base = account.split("_6")[0] if "_6" in account else account
+    is_group = chat.endswith("@chatroom")
+
+    # 每个分片单独查（分片内按 create_time 有序），合并后取最新的 limit 条
+    candidates = []
+    for db in sorted((acc / "message").glob("message_*.db"), reverse=True):
+        conn = sqlite3.connect(db)
+        try:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone()
+            if not exists:
+                continue
+            smap = _sender_map(conn)
+            # 分片内用 LIMIT 取候选（多取一些保证合并后够数）
+            sql = (f"SELECT local_id, server_id, local_type, create_time, "
+                   f"origin_source, real_sender_id, message_content, "
+                   f"packed_info_data FROM [{table}]")
+            params = []
+            if before:
+                sql += " WHERE create_time < ?"
+                params.append(before)
+            sql += f" ORDER BY create_time DESC LIMIT {limit * 2}"
+            for r in conn.execute(sql, params):
+                candidates.append((r, smap))
+        except sqlite3.Error:
+            pass
+        finally:
+            conn.close()
+
+    # 合并排序，取最新的 limit 条
+    candidates.sort(key=lambda x: x[0][3] or 0, reverse=True)
+    page = candidates[:limit]
+    has_more = len(candidates) > limit
+
+    msgs = []
+    for (local_id, server_id, ltype, ts, origin, rsid, content, packed), smap in page:
+        text = _decode_content(content)
+        sender_wxid = ""
+        m = SENDER_PREFIX_RE.match(text[:100]) if text else None
+        if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
+                  or m.group(1).endswith("@chatroom")):
+            sender_wxid = m.group(1)
+            text = text[m.end():]
+        if not sender_wxid and rsid:
+            sender_wxid = smap.get(int(rsid), "")
+        if not is_group:
+            if sender_wxid and sender_wxid != chat:
+                pass
+            elif origin == 1:
+                sender_wxid = my_base
+            else:
+                sender_wxid = chat
+        if is_group and not sender_wxid and origin == 1:
+            sender_wxid = my_base
+        is_me = (sender_wxid == my_base or sender_wxid == account
+                 or (not is_group and sender_wxid == my_base))
+        if is_group and not is_me and sender_wxid == chat:
+            sender_wxid = ""
+
+        t = ltype & 0xFFFF
+        md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
+        bubble_md5 = None
+        if t in (3, 47) and packed:
+            m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
+            bubble_md5 = m2.group().decode() if m2 else None
+
+        quote = link = None
+        if t == 57:
+            quote = _parse_refer(text)
+        if t == 49:
+            title, url, des = _parse_appmsg(text)
+            if title or url:
+                link = {"title": title or "链接", "url": url, "desc": des}
+
+        kind = KIND_MAP.get(t, "text")
+        if t == 57:
+            kind = "quote"
+        elif t == 49 and link and link.get("url"):
+            kind = "link"
+
+        msgs.append({
+            "id": local_id, "ts": ts or 0, "type": t, "kind": kind,
+            "sender_wxid": sender_wxid,
+            "sender_name": names.get(sender_wxid, sender_wxid) if sender_wxid
+            else (names.get(chat, chat) if not is_group else ""),
+            "is_me": bool(is_me), "md5": md5, "bubble_md5": bubble_md5,
+            "quote": quote, "link": link,
+            "text": _fmt(t, text) if t != 1 else text,
+        })
+
+    display = names.get(chat, chat)
     return jsonify({"account": account, "chat": chat, "display": display,
-                    "is_group": chat.endswith("@chatroom"),
-                    "messages": msgs, "has_more": has_more,
-                    "total": len(all_msgs)})
+                    "is_group": is_group, "messages": msgs, "has_more": has_more})
 
 
 @bp.get("/avatar")
