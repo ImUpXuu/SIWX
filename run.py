@@ -17,4 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from siwx.cli import main
 
 if __name__ == "__main__":
+    # PyInstaller 打包后必须最先调用：multiprocessing 子进程以本 exe
+    # 重新拉起时，由 freeze_support 分流到 spawn_main，避免整包重跑 CLI
+    from multiprocessing import freeze_support
+    freeze_support()
     sys.exit(main())

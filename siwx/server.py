@@ -75,7 +75,8 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             report = {"kind": "keys", "accounts": accounts}
 
         elif mode == "decrypt":
-            out_root = out_dir or str(Path.cwd() / "output")
+            from siwx import paths as _paths
+            out_root = out_dir or str(_paths.out_root())
             accounts = []
             for wxid, db in dirs:
                 accounts.append({"wxid": wxid,
@@ -85,7 +86,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             report = {"kind": "decrypt", "accounts": accounts}
 
         elif mode == "auto":
-            out_root = out_dir or str(Path.cwd() / "output")
+            out_root = out_dir or str(_paths.out_root())
             accounts = []
             for wxid, db in dirs:
                 rep = extract.extract_keys_for_dir(db, _log)
@@ -100,7 +101,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         elif mode == "export":
             from siwx import exporter
             data = export_opts or {}
-            acc_dir = Path.cwd() / "output" / (data.get("account") or "")
+            acc_dir = _paths.out_root() / (data.get("account") or "")
             if not (acc_dir / "message").is_dir():
                 raise RuntimeError("该账号还没有解密产物，请先完成引导")
             start = data.get("start")

@@ -7,7 +7,8 @@ import json
 import sys
 from pathlib import Path
 
-from siwx import extract, keystore, tui
+from siwx import extract, keystore
+from siwx import paths as _paths, tui
 
 
 def _resolve_dirs(db_dir):
@@ -60,7 +61,7 @@ def cmd_decrypt(args) -> int:
     if not dirs:
         tui.log("✗ 未找到微信数据目录")
         return 1
-    out_root = args.out or str(Path.cwd() / "output")
+    out_root = args.out or str(_paths.out_root())
     code = 0
     for wxid, db in dirs:
         rep = extract.decrypt_dir(db, str(Path(out_root) / wxid), log=tui.log,
@@ -76,7 +77,7 @@ def cmd_decrypt(args) -> int:
 
 def cmd_auto(args) -> int:
     tui.banner()
-    out_root = args.out or str(Path.cwd() / "output")
+    out_root = args.out or str(_paths.out_root())
     accounts = extract.auto_all(out_root, log=tui.log,
                                 use_cache=not args.no_cache,
                                 workers=args.workers)
