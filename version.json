@@ -1,10 +1,10 @@
 {
   "version": "0.2.5",
-  "date": "2026-09-06 20:00:00",
-  "notes": "聊天查看无限滚动修复(取oldest ts)；导出HTML/JSON时序正确；侧边栏日志页；增量同步速度对齐",
+  "date": "2026-09-06 10:06:56",
+  "notes": "fix: 聊天无限滚动(取oldest ts)+导出时序+日志页+sync速度对齐；v0.2.5",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/stories-in-wx-v0.2.5-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5-stories-in-wx-v0.2.5-macos.dmg"
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/stories-in-wx-v0.2.5-macos.dmg"
   },
   "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/SHA256SUMS.txt"
 }
