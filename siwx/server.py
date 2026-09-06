@@ -98,6 +98,25 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 accounts.append({**rep, "decrypt": dec})
             report = {"kind": "auto", "accounts": accounts}
 
+        elif mode == "sync":
+            """增量同步：密钥缓存优先 → 收割缺失 → 只解密变更库。"""
+            dirs = find_wechat_data_dirs()
+            if not dirs:
+                raise RuntimeError("未找到微信数据目录")
+            for wxid, db in dirs:
+                _log(f"[sync] 同步 {wxid}…")
+                entries = collect_db_files(db)
+                rep = extract.extract_keys_for_dir(db, _log,
+                                                   entries=entries, use_memory=True)
+                _log(f"[sync] {wxid}: 密钥 {rep['verified']}/{rep['total_salts']}")
+                if rep["verified"] > 0:
+                    dec = extract.decrypt_dir(
+                        db, str(_paths.out_root() / wxid), _log,
+                        entries=entries, use_cache=True, workers=2)
+                    _log(f"[sync] {wxid}: 解密 {dec['ok']} 成功 / "
+                         f"缓存 {dec['cached']} / 新增 {dec['failed']}")
+            report = {"kind": "sync", "message": "增量同步完成"}
+
         elif mode == "export":
             from siwx import exporter
             data = export_opts or {}

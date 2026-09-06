@@ -30,12 +30,34 @@ async function init() {
 
   el('c-search').addEventListener('input', () => renderSessions(el('c-search').value));
   el('c-back').addEventListener('click', () => el('chat-wrap').classList.remove('open'));
-  // 刷新缓存：清空前端缓存重新拉取（不清后端解密缓存）
+  // 刷新 = 增量同步（提取缺失密钥 → 解密变更库）→ 刷新列表
   el('c-refresh').addEventListener('click', async () => {
-    sessions = [];
-    currentChat = null;
-    el('c-sessions').innerHTML = '<div class="empty">刷新中…</div>';
-    await loadSessions();
+    const btn = el('c-refresh');
+    btn.disabled = true;
+    el('c-sessions').innerHTML = '<div class="empty">⏳ 增量同步中（提取密钥→解密变更库）…</div>';
+    try {
+      const acc = el('c-account')?.value || account;
+      const r = await fetch('/api/run', {
+        method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({ mode: 'sync', export_opts: { account: acc } }),
+      });
+      if (r.status === 409) { el('c-sessions').innerHTML = '<div class="empty">已有任务在运行</div>'; return; }
+      // 轮询任务完成
+      for (let i = 0; i < 300; i++) {
+        await new Promise(res => setTimeout(res, 1000));
+        const j = await (await fetch('/api/job')).json();
+        if (!j.running) break;
+        if (j.logs.length) {
+          const last = j.logs[j.logs.length - 1][1];
+          el('c-sessions').innerHTML = `<div class="empty">${esc(last.substring(0, 60))}</div>`;
+        }
+      }
+      await loadSessions();
+    } catch (e) {
+      el('c-sessions').innerHTML = `<div class="empty">刷新失败: ${esc(e.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+    }
   });
   // 跳转导出页并预选当前会话
   el('c-export').addEventListener('click', () => {

@@ -1,5 +1,7 @@
 # 微信 4.x 媒体解密技术原理
 
+
+> ⚠️ 所有数据均为脱敏示例。
 > 版本：1.0 | 2026-09-06 | 实测环境：WeChat (Weixin.exe) 4.1.13.63 / Windows 11
 > 本文是 stories-in-wx 媒体解密模块的权威技术依据，所有"实测"结论均在本机验证通过。
 
@@ -76,6 +78,8 @@ pt = AES.new(key16, AES.MODE_ECB).decrypt(data[15:15+aes_size]) \
    + bytes(b ^ xor_key for b in data[15+aes_size+16 : 15+aes_size+16+xor_size])
 # pt 即完整图像字节流（JPEG/PNG/GIF/WebP/wxgf）
 ```
+
+> ⚠️ **本文所有 wxid / code / 密钥 / md5 均为脱敏占位符，非真实数据。**
 
 ## 5. 密钥体系：账号级密钥的离线派生（核心）
 
