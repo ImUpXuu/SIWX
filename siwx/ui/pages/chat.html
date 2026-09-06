@@ -1,22 +1,22 @@
 <div class="chat-wrap" id="chat-wrap">
   <aside class="c-list">
     <div class="c-top">
-      <div class="c-top-row">
-        <select id="c-account" class="c-select"></select>
-        <button id="c-refresh" class="c-refresh" title="刷新缓存">⟳</button>
+      <select id="c-account"></select>
+      <div class="c-toolbar">
+        <input id="c-search" placeholder="搜索会话…">
+        <button id="c-refresh" title="增量同步">⟳</button>
       </div>
-      <input id="c-search" class="c-search" placeholder="搜索会话…">
     </div>
-    <div id="c-sessions" class="c-sessions"><div class="empty">加载中…</div></div>
+    <div id="c-sessions"></div>
   </aside>
   <section class="c-main">
     <div class="c-head">
-      <button id="c-back" class="c-back">←</button>
+      <button id="c-back">←</button>
       <b id="c-title">微信</b>
-      <span id="c-sub" class="c-sub"></span>
-      <button id="c-export" class="c-export" title="导出此聊天">📦 导出</button>
+      <span id="c-sub"></span>
+      <button id="c-export">📦 导出</button>
     </div>
-    <div id="c-msgs" class="c-msgs">
+    <div id="c-msgs">
       <div class="c-tip">选择一个会话查看聊天记录</div>
     </div>
   </section>

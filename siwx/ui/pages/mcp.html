@@ -1,0 +1,46 @@
+<div class="mcp-wrap">
+  <aside class="mcp-list">
+    <div class="mcp-top">
+      <select id="m-account"></select>
+      <input id="m-search" placeholder="搜索会话…">
+    </div>
+    <div id="m-sessions"></div>
+  </aside>
+  <section class="mcp-side">
+    <div class="card">
+      <div class="card-head"><h2>MCP 服务器</h2><span class="hint">stdio 传输 · 零依赖 · 仅本地</span></div>
+      <div class="m-block">
+        <div class="m-label">启动命令</div>
+        <div class="m-cmdbox"><code id="m-cmd"></code><button class="mini-btn copy-btn" data-target="m-cmd">复制</button></div>
+      </div>
+      <div class="m-block">
+        <div class="m-label">客户端配置（mcpServers JSON）</div>
+        <div class="m-cmdbox"><pre id="m-json" class="mono"></pre><button class="mini-btn copy-btn" data-target="m-json">复制</button></div>
+      </div>
+      <div class="m-block">
+        <div class="m-label">工具开关配置文件</div>
+        <code id="m-path" class="mono dim"></code>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>工具开关</h2><span class="hint">禁用后客户端 tools/list 不再返回该工具</span></div>
+      <div id="m-tools"></div>
+      <div class="g-nav"><button id="m-save" class="btn btn-primary">保存配置</button><span class="hint" id="m-save-msg"></span></div>
+    </div>
+
+    <div class="card mcp-logcard">
+      <div class="card-head"><h2>MCP 调用日志</h2><span class="hint" id="m-log-meta">每 2s 自动刷新 · 最近 200 行</span></div>
+      <div class="console" id="m-log"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>使用说明</h2></div>
+      <ul class="m-notes">
+        <li><b>1.</b> 复制上方 JSON 到客户端（如 Claude Desktop 的 <code>claude_desktop_config.json</code>）</li>
+        <li><b>2.</b> 重启客户端即可在对话中使用聊天记录查询工具</li>
+        <li><b>3.</b> 命令行手动验证：<code>python run.py mcp</code>（Ctrl+C 退出）</li>
+      </ul>
+    </div>
+  </section>
+</div>

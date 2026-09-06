@@ -1,0 +1,102 @@
+/* MCP 配置页 —— 左侧会话列表 + 右侧配置 */
+.mcp-wrap {
+  display: grid; grid-template-columns: 260px 1fr; gap: 16px;
+  height: calc(100vh - 52px - 40px); min-height: 480px;
+  align-items: stretch;
+}
+
+/* ── 左侧：会话列表（复用聊天页风格）──────── */
+.mcp-list {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--card);
+  border: 1px solid var(--line); border-radius: 12px;
+  overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.mcp-top { padding: 10px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+#m-account {
+  width: 100%; font-size: 13px; color: var(--text);
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--card); padding: 7px 8px; outline: none;
+}
+#m-search {
+  width: 100%; font-size: 13px; color: var(--text);
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--card); padding: 7px 8px; outline: none;
+}
+#m-sessions { flex: 1; overflow-y: auto; }
+#m-sessions::-webkit-scrollbar { width: 5px; }
+#m-sessions::-webkit-scrollbar-thumb { background: #c9ced6; border-radius: 3px; }
+
+/* 会话行：绝对定位头像 + 名称/概览/时间 */
+.sess {
+  position: relative;
+  padding: 10px 10px 10px 58px;
+  min-height: 58px;
+  cursor: pointer;
+  border-bottom: 1px solid #eef0f3;
+  background: var(--card);
+}
+.sess:hover { background: #f2f4f7; }
+.sess .ava {
+  position: absolute; left: 10px; top: 10px;
+  width: 38px; height: 38px; border-radius: 8px;
+  background: #e2e8f0; color: #475569;
+  font-size: 13px; font-weight: 700;
+  text-align: center; line-height: 38px;
+  overflow: hidden;
+}
+.sess .name {
+  display: block; font-size: 13px; font-weight: 600; color: #1a2027;
+  line-height: 18px; height: 18px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  margin: 0 0 2px 0; padding: 0 65px 0 0;
+}
+.sess .prev {
+  display: block; font-size: 12px; color: #8a93a0;
+  line-height: 16px; height: 16px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  margin: 0; padding: 0;
+}
+.sess .tm {
+  position: absolute; right: 10px; top: 10px;
+  font-size: 10.5px; color: #a0a8b3;
+}
+.c-empty { padding: 20px 12px; text-align: center; color: #8a93a0; font-size: 13px; }
+
+/* ── 右侧：配置卡片 ────────────────────── */
+.mcp-side {
+  display: flex; flex-direction: column; gap: 14px;
+  min-width: 0; min-height: 0; overflow-y: auto;
+}
+.mcp-logcard { flex: 1; min-height: 160px; display: flex; flex-direction: column; }
+.mcp-logcard .console { flex: 1; min-height: 120px; max-height: 320px; }
+/* MCP 日志级别着色 */
+.log-line.ok { color: var(--ok-fg); }
+.log-line.err { color: var(--err-fg); }
+.m-block { margin-top: 14px; }
+.m-label { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
+.m-cmdbox { position: relative; }
+.m-cmdbox code, .m-cmdbox pre {
+  display: block; background: var(--card-alt); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; font-size: 12px; line-height: 1.6;
+  overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+  padding-right: 72px; min-height: 38px;
+}
+.m-cmdbox pre { margin: 0; }
+.m-cmdbox .copy-btn { position: absolute; right: 8px; top: 8px; }
+
+.m-tool { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.m-tool:last-child { border-bottom: none; }
+.m-tool input { width: 16px; height: 16px; accent-color: var(--blue); margin-top: 2px; flex: none; }
+.m-tool b { display: block; font-size: 13px; color: var(--blue); }
+.m-tool span { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+
+.m-notes { font-size: 13px; color: var(--text); line-height: 2; padding-left: 18px; }
+.m-notes code { background: var(--card-alt); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+
+/* 响应式 */
+@media (max-width: 820px) {
+  .mcp-wrap { grid-template-columns: 1fr; height: auto; }
+  .mcp-list { max-height: 40vh; }
+}

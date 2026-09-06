@@ -96,10 +96,12 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
 
     if entries is None:
         entries = collect_db_files(db_dir)
+    log(f"[extract] 收集到 {len(entries)} 个数据库文件")
     page1_by_salt, salt_to_dbs = {}, {}
     for e in entries:
         page1_by_salt.setdefault(e.salt_hex, e.page1)
         salt_to_dbs.setdefault(e.salt_hex, []).append(e.rel)
+    log(f"[extract] 唯一 salt 数: {len(page1_by_salt)}")
 
     key_map, attrib = {}, {}
     cached_keys = 0
@@ -181,6 +183,7 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     uniq = list(dict.fromkeys(keystore.unique_keys(store)))
     out_root = Path(out_dir)
     log(f"── 解密 {wxid}: {len(entries)} 个数据库 → {out_root} ──")
+    log(f"[decrypt] 密钥库: {len(store)} 条, 唯一密钥: {len(uniq)} 个")
 
     manifest = load_manifest(out_root) if use_cache else {}
     files, tasks = [], []
@@ -207,7 +210,7 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     for e in entries:
         key_hex = _resolve_key(e)
         if key_hex is None:
-            log(f"  [warn] 跳过 {e.rel} (密钥库无对应 salt)")
+            log(f"  [decrypt] 跳过 {e.rel} (salt={e.salt_hex[:16]}… 无密钥)")
             files.append({"rel": e.rel, "size_mb": _round_mb(e.size), "pages": 0,
                           "status": "skipped", "key_masked": ""})
             skipped += 1
@@ -224,9 +227,11 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
             files.append({"rel": e.rel, "size_mb": _round_mb(e.size),
                           "pages": m.get("pages", 0), "status": "cached",
                           "key_masked": mask_key(key_hex)})
-            log(f"  [keystore] 缓存命中 {e.rel} (源库未变)")
+            log(f"  [decrypt] 缓存命中 {e.rel} ({_round_mb(e.size)}MB, 未变)")
             continue
         tasks.append((e.rel, str(e.path), str(dst), key_hex))
+
+    log(f"[decrypt] 待解密: {len(tasks)} 个, 缓存命中: {cached}, 缺密钥: {skipped}")
 
     def _on_done(r):
         rel, pages, status, err = r

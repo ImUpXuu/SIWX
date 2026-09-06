@@ -1,47 +1,54 @@
-<div class="export">
-  <div class="card">
-    <div class="card-head"><h2>选择范围</h2><span class="hint">基于已解密数据，按需解密媒体</span></div>
-    <div class="f-grid">
-      <label>账号<br><select id="e-account" class="f-input"></select></label>
-      <label>搜索聊天<br><input id="e-search" class="f-input" placeholder="输入名称过滤…"></label>
-      <label>聊天<br><select id="e-chat" class="f-input"></select></label>
-      <label>开始日期<br><input type="date" id="e-start" class="f-input"></label>
-      <label>结束日期<br><input type="date" id="e-end" class="f-input"></label>
+<div class="export-wrap">
+  <aside class="e-list">
+    <div class="e-top">
+      <select id="e-account"></select>
+      <input id="e-search" placeholder="搜索会话…">
+      <label class="e-selall"><input type="checkbox" id="e-selall"> 全选</label>
     </div>
-  </div>
+    <div id="e-sessions"></div>
+  </aside>
+  <section class="e-side">
+    <div class="card">
+      <div class="card-head"><h2>导出配置</h2><span class="hint" id="e-hint">已选 0 个会话</span></div>
+      <div class="f-grid2">
+        <label>导出格式
+          <select id="e-fmt">
+            <option value="json">JSON（结构化全量）</option>
+            <option value="html">HTML（自包含网页）</option>
+            <option value="txt">TXT（纯文本）</option>
+            <option value="csv">CSV（表格）</option>
+            <option value="xlsx">XLSX（Excel）</option>
+            <option value="markdown">Markdown</option>
+            <option value="toml">TOML</option>
+            <option value="sqlite">SQLite 数据库</option>
+          </select>
+        </label>
+        <label>打包方式
+          <select id="e-pack">
+            <option value="folder">仅文件夹（每会话一个子文件夹）</option>
+            <option value="single">单个 ZIP（全部会话打包一个）</option>
+            <option value="each">每会话一个 ZIP</option>
+          </select>
+        </label>
+        <label>开始日期<input type="date" id="e-start"></label>
+        <label>结束日期<input type="date" id="e-end"></label>
+      </div>
+      <div class="f-checks">
+        <label class="f-chk"><input type="checkbox" id="e-msg" checked> 💬 消息记录</label>
+        <label class="f-chk"><input type="checkbox" id="e-media"> 🖼 媒体图片（按需解密）</label>
+        <label class="f-chk"><input type="checkbox" id="e-ava"> 👤 联系人头像</label>
+      </div>
+      <div class="g-nav"><button id="e-run" class="btn btn-primary" disabled>📦 开始导出</button></div>
+    </div>
 
-  <div class="card">
-    <div class="card-head"><h2>导出内容</h2><span class="hint">勾选需要包含的部分</span></div>
-    <div class="f-checks">
-      <label class="f-chk"><input type="checkbox" id="e-msg" checked> 💬 消息记录</label>
-      <label class="f-chk"><input type="checkbox" id="e-media"> 🖼 媒体图片（按需解密）</label>
-      <label class="f-chk"><input type="checkbox" id="e-ava"> 👤 联系人头像</label>
+    <div class="card" id="e-progress-card" style="display:none">
+      <div class="progress"><div class="bar" id="e-bar" style="width:0%"></div></div>
     </div>
-    <div class="f-grid" style="margin-top:14px">
-      <label>导出格式<br>
-        <select id="e-fmt" class="f-input">
-          <option value="json">JSON（结构化全量，CipherTalk 兼容）</option>
-          <option value="html">HTML（自包含网页，可离线浏览）</option>
-          <option value="txt">TXT（纯文本）</option>
-          <option value="csv">CSV（表格，Excel 可开）</option>
-          <option value="xlsx">XLSX（Excel 工作簿）</option>
-          <option value="markdown">Markdown</option>
-          <option value="toml">TOML</option>
-          <option value="sqlite">SQLite 数据库</option>
-        </select>
-      </label>
-      <label>导出类型<br>
-        <select id="e-pack" class="f-input">
-          <option value="zip">📦 压缩包（推荐）</option>
-          <option value="folder">📂 文件夹（不打包）</option>
-        </select>
-      </label>
+
+    <div class="card e-logcard">
+      <div class="card-head"><h2>运行日志</h2></div>
+      <div class="console" id="e-log"></div>
+      <div id="e-result"></div>
     </div>
-    <div class="g-nav">
-      <button class="btn btn-primary" id="e-run">📦 开始导出</button>
-    </div>
-    <div id="e-progress" class="progress hidden"><div class="bar"></div></div>
-    <div id="e-log" class="console hidden"></div>
-    <div id="e-result"></div>
-  </div>
+  </section>
 </div>

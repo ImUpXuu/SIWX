@@ -48,8 +48,9 @@ def list_exports():
         for d in sorted(root.iterdir(), reverse=True):
             if d.is_dir():
                 files = [f.name for f in d.glob("*") if f.is_file()]
-                zips = [z for z in root.glob(d.name + "*.zip")]
-                out.append({"name": d.name, "files": files,
+                subs = [s.name for s in d.glob("*") if s.is_dir()]
+                zips = [z.name for z in root.glob(d.name + "*.zip")]
+                out.append({"name": d.name, "files": files, "dirs": subs,
                             "zips": [z.name for z in zips]})
     return jsonify({"exports": out[:30]})
 
