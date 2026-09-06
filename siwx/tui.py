@@ -8,10 +8,12 @@ import re
 
 from rich import box
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
+from rich.columns import Columns
 
 console = Console(
     theme=Theme({
@@ -109,3 +111,59 @@ def decrypt_summary(ok: int, failed: int, skipped: int, cached: int, ms: int, ou
         + (f" [warn]{skipped} 缺密钥[/]" if skipped else "")
         + f" [dim]({ms} ms) → {out}[/]"
     )
+
+
+# ── serve 模式状态栏 ─────────────────────────────────────────────────
+
+def make_status_bar(getter) -> Text:
+    """底部常驻状态栏。getter 返回 dict:
+    {wechat: str, wxid: str, keys: int, job: str, url: str}
+    """
+    t = Text()
+    t.append(" ● ", style="bold green")
+    t.append(getter.get("url", ""), style="bold cyan")
+    t.append("  │  ", style="dim")
+    t.append("微信: ", style="dim")
+    t.append(getter.get("wechat", "…"), style="bold")
+    t.append("  │  ", style="dim")
+    t.append("wxid: ", style="dim")
+    t.append(getter.get("wxid", "…"), style="bold yellow")
+    t.append("  │  ", style="dim")
+    t.append("密钥: ", style="dim")
+    t.append(str(getter.get("keys", "…")), style="bold green")
+    t.append("  │  ", style="dim")
+    t.append("任务: ", style="dim")
+    t.append(getter.get("job", "空闲"), style="bold magenta")
+    return t
+
+
+def run_live_status(getter, on_start):
+    """启动 Live 状态栏。getter 返回状态 dict；on_start 在 Live 就绪后回调。
+
+    用法（server.py）：
+        tui.run_live_status(getter_dict_fn, lambda: app.run(...))
+    """
+    import threading
+
+    console.print()
+    on_start()
+
+    def _render():
+        try:
+            return make_status_bar(getter())
+        except Exception:
+            return make_status_bar({})
+
+    with Live(
+        _render(),
+        console=console,
+        refresh_per_second=1,
+        vertical_overflow="visible",
+    ) as live:
+        import time
+        while True:
+            time.sleep(1)
+            try:
+                live.update(_render())
+            except Exception:
+                break
