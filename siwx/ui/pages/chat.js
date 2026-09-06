@@ -145,7 +145,7 @@ async function loadMessages(fresh) {
   } else {
     box.insertAdjacentHTML('afterbegin', html);
   }
-  earliest = data.messages.length ? data.messages[0].ts : earliest;
+  earliest = data.messages.length ? data.messages[data.messages.length - 1].ts : earliest;
   hasMore = data.has_more;
   return true;
 }

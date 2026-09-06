@@ -1,10 +1,10 @@
 {
-  "version": "0.2.4",
-  "date": "2026-09-06 18:30:00",
-  "notes": "聊天查看秒开(sessions只读session.db+messages SQL分页)；导出页日志可折叠+失败可见；侧边栏日志页；增量同步对齐auto速度",
+  "version": "0.2.5",
+  "date": "2026-09-06 20:00:00",
+  "notes": "聊天查看无限滚动修复(取oldest ts)；导出HTML/JSON时序正确；侧边栏日志页；增量同步速度对齐",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.4/stories-in-wx-v0.2.4-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.4-stories-in-wx-v0.2.4-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/stories-in-wx-v0.2.5-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5-stories-in-wx-v0.2.5-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.4/SHA256SUMS.txt"
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/SHA256SUMS.txt"
 }
