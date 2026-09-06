@@ -118,9 +118,10 @@ def cmd_mcp(_args) -> int:
 
 def main() -> int:
     import os
-    if os.name != "nt":
-        print("stories-in-wx 依赖 Windows 平台接口（微信进程读取 / DPAPI），"
-              "当前系统不受支持。macOS 版本仅为构建产物占位。")
+    import platform
+    # macOS 支持已通过 macos_lldb 策略实现
+    if platform.system() not in ("Windows", "Darwin"):
+        print("stories-in-wx 仅支持 Windows 和 macOS。")
         return 1
     ap = argparse.ArgumentParser(
         prog="siwx",
