@@ -1,10 +1,10 @@
 {
-  "version": "0.2.2",
-  "date": "2026-09-06 07:43:55",
-  "notes": "v0.2.2\n\n- 修复：双击 exe 输出目录错误（System32 拒绝访问）——输出固定在 exe 旁\n- 修复：导出媒体多进程刷屏/挂死（freeze_support）\n- 修复：frozen 模式 _paths 作用域错误\n- 其他：导出页会话搜索、聊天页一键跳转导出、打包类型选择（zip/文件夹）",
+  "version": "0.2.3",
+  "date": "2026-09-06 07:50:04",
+  "notes": "v0.2.3\n\n- 修复：输出目录彻底与 cwd 解耦（源码/打包均锚定应用根目录）",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.2/stories-in-wx-v0.2.2-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.2/stories-in-wx-v0.2.2-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.3/stories-in-wx-v0.2.3-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.3/stories-in-wx-v0.2.3-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.2/SHA256SUMS.txt"
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.3/SHA256SUMS.txt"
 }
