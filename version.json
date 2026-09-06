@@ -1,12 +1,12 @@
 {
-  "version": "0.3.1",
-  "date": "2026-09-06 14:39:08",
-  "notes": "v0.3.1: 流式导出优化 + macOS支持 + AGPL许可证\n\n性能优化:\n- sqlcipher.py: 流式解密 inline XOR + 进度降频, 195MB/s\n- export_stream.py: heapq.merge K路归并 + 增量写入\n- exporter.py: 双遍扫描 + 并行媒体解密 + 多选批量\n\nmacOS支持:\n- strategies/macos_lldb.py: LLDB断点抓passphrase + PBKDF2派生\n- strategies/__init__.py: 平台自动注册 + 修复use_memory跳过bug\n- discover.py: 跨平台进程/目录发现\n- cli.py: 支持Windows + macOS\n\n许可证与文档:\n- LICENSE: AGPL-3.0 + 不可商用条款\n- README.md: 贡献者(lcrworld-jtl) + AGPL + 免责声明\n- version.json: 0.3.1",
+  "version": "0.3.2",
+  "date": "2026-09-06 15:22:21",
+  "notes": "fix: 恢复原始解密逻辑 + 修复全局变量顺序bug + 文件日志\n\n- sqlcipher.py: 恢复到原始可用版本(fccfa23), 修复后续页跳过salt导致的损坏\n- server.py: 修复_job/_lock定义顺序(NameError 500), 添加RotatingFileLogger到logs/siwx.log\n- api_chat.py: _contact_names/schema错误降级处理",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.1/stories-in-wx-v0.3.1-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.1/stories-in-wx-v0.3.1-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.2/stories-in-wx-v0.3.2-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.2/stories-in-wx-v0.3.2-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.1/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.2/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
