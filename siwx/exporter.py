@@ -15,6 +15,7 @@ from pathlib import Path
 from siwx import media
 from siwx import paths as _paths
 from siwx.api_chat import build_messages, _contact_names
+from siwx.html_template import build_chat_data, render_html
 
 GENERATOR = "stories-in-wx"
 EXPORT_VERSION = "1.0"
@@ -218,130 +219,6 @@ def _write_xlsx(path: Path, msgs: list):
     wb.save(path)
 
 
-_HTML_TMPL = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{title} - 聊天记录</title>
-<style>
-:root {{ --bg:#eef1f6; --chat:#f7f8fa; --recv:#fff; --send:#e7f0ff; --text:#1a2027;
-        --sub:#6b7785; --border:#e8ebf0; --accent:#2563eb; --shadow:rgba(20,30,50,.07); }}
-[data-theme="dark"] {{ --bg:#0d1117; --chat:#0d1117; --recv:#1c232b; --send:#1e3a5f;
-        --text:#e6edf3; --sub:#8b98a5; --border:#2a313a; --shadow:rgba(0,0,0,.4); }}
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-       background:var(--bg); color:var(--text); line-height:1.5; }}
-.app {{ max-width:880px; margin:0 auto; padding:18px 16px 40px; }}
-.head {{ background:var(--recv); border:1px solid var(--border); border-radius:12px;
-        padding:16px 20px; margin-bottom:16px; box-shadow:0 1px 3px var(--shadow); }}
-.head h1 {{ font-size:18px; margin-bottom:6px; }}
-.head .meta {{ font-size:12.5px; color:var(--sub); line-height:1.8; }}
-.bar {{ display:flex; justify-content:space-between; align-items:center; margin:0 0 14px; }}
-.bar .count {{ font-size:12.5px; color:var(--sub); }}
-.bar button {{ border:1px solid var(--border); background:var(--recv); color:var(--text);
-               border-radius:8px; padding:5px 12px; cursor:pointer; font-size:12.5px; }}
-.day {{ text-align:center; color:var(--sub); font-size:12px; margin:16px 0 10px; }}
-.row {{ display:flex; gap:10px; margin:10px 0; align-items:flex-start; }}
-.row.me {{ flex-direction:row-reverse; }}
-.ava {{ width:38px; height:38px; border-radius:4px; flex:none; background:#c8cdd4; }}
-.col {{ max-width:70%; min-width:0; }}
-.name {{ font-size:12px; color:var(--sub); margin-bottom:3px; }}
-.bubble {{ padding:9px 13px; border-radius:6px; background:var(--recv);
-          border:1px solid var(--border); font-size:14px; white-space:pre-wrap;
-          word-break:break-word; }}
-.row.me .bubble {{ background:var(--send); }}
-img.pic {{ max-width:260px; max-height:340px; border-radius:8px; display:block;
-          cursor:zoom-in; margin:2px 0; }}
-.sys {{ text-align:center; color:var(--sub); font-size:12px; margin:8px 0; }}
-.tm {{ font-size:11px; color:var(--sub); margin:2px 4px; }}
-.quote {{ border-left:3px solid var(--accent); background:rgba(37,99,235,.06);
-         border-radius:6px; padding:6px 10px; margin-bottom:5px; font-size:12.5px; }}
-.quote .qn {{ color:var(--accent); font-weight:600; }}
-.linkcard {{ border:1px solid var(--border); border-radius:8px; padding:8px 12px;
-            margin-bottom:2px; }}
-.linkcard a {{ color:var(--accent); text-decoration:none; font-weight:600; }}
-.linkcard .u {{ font-size:11px; color:var(--sub); word-break:break-all; }}
-.miss {{ color:var(--sub); font-size:12.5px; }}
-</style>
-</head>
-<body>
-<div class="app">
-  <div class="head">
-    <h1 id="chatTitle">{title}</h1>
-    <div class="meta">{meta}</div>
-  </div>
-  <div class="bar">
-    <span class="count" id="cnt"></span>
-    <button onclick="const b=document.body;b.dataset.theme=b.dataset.theme==='dark'?'':'dark'">
-      ☾ 明暗切换</button>
-  </div>
-  <div id="list">{body}</div>
-</div>
-<script>
-document.getElementById('cnt').textContent = '共 {count} 条消息';
-document.querySelectorAll('img.pic').forEach(i => {{
-  i.addEventListener('click', () => window.open(i.src));
-}});
-</script>
-</body>
-</html>"""
-
-
-def _write_html(path: Path, session: dict, msgs: list, export_dir: Path,
-                want_avatars: bool):
-    import html as _h
-
-    def ava(username):
-        if want_avatars and username in session.get("_avatar_map", {}):
-            rel = session["_avatar_map"][username]
-            return f'<img class="ava" src="{_h.escape(rel)}" onerror="this.style.visibility=\'hidden\'">'
-        letter = _h.escape((username or "?")[:2].upper())
-        return f'<div class="ava" style="display:flex;align-items:center;justify-content:center;font-weight:700">{letter}</div>'
-
-    parts = []
-    last_day = ""
-    for m in msgs:
-        day = _fmt_time(m["createTime"])[:10]
-        if day != last_day:
-            parts.append(f'<div class="day">{day}</div>')
-            last_day = day
-        if m["localType"] in (10000, 10002):
-            parts.append(f'<div class="sys">{_h.escape(m["content"])}</div>')
-            continue
-        who = "me" if m["isSend"] else ""
-        sender = "我" if m["isSend"] else m["senderDisplayName"]
-        name_html = (f'<div class="name">{_h.escape(sender)}</div>'
-                     if session["isGroup"] and not m["isSend"] else "")
-        inner = _h.escape(m["content"])
-        if m.get("mediaFile"):
-            inner = f'<img class="pic" loading="lazy" src="{_h.escape(m["mediaFile"])}">'
-        elif m.get("quote"):
-            q = m["quote"]
-            inner = (f'<div class="quote"><span class="qn">{_h.escape(q["displayname"])}</span>'
-                     f'：{_h.escape(q["content"][:120])}</div>' + inner)
-        elif m.get("link"):
-            lk = m["link"]
-            u = _h.escape(lk.get("url") or "")
-            inner = (f'<div class="linkcard"><a href="{u}" target="_blank" rel="noreferrer">'
-                     f'{_h.escape(lk.get("title") or "链接")}</a>'
-                     f'<div class="u">{u[:110]}</div></div>' + inner)
-        parts.append(f"""
-<div class="row {who}">
-  {ava(m["senderUsername"] if not m["isSend"] else session["wxid"])}
-  <div class="col">{name_html}<div class="bubble">{inner}
-    <div class="tm">{_fmt_time(m["createTime"])}</div></div></div>
-</div>""")
-    meta = (f"微信号：{_h.escape(session['wxid'])} ｜ 类型：{_h.escape(session['type'])} ｜ "
-            f"消息数：{len(msgs)} ｜ 时间范围：{_fmt_time(session['firstTimestamp'])} ~ "
-            f"{_fmt_time(session['lastTimestamp'])} ｜ 导出：{GENERATOR} v{EXPORT_VERSION}")
-    path.write_text(_HTML_TMPL.format(title=_h.escape(session["displayName"]),
-                                      meta=meta, count=len(msgs),
-                                      body="".join(parts)), encoding="utf-8")
-
-
-# ── 主入口 ──────────────────────────────────────────────────────────
-
 def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                fmt: str, start_ts=None, end_ts=None,
                want_messages=True, want_media=True, want_avatars=True,
@@ -382,7 +259,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             session["_avatar_map"] = avatar_map
         stats_ava = len(avatar_map)
 
-        # 媒体（解密图片落盘到导出目录 —— 用户显式请求的导出产物）
+        # 媒体（解密图片落盘到导出目录）
         stats_media = 0
         if want_media and any(m.get("md5") or m.get("bubbleMd5") for m in msgs):
             progress(40, "解密媒体图片…")
@@ -406,7 +283,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         if fmt == "json":
             _write_json(out_file, session, content_msgs, export_dir)
         elif fmt == "html":
-            _write_html(out_file, session, content_msgs, export_dir, want_avatars)
+            chat_data = build_chat_data(session, content_msgs, avatar_map)
+            out_file.write_text(render_html(chat_data), encoding="utf-8")
         elif fmt == "txt":
             _write_txt(out_file, session, content_msgs)
         elif fmt == "csv":
@@ -422,7 +300,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         else:
             raise ValueError(f"未知格式: {fmt}")
 
-        # 打包：zip 模式打包后移除文件夹；文件夹模式保留目录
+        # 打包
         zip_path = None
         if pack == "zip":
             progress(94, "打包 zip…")
@@ -447,3 +325,5 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     finally:
         if not _ok:
             shutil.rmtree(export_dir, ignore_errors=True)
+
+
