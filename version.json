@@ -1,6 +1,6 @@
 {
   "version": "0.2.3",
-  "date": "2026-09-06 08:39:55",
+  "date": "2026-09-06 08:41:04",
   "notes": "fix: HTML 导出改为交互式查看器（数据驱动渲染），修复 frozen 路径/作用域/导入问题",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.3/stories-in-wx-v0.2.3-windows-x64.exe",
