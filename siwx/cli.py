@@ -123,7 +123,7 @@ def main() -> int:
                         help="并行解密进程数 (默认 CPU 核数, 上限 8)")
     common.add_argument("--no-cache", action="store_true",
                         help="忽略缓存强制重跑")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")
 
     p_auto = sub.add_parser("auto", parents=[common],
                             help="全自动：扫描 → 提取 → 保存 → 解密")
@@ -151,6 +151,10 @@ def main() -> int:
     p_serve.set_defaults(fn=cmd_serve)
 
     args = ap.parse_args()
+    if not getattr(args, "cmd", None):
+        # 裸跑（双击 exe）→ 默认启动 Web 控制台
+        return cmd_serve(argparse.Namespace(host="127.0.0.1", port=8787,
+                                            no_open=False))
     try:
         return args.fn(args)
     except KeyboardInterrupt:
