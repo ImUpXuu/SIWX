@@ -1,0 +1,47 @@
+<div class="guide">
+  <!-- 步骤指示 -->
+  <div class="g-steps">
+    <span class="g-chip" data-s="1">1 欢迎</span>
+    <span class="g-chip" data-s="2">2 选号</span>
+    <span class="g-chip" data-s="3">3 提取并解密</span>
+  </div>
+
+  <!-- 屏 1：欢迎与检测 -->
+  <section class="card g-screen" id="gs1">
+    <div class="step-tag">引导 · 1/3</div>
+    <h2 class="g-title">欢迎使用 stories-in-wx</h2>
+    <p class="dim g-desc">三步完成配置：选择微信号 → 一键提取密钥并解密 → 进入主界面。<br>
+       全程只读扫描微信进程，无需管理员；密钥经 DPAPI 加密保存，结果全部缓存，只跑一次。</p>
+    <div id="g-check" class="g-check">正在检测环境…</div>
+    <div class="g-nav">
+      <button class="btn btn-primary" id="g-start" disabled>开始配置 →</button>
+    </div>
+  </section>
+
+  <!-- 屏 2：选择微信号 -->
+  <section class="card g-screen hidden" id="gs2">
+    <div class="step-tag step-tag-blue">引导 · 2/3</div>
+    <h2 class="g-title">选择微信号</h2>
+    <p class="dim g-desc">已列出本机全部数据目录；带"缓存 ✓"的账号之前配置过，重跑也是秒回。</p>
+    <div id="g-accounts" class="accounts"><div class="empty">检测中…</div></div>
+    <div class="g-nav">
+      <button class="btn" data-goto="1">← 上一步</button>
+      <button class="btn btn-primary" id="g-to3" disabled>下一步 →</button>
+    </div>
+  </section>
+
+  <!-- 屏 3：提取并解密（合并） -->
+  <section class="card g-screen hidden" id="gs3">
+    <div class="step-tag">引导 · 3/3</div>
+    <h2 class="g-title">提取密钥并解密</h2>
+    <p class="dim g-desc" id="g3-hint">一键完成：提取数据库密钥 → 解密全部数据库。结果自动缓存。</p>
+    <div class="g-nav">
+      <button class="btn" data-goto="2">← 上一步</button>
+      <button class="btn btn-primary" id="g-run">⚡ 提取并解密</button>
+      <button class="btn hidden" id="g-finish">✔ 完成并进入主界面</button>
+    </div>
+    <div id="g3-progress" class="progress hidden"><div class="bar"></div></div>
+    <div id="g3-log" class="console hidden"></div>
+    <div id="g3-result"></div>
+  </section>
+</div>

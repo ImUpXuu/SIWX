@@ -1,0 +1,15 @@
+.settings { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+.s-card { /* 复用全局 card */ }
+.s-actions { display: flex; flex-direction: column; gap: 14px; }
+.s-item {
+  display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center;
+  border: 2px dashed rgba(43,98,181,.35); border-radius: 12px; padding: 12px 14px;
+}
+.s-item b { font-size: 13.5px; }
+.s-item span { font-size: 12px; }
+@media (max-width: 700px) {
+  .s-item { grid-template-columns: 1fr; }
+}
+.ov-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
+          padding: 6px 0; border-top: 2px dashed rgba(43,98,181,.25); font-size: 13px; }
+.ov-row:first-child { border-top: none; }

@@ -1,0 +1,127 @@
+/* 聊天查看 —— 尽量还原原版微信视觉：
+   会话列表白底灰选中 / 消息区浅灰底 / 对方白气泡·我方绿气泡(#95ec69) /
+   细边框 1px #dcdcdc / 居中灰色时间轴 / 群聊头像上方灰色昵称 */
+.chat-wrap {
+  display: grid; grid-template-columns: 280px 1fr; gap: 0;
+  background: #f0f0f0;
+  border: 1px solid #dcdcdc; border-radius: 8px;
+  overflow: hidden; height: calc(100vh - 52px - 40px); min-height: 480px;
+}
+.c-list { background: #f7f7f7; border-right: 1px solid #dcdcdc;
+          display: flex; flex-direction: column; min-height: 0; }
+.c-top { padding: 10px; display: flex; flex-direction: column; gap: 8px;
+         border-bottom: 1px solid #e0e0e0; }
+.c-select, .c-search {
+  font-family: inherit; font-size: 13px; color: #191919;
+  border: 1px solid #d5d5d5; border-radius: 4px;
+  background: #fff; padding: 6px 9px; outline: none; width: 100%;
+}
+.c-select:focus, .c-search:focus { border-color: var(--blue); }
+.c-sessions { flex: 1; overflow-y: auto; }
+.sess {
+  display: flex; gap: 10px; align-items: center;
+  padding: 9px 12px; cursor: pointer; border-bottom: 1px solid #f0f0f0;
+}
+.sess:hover { background: #f0f0f0; }
+.sess.sel { background: #c7c7c7; }
+.s-ava {
+  width: 38px; height: 38px; border-radius: 4px; flex: none;
+  background: #c0c4cc; color: #fff; font-weight: 700; font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+}
+.s-body { min-width: 0; flex: 1; line-height: 1.35; }
+.s-body b { font-size: 14px; color: #191919; display: block;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-body span { font-size: 12px; color: #9b9b9b; display: block;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-meta { text-align: right; flex: none; }
+.s-meta .tm { font-size: 11px; color: #b2b2b2; display: block; }
+.s-meta .ct { font-size: 10.5px; color: #b2b2b2; }
+
+/* 消息区 */
+.c-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #f5f5f5; }
+.c-head { padding: 11px 16px; border-bottom: 1px solid #dcdcdc; background: #f7f7f7;
+          display: flex; align-items: center; gap: 10px; }
+.c-head b { font-size: 15px; color: #191919; }
+.c-sub { font-size: 12px; color: #9b9b9b; }
+.c-back { display: none; border: 1px solid #d5d5d5; background: #fff;
+          border-radius: 4px; cursor: pointer; font-size: 14px; padding: 2px 10px; }
+.c-msgs { flex: 1; overflow-y: auto; padding: 16px 22px; display: flex; flex-direction: column; }
+
+/* 居中时间轴 */
+.m-time-chip {
+  text-align: center; color: #b2b2b2; font-size: 12px; margin: 10px 0 12px;
+}
+/* 系统消息 */
+.m-row.sys { display: flex; justify-content: center; margin: 6px 0; }
+.m-row.sys .m-bubble {
+  background: #dadada; color: #fff; font-size: 12px;
+  border-radius: 3px; padding: 3px 8px; border: none; box-shadow: none;
+}
+/* 气泡行 */
+.m-row { display: flex; gap: 10px; margin: 6px 0; align-items: flex-start; }
+.m-row.me { flex-direction: row-reverse; }
+.m-ava {
+  width: 38px; height: 38px; border-radius: 4px; flex: none; margin-top: 2px;
+  background: #c0c4cc; color: #fff; font-size: 13px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.m-row.me .m-ava { background: #55b6f0; }
+.m-col { max-width: 62%; min-width: 0; }
+.m-name { font-size: 12px; color: #9b9b9b; margin: 0 2px 3px; }
+.m-bubble {
+  padding: 9px 13px; border-radius: 4px; font-size: 14px; color: #191919;
+  background: #fff; border: 1px solid #e3e3e3;
+  word-break: break-word; white-space: pre-wrap; line-height: 1.55;
+  position: relative; display: inline-block; text-align: left;
+}
+.m-row.me .m-bubble { background: #95ec69; border-color: #8ede5f; }
+.m-img { max-width: 220px; max-height: 300px; border-radius: 6px;
+         display: block; cursor: zoom-in; }
+.m-retry { font-size: 12px; color: var(--muted); cursor: pointer;
+           border-bottom: 1px dashed var(--muted); }
+.m-retry:hover { color: var(--blue); border-color: var(--blue); }
+/* 真实头像（head_image.db），失败回退字母 */
+.m-ava-box { width: 38px; height: 38px; border-radius: 4px; flex: none;
+             margin-top: 2px; position: relative; background: #c0c4cc; }
+.m-ava-letter { position: absolute; inset: 0; display: flex;
+                align-items: center; justify-content: center;
+                color: #fff; font-size: 13px; font-weight: 700; }
+.m-ava-img { position: absolute; inset: 0; width: 100%; height: 100%;
+             object-fit: cover; border-radius: 4px; }
+/* 引用块 */
+.m-quote { border-left: 3px solid #06ae56; background: rgba(6,174,86,.07);
+           border-radius: 4px; padding: 5px 9px; margin-bottom: 5px;
+           font-size: 12.5px; }
+.m-quote-n { color: #06ae56; font-weight: 600; }
+.m-quote-t { color: #576b95; overflow: hidden; text-overflow: ellipsis;
+             display: -webkit-box; -webkit-line-clamp: 3;
+             -webkit-box-orient: vertical; }
+/* 链接卡片 */
+.m-link { border: 1px solid #e3e3e3; border-radius: 6px; padding: 7px 10px;
+          margin-bottom: 4px; background: #fafafa; }
+.m-link a { color: #576b95; text-decoration: none; font-weight: 600;
+            font-size: 13.5px; }
+.m-link-host { font-size: 11px; color: #b2b2b2; margin-top: 2px; }
+/* 气泡小三角 */
+.m-bubble::before {
+  content: ""; position: absolute; top: 12px; left: -5px;
+  width: 8px; height: 8px; background: inherit;
+  border-left: 1px solid #e3e3e3; border-bottom: 1px solid #e3e3e3;
+  transform: rotate(45deg);
+}
+.m-row.me .m-bubble::before {
+  left: auto; right: -5px;
+  border: none; border-right: 1px solid #8ede5f; border-top: 1px solid #8ede5f;
+}
+.c-loading { text-align: center; color: #b2b2b2; font-size: 12px; padding: 8px 0; }
+
+/* 响应式：窄屏单栏，点会话进入聊天，← 返回 */
+@media (max-width: 760px) {
+  .chat-wrap { grid-template-columns: 1fr; border: none; border-radius: 0; }
+  .c-main { display: none; }
+  .chat-wrap.open .c-main { display: flex; }
+  .chat-wrap.open .c-list { display: none; }
+  .c-back { display: block; }
+  .m-col { max-width: 78%; }
+}

@@ -1,0 +1,33 @@
+<div class="settings">
+  <div class="card">
+    <div class="card-head"><h2>缓存状态</h2><span class="hint">密钥与解密产物都有缓存，重跑不会重复计算</span></div>
+    <div id="s-overview">加载中…</div>
+  </div>
+
+  <div class="card s-card">
+    <div class="card-head"><h2>清除缓存</h2><span class="hint">清除后下次运行会重新提取/解密</span></div>
+    <div class="s-actions">
+      <div class="s-item">
+        <b>清除解密输出</b>
+        <span class="dim">删除 output 目录下的明文数据库（密钥保留，重跑解密即可恢复）</span>
+        <button class="btn btn-danger" id="s-clear-output">🗑 清除解密输出</button>
+      </div>
+      <div class="s-item">
+        <b>清除密钥库</b>
+        <span class="dim">删除 DPAPI 加密的密钥缓存（下次提取需微信在线重新收割）</span>
+        <button class="btn btn-danger" id="s-clear-keys">🗑 清除密钥库</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card s-card">
+    <div class="card-head"><h2>引导</h2><span class="hint">首次启动的配置流程，可随时重新运行</span></div>
+    <div class="s-actions">
+      <div class="s-item">
+        <b>重新运行引导</b>
+        <span class="dim">回到"欢迎 → 选号 → 提取 → 解密"的分步引导</span>
+        <button class="btn btn-primary" id="s-rerun-guide">🧭 重新运行引导</button>
+      </div>
+    </div>
+  </div>
+</div>
