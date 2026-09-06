@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+output/
+exports/
+media_research/
+dist/
+build/
+*.log
+blobs.txt
+*.spec.bak
+.DS_Store

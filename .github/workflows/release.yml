@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: PyInstaller 打包 (exe)
+        run: pyinstaller --clean -y packaging/siwx-win.spec
+      - name: 重命名产物
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Move-Item dist/stories-in-wx.exe "dist/stories-in-wx-${tag}-windows-x64.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stories-in-wx-windows
+          path: dist/*.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: PyInstaller 打包 (.app)
+        run: pyinstaller --clean -y packaging/siwx-mac.spec
+      - name: 生成 DMG
+        run: |
+          mkdir -p dist/dmg-staging
+          cp -R dist/stories-in-wx.app dist/dmg-staging/
+          ln -s /Applications dist/dmg-staging/Applications
+          TAG="${{ github.ref_name }}"
+          hdiutil create -volname "stories-in-wx" \
+            -srcfolder dist/dmg-staging \
+            -ov -format UDZO \
+            "dist/stories-in-wx-${TAG}-macos.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stories-in-wx-macos
+          path: dist/*.dmg
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 整理产物
+        run: |
+          mkdir -p release
+          cp artifacts/stories-in-wx-windows/*.exe release/
+          cp artifacts/stories-in-wx-macos/*.dmg release/
+          ls -la release/
+      - name: 计算 SHA-256
+        working-directory: release
+        run: |
+          for f in *; do sha256sum "$f" >> SHA256SUMS.txt; done
+          cat SHA256SUMS.txt
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.exe
+            release/*.dmg
+            release/SHA256SUMS.txt
+          generate_release_notes: true
+
+  version-json:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: 生成 version.json（自动更新用）
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          VERSION="${TAG#v}"
+          NOTES=$(git tag -l "$TAG" --format='%(contents)' | head -c 2000)
+          python3 - "$VERSION" "$NOTES" "$REPO" << 'PY'
+          import json, sys, datetime
+          version, notes, repo = sys.argv[1], sys.argv[2].strip(), sys.argv[3]
+          base = f"https://github.com/{repo}/releases/download/v{version}"
+          data = {
+              "version": version,
+              "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+              "notes": notes or f"stories-in-wx {version}",
+              "assets": {
+                  "windows": f"{base}/stories-in-wx-v{version}-windows-x64.exe",
+                  "macos_dmg": f"{base}/stories-in-wx-v{version}-macos.dmg",
+              },
+              "sha256": f"{base}/SHA256SUMS.txt",
+          }
+          with open("version.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+          PY
+      - name: 提交 version.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.json
+          if git diff --cached --quiet; then
+            echo "version.json 无变化"
+          else
+            git commit -m "chore(release): 更新 version.json → ${{ github.ref_name }}"
+            git push origin main
+          fi

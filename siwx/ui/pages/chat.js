@@ -1,0 +1,180 @@
+/* 聊天查看 —— 原版微信风格；滚动到顶部自动加载更早消息 */
+const { esc, fetchJSON, fmtTs } = window.SX;
+
+let account = null;
+let sessions = [];
+let currentChat = null;
+let earliest = 0;
+let hasMore = false;
+let loading = false;
+
+function el(id) { return document.getElementById(id); }
+
+async function init() {
+  const sel = el('c-account');
+  try {
+    const { accounts } = await fetchJSON('/api/chat/accounts');
+    if (!accounts.length) {
+      el('c-sessions').innerHTML =
+        '<div class="empty">还没有解密产物 — 请先在"引导设置"完成解密</div>';
+      return;
+    }
+    sel.innerHTML = accounts.map(a =>
+      `<option value="${esc(a.wxid)}">${esc(a.wxid)}</option>`).join('');
+    account = accounts[0].wxid;
+    sel.addEventListener('change', () => { account = sel.value; loadSessions(); });
+    await loadSessions();
+  } catch (e) {
+    el('c-sessions').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+
+  el('c-search').addEventListener('input', () => renderSessions(el('c-search').value));
+  el('c-back').addEventListener('click', () => el('chat-wrap').classList.remove('open'));
+  // 跳转导出页并预选当前会话
+  el('c-export').addEventListener('click', () => {
+    if (!currentChat) { window.alert('先在左侧打开一个会话'); return; }
+    sessionStorage.setItem('siwx-export-preset', JSON.stringify({
+      account, chat: currentChat.username, display: currentChat.display,
+    }));
+    location.hash = '#/export';
+  });
+  // 滚动到顶部自动加载更早消息
+  el('c-msgs').addEventListener('scroll', async () => {
+    const box = el('c-msgs');
+    if (box.scrollTop <= 4 && hasMore && !loading && currentChat) {
+      loading = true;
+      const keep = box.scrollHeight;
+      box.insertAdjacentHTML('afterbegin', '<div class="c-loading">加载更早消息…</div>');
+      await loadMessages(false);
+      const tip = box.querySelector('.c-loading');
+      if (tip) tip.remove();
+      box.scrollTop = box.scrollHeight - keep;   // 保持视口位置
+      loading = false;
+    }
+  });
+}
+
+async function loadSessions() {
+  el('c-sessions').innerHTML = '<div class="empty">加载会话…</div>';
+  const { sessions: ss } = await fetchJSON(
+    `/api/chat/sessions?account=${encodeURIComponent(account)}`);
+  sessions = ss;
+  renderSessions('');
+}
+
+function renderSessions(kw) {
+  const kwL = (kw || '').toLowerCase();
+  const list = sessions.filter(s =>
+    !kwL || s.display.toLowerCase().includes(kwL) || s.username.toLowerCase().includes(kwL));
+  el('c-sessions').innerHTML = list.length ? list.map(s => `
+    <div class="sess ${currentChat && currentChat.username === s.username ? 'sel' : ''}" data-u="${esc(s.username)}">
+      <div class="s-ava">${esc(s.display.slice(0, 2).toUpperCase())}</div>
+      <div class="s-body"><b>${esc(s.display)}</b><span>${esc(s.preview || `${s.msg_count} 条消息`)}</span></div>
+      <div class="s-meta"><span class="tm">${fmtTs(s.last_time)}</span><span class="ct">${s.msg_count} 条</span></div>
+    </div>`).join('')
+    : '<div class="empty">没有匹配的会话</div>';
+  el('c-sessions').querySelectorAll('.sess').forEach(n => {
+    n.addEventListener('click', () => {
+      const s = sessions.find(x => x.username === n.dataset.u);
+      openChat(s);
+    });
+  });
+}
+
+async function openChat(s) {
+  currentChat = s;
+  earliest = 0;
+  hasMore = false;
+  el('chat-wrap').classList.add('open');
+  el('c-title').textContent = s.display;
+  el('c-sub').textContent = s.is_group ? '群聊' : '';
+  el('c-msgs').innerHTML = '<div class="c-loading">加载消息…</div>';
+  el('c-sessions').querySelectorAll('.sess').forEach(n =>
+    n.classList.toggle('sel', n.dataset.u === s.username));
+  await loadMessages(true);
+}
+
+async function loadMessages(fresh) {
+  const s = currentChat;
+  if (!s) return false;
+  const url = `/api/chat/messages?account=${encodeURIComponent(account)}` +
+    `&chat=${encodeURIComponent(s.username)}` +
+    (fresh || !earliest ? '' : `&before=${earliest}`);
+  const data = await fetchJSON(url);
+  const box = el('c-msgs');
+  const html = data.messages.map((m, i) => {
+    // 原版微信：与上一条间隔 >5 分钟时居中显示时间
+    const prev = i > 0 ? data.messages[i - 1] : null;
+    const showTime = fresh || i > 0 || !earliest
+      ? (!prev || m.ts - prev.ts > 300)
+      : false;
+    return (showTime ? `<div class="m-time-chip">${fmtTs(m.ts)}</div>` : '') + bubble(m);
+  }).join('');
+  if (fresh) {
+    box.innerHTML = html || '<div class="empty">这个会话没有消息</div>';
+    box.scrollTop = box.scrollHeight;
+  } else {
+    box.insertAdjacentHTML('afterbegin', html);
+  }
+  earliest = data.messages.length ? data.messages[0].ts : earliest;
+  hasMore = data.has_more;
+  return true;
+}
+
+function avaHtml(username, letters) {
+  const src = `/api/chat/avatar?account=${encodeURIComponent(account)}` +
+              `&username=${encodeURIComponent(username)}`;
+  return `<div class="m-ava-box"><span class="m-ava-letter">${esc(letters)}</span>` +
+         `<img class="m-ava-img" loading="lazy" src="${src}" onerror="this.remove()"></div>`;
+}
+
+function bubble(m) {
+  if (m.type === 10000 || m.type === 10002) {
+    return `<div class="m-row sys"><div class="m-bubble">${esc(m.text)}</div></div>`;
+  }
+  const who = m.is_me ? 'me' : '';
+  const avaUser = m.is_me ? account : (m.sender_wxid || currentChat.username);
+  const ava = avaHtml(avaUser, (m.sender_name || '?').slice(0, 2).toUpperCase());
+  const name = (!m.is_me && currentChat && currentChat.is_group && m.sender_name)
+    ? `<div class="m-name">${esc(m.sender_name)}</div>` : '';
+  // 图片消息：按需解密接口直出（内存缓存，不落盘）；三级来源带消息定位。
+  // 失败占位可点击重试（在微信中打开该图片下载原图后，点一下即可出图）
+  let inner = '';
+  if (m.kind === 'quote' && m.quote) {
+    inner = `<div class="m-quote"><div class="m-quote-n">${esc(m.quote.displayname)}</div>` +
+            `<div class="m-quote-t">${esc(m.quote.content)}</div></div>` + esc(m.text);
+  } else if (m.kind === 'link' && m.link) {
+    const url = m.link.url || '';
+    const full = url.startsWith('http') ? url : 'https://' + url;
+    let host = '';
+    try { host = new URL(full).hostname; } catch (e) {}
+    inner = `<div class="m-link"><a href="${esc(full)}" target="_blank" rel="noreferrer">${esc(m.link.title)}</a>` +
+            (host ? `<div class="m-link-host">${esc(host)}</div>` : '') + `</div>`;
+  } else if (m.kind === 'image') {
+    const src = `/api/chat/media/image?account=${encodeURIComponent(account)}` +
+                (m.md5 ? `&md5=${encodeURIComponent(m.md5)}` : '') +
+                (m.bubble_md5 ? `&bubble_md5=${encodeURIComponent(m.bubble_md5)}` : '') +
+                `&chat=${encodeURIComponent(currentChat.username)}` +
+                `&local_id=${m.id || 0}&ts=${m.ts || 0}`;
+    const retrySrc = src + '&r=' + Date.now();
+    inner = `<img class="m-img" loading="lazy" src="${src}" alt="图片"
+              onclick="window.open(this.src + '&hq=1')"
+              onerror="SX.imgFallback(this, '${esc(retrySrc)}')">`;
+  } else if (m.kind === 'sticker') {
+    inner = '[动画表情]';
+  } else {
+    inner = esc(m.text);
+  }
+  return `
+    <div class="m-row ${who}">
+      ${ava}
+      <div class="m-col">
+        ${name}
+        <div class="m-time">${fmtTs(m.ts)}</div>
+        <div class="m-bubble">${inner}</div>
+      </div>
+    </div>`;
+}
+
+export function destroy() { /* 无常驻定时器 */ }
+export { init };

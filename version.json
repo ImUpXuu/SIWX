@@ -1,0 +1,10 @@
+{
+  "version": "0.2.0",
+  "date": "2026-09-06 12:00:00",
+  "notes": "stories-in-wx 0.2.0：全自动密钥提取与解密、聊天查看（引用/链接/头像/图片解密）、多格式导出。",
+  "assets": {
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.0/stories-in-wx-v0.2.0-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.0/stories-in-wx-v0.2.0-macos.dmg"
+  },
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.0/SHA256SUMS.txt"
+}
