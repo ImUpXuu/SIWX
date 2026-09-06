@@ -1,7 +1,10 @@
 <div class="chat-wrap" id="chat-wrap">
   <aside class="c-list">
     <div class="c-top">
-      <select id="c-account" class="c-select"></select>
+      <div class="c-top-row">
+        <select id="c-account" class="c-select"></select>
+        <button id="c-refresh" class="c-refresh" title="刷新缓存">⟳</button>
+      </div>
       <input id="c-search" class="c-search" placeholder="搜索会话…">
     </div>
     <div id="c-sessions" class="c-sessions"><div class="empty">加载中…</div></div>

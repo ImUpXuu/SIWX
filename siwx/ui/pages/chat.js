@@ -30,6 +30,13 @@ async function init() {
 
   el('c-search').addEventListener('input', () => renderSessions(el('c-search').value));
   el('c-back').addEventListener('click', () => el('chat-wrap').classList.remove('open'));
+  // 刷新缓存：清空前端缓存重新拉取（不清后端解密缓存）
+  el('c-refresh').addEventListener('click', async () => {
+    sessions = [];
+    currentChat = null;
+    el('c-sessions').innerHTML = '<div class="empty">刷新中…</div>';
+    await loadSessions();
+  });
   // 跳转导出页并预选当前会话
   el('c-export').addEventListener('click', () => {
     if (!currentChat) { window.alert('先在左侧打开一个会话'); return; }
@@ -165,13 +172,19 @@ function bubble(m) {
   } else {
     inner = esc(m.text);
   }
+  // 引用块
+  let quoteHtml = '';
+  if (m.quote) {
+    quoteHtml = `<div class="m-quote"><div class="m-quote-n">${esc(m.quote.displayname)}</div>` +
+                `<div class="m-quote-t">${esc(m.quote.content)}</div></div>`;
+  }
   return `
     <div class="m-row ${who}">
       ${ava}
       <div class="m-col">
         ${name}
         <div class="m-time">${fmtTs(m.ts)}</div>
-        <div class="m-bubble">${inner}</div>
+        <div class="m-bubble">${quoteHtml}${inner}</div>
       </div>
     </div>`;
 }
