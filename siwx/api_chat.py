@@ -17,7 +17,8 @@ from siwx import media
 def _log(msg: str) -> None:
     """api_chat 模块的轻量日志（同步 API 端点用，不写任务缓冲）。"""
     try:
-        _current_app.logger.info(msg)
+        import logging
+        logging.getLogger("siwx").info(msg)
     except Exception:
         pass
 
@@ -59,22 +60,34 @@ def _contact_names(acc_dir: Path) -> dict:
     names = {}
     if not p.is_file():
         return names
-    conn = sqlite3.connect(p)
     try:
-        for un, remark, nick, alias in conn.execute(
-                "SELECT username, remark, nick_name, alias FROM contact"):
-            un = (un or "").strip()
-            if not un:
-                continue
-            best = un
-            for v in (remark, nick, alias):
-                v = (v or "").strip()
-                if v and v != un and "\ufffd" not in v:
-                    best = v
-                    break
-            names[un] = best
-    finally:
-        conn.close()
+        conn = sqlite3.connect(p)
+        try:
+            for un, remark, nick, alias in conn.execute(
+                    "SELECT username, remark, nick_name, alias FROM contact"):
+                un = (un or "").strip()
+                if not un:
+                    continue
+                best = un
+                for v in (remark, nick, alias):
+                    v = (v or "").strip()
+                    if v and v != un and "\ufffd" not in v:
+                        best = v
+                        break
+                names[un] = best
+        except sqlite3.Error:
+            # schema 不匹配 → 降级到仅 username
+            try:
+                for (un,) in conn.execute("SELECT username FROM contact"):
+                    if (un or "").strip():
+                        names[(un or "").strip()] = (un or "").strip()
+            except sqlite3.Error:
+                pass
+        finally:
+            conn.close()
+    except Exception:
+        # 数据库损坏 / 无法打开 → 返回空（不阻塞会话列表）
+        pass
     return names
 
 
@@ -146,7 +159,13 @@ def sessions():
     if not (acc / "message").is_dir():
         return jsonify({"error": "账号不存在或未解密"}), 404
 
-    names = _contact_names(acc)
+    try:
+        names = _contact_names(acc)
+    except Exception as e:
+        # 联系人读取失败不应阻塞会话列表
+        _log(f"[sessions] _contact_names 失败: {e}")
+        names = {}
+
     items = {}
 
     sdb = acc / "session" / "session.db"
@@ -160,7 +179,13 @@ def sessions():
                     items[un] = {"username": un, "summary": (summary or "").strip(),
                                  "last_time": ts or 0}
         except sqlite3.Error:
-            pass
+            # SessionTable 损坏 → 尝试 Name2Id
+            try:
+                for (un,) in conn.execute("SELECT user_name FROM Name2Id"):
+                    if un and un not in items:
+                        items[un] = {"username": un, "summary": "", "last_time": 0}
+            except sqlite3.Error:
+                pass
         conn.close()
 
     if not items:
@@ -179,10 +204,10 @@ def sessions():
     for it in items.values():
         un = (it.get("username") or "").strip()
         if not un:
-            continue  # 跳过无用户名的脏数据
+            continue
         display = (names.get(un) or un).strip()
         if not display:
-            continue  # 跳过名称为空的脏数据
+            continue
         out.append({
             "username": un, "display": display,
             "is_group": un.endswith("@chatroom"),

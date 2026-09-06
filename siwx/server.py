@@ -1,9 +1,12 @@
 """Web 控制台：Flask 壳 —— 页面路由 + 任务槽；业务 API 在 api_*.py 模块化蓝图中。"""
+import logging
+import os
 import sys
 import threading
 import time
 import webbrowser
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -12,6 +15,32 @@ from siwx import extract, keystore
 from siwx import paths as _paths
 from siwx.discover import find_wechat_data_dirs, find_wechat_pids, wxid_of
 from siwx.sqlcipher import collect_db_files
+
+
+# ── 文件日志（详细）──────────────────────────────────────────────
+def _setup_file_logger():
+    log_dir = _paths.app_root() / "logs"
+    log_dir.mkdir(exist_ok=True)
+    logger = logging.getLogger("siwx")
+    logger.setLevel(logging.DEBUG)
+    # 避免重复添加
+    if logger.handlers:
+        return logger
+    fh = RotatingFileHandler(log_dir / "siwx.log", maxBytes=10 * 1024 * 1024,
+                              backupCount=5, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(fh)
+    # 控制台也输出 INFO+
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(ch)
+    return logger
+
+_siwx_logger = _setup_file_logger()
 
 
 def _ui_dir() -> Path:
@@ -37,28 +66,30 @@ app.register_blueprint(export_bp)
 app.register_blueprint(mcp_bp)
 app.register_blueprint(update_bp)
 
+
+# ── 全局状态（必须在路由和错误处理之前定义）──────────────────────
+_lock = threading.Lock()
 _job = {"running": False, "mode": None, "done": False, "ok": False,
         "logs": [], "report": None}
-_lock = threading.Lock()
 _LOG_RING: list = []          # 环形日志缓冲（供日志页展示）
 _LOG_RING_MAX = 2000
 
 
-def _log(msg: str) -> None:
-    """写入任务日志 + 全局环形缓冲。"""
+# ── 全局错误处理：确保所有异常都有日志 + JSON 响应 ──────────────
+@app.errorhandler(Exception)
+def _handle_exception(e):
+    """未捕获异常 → 记录日志 + 返回 JSON（避免白屏 500）。"""
+    import traceback
+    tb = traceback.format_exc()
+    _siwx_logger.error(f"未捕获异常: {e}\n{tb}")
     with _lock:
-        ts = int(time.time() * 1000)
-        _job["logs"].append([ts, msg])
-        _LOG_RING.append([ts, msg])
-        if len(_LOG_RING) > _LOG_RING_MAX:
-            del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
-
-
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+        _job["logs"].append([int(time.time() * 1000), f"[错误] {type(e).__name__}: {e}"])
+    return jsonify({"error": f"{type(e).__name__}: {e}", "traceback": tb}), 500
 
 
 def _log(msg: str) -> None:
+    """写入任务日志 + 全局环形缓冲 + 文件日志。"""
+    _siwx_logger.info(msg)
     with _lock:
         ts = int(time.time() * 1000)
         _job["logs"].append([ts, msg])
@@ -67,6 +98,10 @@ def _log(msg: str) -> None:
         _LOG_RING.append([ts, msg])
         if len(_LOG_RING) > _LOG_RING_MAX:
             del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
