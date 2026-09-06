@@ -36,6 +36,18 @@ app.register_blueprint(export_bp)
 _job = {"running": False, "mode": None, "done": False, "ok": False,
         "logs": [], "report": None}
 _lock = threading.Lock()
+_LOG_RING: list = []          # 环形日志缓冲（供日志页展示）
+_LOG_RING_MAX = 2000
+
+
+def _log(msg: str) -> None:
+    """写入任务日志 + 全局环形缓冲。"""
+    with _lock:
+        ts = int(time.time() * 1000)
+        _job["logs"].append([ts, msg])
+        _LOG_RING.append([ts, msg])
+        if len(_LOG_RING) > _LOG_RING_MAX:
+            del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
 
 
 def _now_ms() -> int:
@@ -44,9 +56,13 @@ def _now_ms() -> int:
 
 def _log(msg: str) -> None:
     with _lock:
-        _job["logs"].append([_now_ms(), msg])
+        ts = int(time.time() * 1000)
+        _job["logs"].append([ts, msg])
         if len(_job["logs"]) > 1200:
             del _job["logs"][:400]
+        _LOG_RING.append([ts, msg])
+        if len(_LOG_RING) > _LOG_RING_MAX:
+            del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
 
 
 def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
@@ -230,14 +246,11 @@ def run():
     return jsonify({"started": True})
 
 
-@app.get("/api/job")
-def job():
+@app.get("/api/logs")
+def api_logs():
+    """返回环形日志缓冲（供日志页展示）。"""
     with _lock:
-        return jsonify({
-            "running": _job["running"], "mode": _job["mode"],
-            "done": _job["done"], "ok": _job["ok"],
-            "logs": _job["logs"], "report": _job["report"],
-        })
+        return jsonify({"logs": _LOG_RING})
 
 
 def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
