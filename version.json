@@ -1,7 +1,7 @@
 {
   "version": "0.3.1",
-  "date": "2026-09-06 23:00:00",
-  "notes": "v0.3.1: 流式导出性能优化(195MB/s) + 自动更新体系(Win/Mac) + macOS LLDB密钥提取 + AGPL-3.0许可证 + 贡献者",
+  "date": "2026-09-06 14:39:08",
+  "notes": "v0.3.1: 流式导出优化 + macOS支持 + AGPL许可证\n\n性能优化:\n- sqlcipher.py: 流式解密 inline XOR + 进度降频, 195MB/s\n- export_stream.py: heapq.merge K路归并 + 增量写入\n- exporter.py: 双遍扫描 + 并行媒体解密 + 多选批量\n\nmacOS支持:\n- strategies/macos_lldb.py: LLDB断点抓passphrase + PBKDF2派生\n- strategies/__init__.py: 平台自动注册 + 修复use_memory跳过bug\n- discover.py: 跨平台进程/目录发现\n- cli.py: 支持Windows + macOS\n\n许可证与文档:\n- LICENSE: AGPL-3.0 + 不可商用条款\n- README.md: 贡献者(lcrworld-jtl) + AGPL + 免责声明\n- version.json: 0.3.1",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.1/stories-in-wx-v0.3.1-windows-x64.exe",
     "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.1/stories-in-wx-v0.3.1-macos.dmg"
