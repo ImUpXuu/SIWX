@@ -1,7 +1,7 @@
 {
   "version": "0.2.0",
-  "date": "2026-09-06 12:00:00",
-  "notes": "stories-in-wx 0.2.0：全自动密钥提取与解密、聊天查看（引用/链接/头像/图片解密）、多格式导出。",
+  "date": "2026-09-06 06:52:04",
+  "notes": "v0.2.0：首个开源版本\n\n- 全自动：目录扫描 → 密钥提取（MMKV/Config.Cipher/内存）→ DPAPI 加密保存 → 解密\n- 聊天查看：会话/气泡/头像/图片按需解密/引用与链接解析\n- 导出：JSON/HTML/TXT/CSV/XLSX/Markdown/TOML/SQLite，支持媒体与头像、进度与 ZIP\n- 现代 TUI 与 Web 控制台",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.0/stories-in-wx-v0.2.0-windows-x64.exe",
     "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.0/stories-in-wx-v0.2.0-macos.dmg"
