@@ -1,9 +1,9 @@
-/* 导出页 —— 选聊天/时间范围/勾选内容/格式 → 进度 → 下载 */
-const { esc, fetchJSON, startJob, renderLog: renderJobLog } = window.SX;
+/* 导出页 —— 选聊天/时间范围/勾选内容/格式 → 进度 → 结果 + 日志 */
+const { esc, fetchJSON, startJob } = window.SX;
 
 function el(id) { return document.getElementById(id); }
 
-let chatPreset = null;   // 从聊天页“📦 导出”跳转时带来的预选
+let chatPreset = null;
 
 async function init() {
   try { chatPreset = JSON.parse(sessionStorage.getItem('siwx-export-preset') || 'null'); }
@@ -38,8 +38,8 @@ function applyChatFilter(kw) {
   const ss = (window._eSessions || []).filter(s =>
     !kwL || s.display.toLowerCase().includes(kwL) || s.username.toLowerCase().includes(kwL));
   el('e-chat').innerHTML = ss.length ? ss.map(s =>
-    `<option value="${esc(s.username)}" data-display="${esc(s.display)}">" +
-    "${esc(s.display)}（${s.msg_count} 条）</option>`).join('')
+    `<option value="${esc(s.username)}" data-display="${esc(s.display)}">` +
+    `${esc(s.display)}（${s.msg_count} 条）</option>`).join('')
     : '<option>没有匹配的会话</option>';
   if (chatPreset && ss.some(s => s.username === chatPreset.chat)) {
     el('e-chat').value = chatPreset.chat;
@@ -72,34 +72,73 @@ async function run() {
   el('e-log').classList.remove('hidden');
   el('e-log').innerHTML = '';
   el('e-result').innerHTML = '';
-  startJob(body, (logs) => renderJobLog(el, logs), (job) => {
+  startJob(body, (logs) => renderLog(logs), (job) => {
     el('e-run').disabled = false;
     el('e-progress').classList.add('hidden');
-    if (job.error) {
-      el('e-result').innerHTML = `<div class="empty">❌ ${esc(job.error)}</div>`;
-      return;
-    }
-    const r = job.report || {};
-    const dl = r.zip ? encodeURIComponent(r.zip) : '';
-    const openPath = encodeURIComponent(r.export_dir || '');
-    const openBtn = `<a href="#" onclick="fetch('/api/export/open',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({path:'${openPath}'})});return false"> OPEN DIR </a>`;
-    el('e-result').innerHTML = `
-      <div class="e-done">
-        ✔ 导出完成（${r.duration_ms} ms）<br>
-        消息 ${r.message_count} 条 · 媒体 ${r.media_count} 张 · 头像 ${r.avatar_count} 个<br>
-        目录：<span class="mono">${esc(r.export_dir)}</span><br>
-        <a href="/api/export/download?path=${dl}">📥 下载 ZIP</a>
-      </div>`;
+    renderResult(job);
   });
 }
 
-function renderExportLog(el_, logs) {
+function renderLog(logs) {
   const box = el('e-log');
-  box.innerHTML = logs.map(([t, m]) => {
-    const p = m.match(/\[(export|harvest|keystore|cipher)\] (\d+)%/);
-    return `<div class="log-line">${esc(m)}</div>`;
-  }).join('') || '<div class="log-line dim">…</div>';
+  box.innerHTML = logs.map(([, m]) => `<div class="log-line">${esc(m)}</div>`)
+    .join('') || '<div class="log-line dim">…</div>';
   box.scrollTop = box.scrollHeight;
+}
+
+function renderResult(job) {
+  const box = el('e-result');
+  const lines = [];
+
+  if (job.error) {
+    // 失败：显示错误 + 全部日志
+    lines.push(`<div class="res-row res-err">❌ 导出失败：${esc(job.error)}</div>`);
+    lines.push(`<div class="res-logs"><b>运行日志：</b></div>`);
+    for (const [, m] of job.logs || []) {
+      lines.push(`<div class="log-line dim">${esc(m)}</div>`);
+    }
+    box.innerHTML = lines.join('');
+    return;
+  }
+
+  const r = job.report || {};
+  if (!r || !r.format) {
+    // 没有报告（异常）
+    lines.push(`<div class="res-row res-err">⚠️ 无导出结果</div>`);
+    for (const [, m] of job.logs || []) {
+      lines.push(`<div class="log-line dim">${esc(m)}</div>`);
+    }
+    box.innerHTML = lines.join('');
+    return;
+  }
+
+  // 成功
+  const dur = r.duration_ms ?? '?';
+  lines.push(`<div class="res-row res-ok">✔ 导出完成（${esc(String(dur))} ms）</div>`);
+  lines.push(`<div class="res-meta">`);
+  lines.push(`消息 ${esc(String(r.message_count ?? 0))} 条`);
+  if (r.media_count) lines.push(` · 媒体 ${esc(String(r.media_count))} 张`);
+  if (r.avatar_count) lines.push(` · 头像 ${esc(String(r.avatar_count))} 个`);
+  lines.push(` · 格式 ${esc(r.format.toUpperCase())}</div>`);
+  if (r.export_dir) lines.push(`<div class="res-meta">目录：<span class="mono">${esc(r.export_dir)}</span></div>`);
+  if (r.zip) {
+    const dl = encodeURIComponent(r.zip);
+    lines.push(`<div class="res-actions"><a href="/api/export/download?path=${dl}">📥 下载 ZIP</a> · ` +
+      `<a href="#" onclick="openDir('${esc(r.export_dir)}');return false">📂 打开目录</a></div>`);
+  }
+  // 始终显示日志（含媒体解密详情）
+  lines.push(`<div class="res-logs"><b>运行日志：</b></div>`);
+  for (const [, m] of job.logs || []) {
+    lines.push(`<div class="log-line dim">${esc(m)}</div>`);
+  }
+  box.innerHTML = lines.join('');
+}
+
+function openDir(path) {
+  fetch('/api/export/open', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
 }
 
 export function destroy() { /* 无常驻定时器 */ }
