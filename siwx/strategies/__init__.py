@@ -7,29 +7,22 @@
 """
 import platform
 
-from siwx.strategies import config_cipher, keystore_source, mmkv, memscan
-
-# 顺序即优先级：密钥库秒回 → MMKV 离线 → Config.Cipher 主力 → 内存字面量兜底
-STRATEGY_REGISTRY_WIN = [keystore_source, mmkv, config_cipher, memscan]
-
-# macOS 专用策略（LLDB + PBKDF2）
-if platform.system() == "Darwin":
-    try:
-        from siwx.strategies import macos_lldb
-        STRATEGY_REGISTRY = STRATEGY_REGISTRY_WIN + [macos_lldb]
-    except ImportError:
-        STRATEGY_REGISTRY = STRATEGY_REGISTRY_WIN
+if platform.system() == "Windows":
+    # Windows: 密钥库 → MMKV 离线 → Config.Cipher 主力 → 内存字面量兜底
+    from siwx.strategies import config_cipher, keystore_source, mmkv, memscan
+    STRATEGY_REGISTRY = [keystore_source, mmkv, config_cipher, memscan]
+    # 依赖微信进程内存扫描的策略（use_memory=False 时跳过）
+    _PROCESS_DEPENDENT = {config_cipher, memscan}
 else:
-    STRATEGY_REGISTRY = STRATEGY_REGISTRY_WIN
-
-# 依赖微信进程的策略（use_memory=False 时跳过）
-_PROCESS_DEPENDENT = {config_cipher, memscan}
-if platform.system() == "Darwin":
-    try:
-        from siwx.strategies import macos_lldb as _macos_lldb_mod
-        _PROCESS_DEPENDENT.add(_macos_lldb_mod)
-    except ImportError:
-        pass
+    # 非 Windows（macOS/Linux）：不加载依赖 winproc(ctypes.windll) 的 Windows 策略，
+    # 否则 import 包即崩溃。macOS 额外启用 LLDB 策略。
+    from siwx.strategies import keystore_source, mmkv
+    STRATEGY_REGISTRY = [keystore_source, mmkv]
+    _PROCESS_DEPENDENT = set()
+    if platform.system() == "Darwin":
+        from siwx.strategies import macos_lldb
+        STRATEGY_REGISTRY.append(macos_lldb)
+        _PROCESS_DEPENDENT.add(macos_lldb)
 
 
 def run_strategies(ctx):
