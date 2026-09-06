@@ -15,7 +15,6 @@ def download():
     p = request.args.get("path", "")
     if not p:
         return jsonify({"error": "缺少 path"}), 400
-    from siwx import paths as _paths
     root = _paths.exports_root().resolve()
     target = Path(p).resolve()
     if not target.is_relative_to(root) or not target.is_file():
