@@ -221,10 +221,11 @@ def job():
 
 
 def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
-    """serve 模式：rich TUI 实时输出请求与媒体解密事件。"""
+    """serve 模式：rich TUI 状态栏 + 日志流，Flask 完全静默。"""
     import logging
+    import time as _time
 
-    from siwx import media, tui
+    from siwx import media, tui, keystore
 
     tui.banner()
     tui.log(f"控制台 http://{host}:{port} · 按 Ctrl+C 停止")
@@ -232,19 +233,49 @@ def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
     # 媒体解密事件 → TUI
     media.event = tui.log
 
-    # werkzeug 请求日志 → TUI（过滤静态资源噪音）
-    class _RichRequestLog(logging.Handler):
-        _SKIP = ("/app.css", "/app.js", "/common.js", "/pages/", "/favicon")
-
-        def emit(self, record):
-            msg = record.getMessage()
-            if any(s in msg for s in self._SKIP):
-                return
-            tui.log(msg)
-
-    logging.getLogger("werkzeug").handlers = [_RichRequestLog()]
+    # 彻底关闭 Flask/werkzeug 所有日志
+    logging.getLogger("werkzeug").handlers = []
     logging.getLogger("werkzeug").propagate = False
+    logging.getLogger("werkzeug").disabled = True
 
+    # URL 打开
+    url = f"http://{host}:{port}"
     if open_browser:
-        threading.Timer(0.8, lambda: webbrowser.open(f"http://{host}:{port}")).start()
-    app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+    # 状态 getter（供 TUI 状态栏轮询）
+    def _status_getter() -> dict:
+        d = {}
+        try:
+            d["url"] = url
+            pids = find_wechat_pids()
+            d["wechat"] = f"运行中({len(pids)})" if pids else "未运行"
+            accs = find_wechat_data_dirs()
+            d["wxid"] = accs[0][0] if accs else "未检测"
+            d["keys"] = str(len(keystore.load()))
+            with _lock:
+                if _job["running"]:
+                    d["job"] = f"{_job['mode']}…"
+                elif _job["done"]:
+                    d["job"] = "✓完成" if _job["ok"] else "✗失败"
+                else:
+                    d["job"] = "空闲"
+        except Exception:
+            pass
+        return d
+
+    # Flask 后台线程（完全静默：启动横幅+运行时日志全部吞掉）
+    import io
+    import contextlib as _cl
+
+    def _run_flask():
+        with _cl.redirect_stdout(io.StringIO()), \
+             _cl.redirect_stderr(io.StringIO()):
+            app.run(host=host, port=port, threaded=True,
+                    debug=False, use_reloader=False)
+
+    server_thread = threading.Thread(target=_run_flask, daemon=True)
+    server_thread.start()
+
+    # 主线程：常驻状态栏（Ctrl+C 退出）
+    tui.run_live_status(_status_getter, lambda: None)
