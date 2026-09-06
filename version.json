@@ -1,10 +1,10 @@
 {
-  "version": "0.2.1",
-  "date": "2026-09-06 07:29:25",
-  "notes": "v0.2.1\n\n- 修复：双击/裸跑 exe 现在直接启动 Web 控制台（不再提示缺少子命令）",
+  "version": "0.2.2",
+  "date": "2026-09-06 07:40:29",
+  "notes": "v0.2.2\n\n- 修复：双击 exe 运行时输出目录错误（System32 拒绝访问）——输出现在固定在 exe 旁边\n- 修复：导出媒体时多进程刷屏 / 任务挂死（补 freeze_support）\n- 其他：界面与导出页搜索、一键跳转导出等改进",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.1/stories-in-wx-v0.2.1-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.1/stories-in-wx-v0.2.1-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.2/stories-in-wx-v0.2.2-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.2/stories-in-wx-v0.2.2-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.1/SHA256SUMS.txt"
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.2/SHA256SUMS.txt"
 }
