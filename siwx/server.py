@@ -9,6 +9,7 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_from_directory
 
 from siwx import extract, keystore
+from siwx import paths as _paths
 from siwx.discover import find_wechat_data_dirs, find_wechat_pids, wxid_of
 from siwx.sqlcipher import collect_db_files
 
@@ -75,7 +76,6 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             report = {"kind": "keys", "accounts": accounts}
 
         elif mode == "decrypt":
-            from siwx import paths as _paths
             out_root = out_dir or str(_paths.out_root())
             accounts = []
             for wxid, db in dirs:
