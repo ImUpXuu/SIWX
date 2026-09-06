@@ -30,10 +30,12 @@ from siwx.api_chat import bp as chat_bp  # noqa: E402
 from siwx.api_settings import bp as settings_bp  # noqa: E402
 from siwx.api_export import bp as export_bp  # noqa: E402
 from siwx.api_mcp import bp as mcp_bp  # noqa: E402
+from siwx.api_update import bp as update_bp  # noqa: E402
 app.register_blueprint(chat_bp)
 app.register_blueprint(settings_bp)
 app.register_blueprint(export_bp)
 app.register_blueprint(mcp_bp)
+app.register_blueprint(update_bp)
 
 _job = {"running": False, "mode": None, "done": False, "ok": False,
         "logs": [], "report": None}

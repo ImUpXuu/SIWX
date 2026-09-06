@@ -106,6 +106,7 @@ jobs:
           import json, sys, datetime
           version, notes, repo = sys.argv[1], sys.argv[2].strip(), sys.argv[3]
           base = f"https://github.com/{repo}/releases/download/v{version}"
+          raw_base = f"https://raw.gh.1s.fan/{repo}/main"
           data = {
               "version": version,
               "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
@@ -115,6 +116,10 @@ jobs:
                   "macos_dmg": f"{base}/stories-in-wx-v{version}-macos.dmg",
               },
               "sha256": f"{base}/SHA256SUMS.txt",
+              "update_scripts": {
+                  "windows": f"{raw_base}/scripts/update_win.bat",
+                  "macos": f"{raw_base}/scripts/update_mac.sh",
+              },
           }
           with open("version.json", "w", encoding="utf-8") as f:
               json.dump(data, f, ensure_ascii=False, indent=2)
