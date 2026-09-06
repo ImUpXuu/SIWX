@@ -85,6 +85,14 @@
     img.replaceWith(span);
   }
 
+  /* 打开导出目录/文件（资源管理器），仅限 exports 根内 */
+  function openPath(path) {
+    fetch('/api/export/open', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+  }
+
   window.SX = { esc, timeStr, fmtTs, fetchJSON, startJob, renderLog, go,
-                setupDone, setSetupDone, resetSetup, imgFallback };
+                setupDone, setSetupDone, resetSetup, imgFallback, openPath };
 })();

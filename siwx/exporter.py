@@ -223,16 +223,26 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                fmt: str, start_ts=None, end_ts=None,
                want_messages=True, want_media=True, want_avatars=True,
                export_root: Path = None, pack: str = "zip",
+               folder_name: str = None,
                progress=lambda pct, msg: None) -> dict:
     t0 = time.time()
+    progress(1, f"开始导出: 账号={account}, 会话={chat}, 格式={fmt}")
+    progress(2, f"选项: 消息={want_messages}, 媒体={want_media}, 头像={want_avatars}, 打包={pack}")
+    if start_ts:
+        from datetime import datetime as _dt
+        progress(2, f"时间范围: {_dt.fromtimestamp(start_ts).strftime('%Y-%m-%d')} ~ {_dt.fromtimestamp(end_ts).strftime('%Y-%m-%d') if end_ts else '现在'}")
+
     progress(3, "读取消息…")
     msgs = build_messages(acc_out_dir, chat, start_ts, end_ts, account=account)
+    progress(10, f"读取到 {len(msgs)} 条消息")
+
     names = _contact_names(acc_out_dir)
     display = display or names.get(chat, chat) or chat
     safe = _safe_name(display)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     root = (export_root or _paths.exports_root())
-    export_dir = root / f"{stamp}_{safe}"
+    export_dir = root / _safe_name(folder_name or f"{stamp}_{safe}")
+    progress(11, f"导出目录: {export_dir}")
     export_dir.mkdir(parents=True, exist_ok=True)
 
     _ok = False
@@ -247,32 +257,41 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             "lastTimestamp": msgs[-1]["createTime"] if msgs else 0,
             "messageCount": len(msgs),
         }
+        progress(12, f"会话: {display} ({session['type']}), 消息数: {len(msgs)}")
 
         # 头像
         avatar_map = {}
+        stats_ava = 0
         if want_avatars:
-            progress(55, "提取头像…")
+            progress(15, "提取头像…")
             users = list({m["senderUsername"] for m in msgs} | {chat})
+            progress(16, f"需要提取 {len(users)} 个头像")
             dest = export_dir / "avatars"
             dest.mkdir(exist_ok=True)
             avatar_map = collect_avatars(acc_out_dir, users, dest, progress)
             session["_avatar_map"] = avatar_map
-        stats_ava = len(avatar_map)
+            stats_ava = len(avatar_map)
+            progress(30, f"头像提取完成: {stats_ava}/{len(users)}")
 
         # 媒体（解密图片落盘到导出目录）
         stats_media = 0
-        if want_media and any(m.get("md5") or m.get("bubbleMd5") for m in msgs):
-            progress(40, "解密媒体图片…")
-            for m in msgs:
-                m["_chat"] = chat
-                m["bubbleMd5"] = m.get("bubble_md5")
-            media_map = export_media_files(acc_out_dir, account, msgs,
-                                           export_dir / "media", progress)
-            for m in msgs:
-                m["mediaFile"] = media_map.get(m["localId"])
-            stats_media = len(media_map)
+        if want_media:
+            progress(35, "解密媒体…")
+            imgs = [m for m in msgs if m.get("md5") or m.get("bubbleMd5") or m.get("bubble_md5")]
+            progress(36, f"需要解密 {len(imgs)} 张图片")
+            if imgs:
+                for m in msgs:
+                    m["_chat"] = chat
+                    m["bubbleMd5"] = m.get("bubble_md5")
+                media_map = export_media_files(acc_out_dir, account, msgs,
+                                               export_dir / "media", progress)
+                for m in msgs:
+                    m["mediaFile"] = media_map.get(m["localId"])
+                stats_media = len(media_map)
+            progress(75, f"媒体解密完成: {stats_media}/{len(imgs)}")
 
-        progress(88, f"写入 {fmt.upper()} …")
+        # 写入格式
+        progress(80, f"写入 {fmt.upper()} …")
         content_msgs = msgs if want_messages else []
         fname = f"{safe}_{stamp}"
         fmt = fmt.lower()
@@ -280,9 +299,11 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                "markdown": "md", "toml": "toml", "sqlite": "db",
                "xlsx": "xlsx"}.get(fmt, "json")
         out_file = export_dir / f"{fname}.{ext}"
+        progress(82, f"写入文件: {out_file.name}")
         if fmt == "json":
             _write_json(out_file, session, content_msgs, export_dir)
         elif fmt == "html":
+            from siwx.html_template import build_chat_data, render_html
             chat_data = build_chat_data(session, content_msgs, avatar_map)
             out_file.write_text(render_html(chat_data), encoding="utf-8")
         elif fmt == "txt":
@@ -299,13 +320,15 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             _write_xlsx(out_file, content_msgs)
         else:
             raise ValueError(f"未知格式: {fmt}")
+        progress(88, f"写入完成: {out_file.stat().st_size / 1024:.1f} KB")
 
         # 打包
         zip_path = None
         if pack == "zip":
-            progress(94, "打包 zip…")
+            progress(92, "打包 zip…")
             zip_path = shutil.make_archive(str(root / f"{fname}_{fmt}"), "zip",
                                            root_dir=export_dir)
+            progress(95, f"打包完成: {Path(zip_path).stat().st_size / 1024 / 1024:.1f} MB")
             shutil.rmtree(export_dir, ignore_errors=True)
 
         progress(100, "导出完成")
@@ -327,3 +350,76 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             shutil.rmtree(export_dir, ignore_errors=True)
 
 
+
+
+def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "json",
+                     start_ts=None, end_ts=None,
+                     want_messages=True, want_media=False, want_avatars=False,
+                     export_root: Path = None, pack: str = "folder",
+                     progress=lambda pct, msg: None) -> dict:
+    """多会话导出：一个总目录，每个会话一个子文件夹。
+
+    chats: [{"chat": username, "display": 显示名}]
+    pack:  "folder" 仅文件夹 / "single" 整体一个 zip / "each" 每会话一个 zip
+    """
+    t0 = time.time()
+    n = max(len(chats), 1)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    root = Path(export_root or _paths.exports_root())
+    total_dir = root / f"export_{stamp}"
+    total_dir.mkdir(parents=True, exist_ok=True)
+    progress(1, f"共 {n} 个会话 · 输出目录 {total_dir.name}/ · 打包={pack}")
+
+    results, ok_n = [], 0
+    for i, item in enumerate(chats):
+        chat = item.get("chat") if isinstance(item, dict) else str(item)
+        display = (item.get("display") or "") if isinstance(item, dict) else ""
+        base, endp = int(100 * i / n), int(100 * (i + 1) / n)
+
+        def sub(pct, msg, _b=base, _e=endp, _i=i):
+            progress(_b + int(pct * (_e - _b) / 100), f"[{_i + 1}/{n}] {msg}")
+
+        try:
+            r = run_export(acc_out_dir, account, chat, display, fmt,
+                           start_ts, end_ts,
+                           want_messages=want_messages, want_media=want_media,
+                           want_avatars=want_avatars,
+                           export_root=total_dir,
+                           folder_name=f"{i + 1:02d}_{display or chat}",
+                           pack=("zip" if pack == "each" else "none"),
+                           progress=sub)
+            ok_n += 1
+            results.append({"chat": chat, "display": display or chat,
+                            "message_count": r.get("message_count", 0),
+                            "media_count": r.get("media_count", 0),
+                            "avatar_count": r.get("avatar_count", 0),
+                            "file": r.get("file")})
+            progress(endp, f"[{i + 1}/{n}] ✔ {display or chat} ({r.get('message_count', 0)} 条)")
+        except Exception as e:
+            results.append({"chat": chat, "display": display or chat, "error": str(e)})
+            progress(endp, f"[{i + 1}/{n}] ✗ {display or chat}: {e}")
+
+    zip_path, zips = None, []
+    if pack == "each":
+        zips = sorted(str(p) for p in total_dir.glob("*.zip"))
+        progress(97, f"每会话 zip 共 {len(zips)} 个")
+    elif pack == "single":
+        progress(96, "打包整体 zip…")
+        zip_path = shutil.make_archive(str(root / total_dir.name), "zip",
+                                       root_dir=total_dir)
+        progress(98, f"zip 完成: {Path(zip_path).stat().st_size / 1048576:.1f} MB")
+
+    progress(100, "导出完成")
+    return {
+        "total_dir": str(total_dir),
+        "zip": zip_path,
+        "zips": zips,
+        "pack": pack,
+        "format": fmt,
+        "sessions": results,
+        "ok_count": ok_n,
+        "message_count": sum(r.get("message_count", 0) for r in results),
+        "media_count": sum(r.get("media_count", 0) for r in results),
+        "avatar_count": sum(r.get("avatar_count", 0) for r in results),
+        "duration_ms": int((time.time() - t0) * 1000),
+    }

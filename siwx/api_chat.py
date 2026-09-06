@@ -10,9 +10,16 @@ import re
 import sqlite3
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, jsonify, request, current_app as _current_app
 
 from siwx import media
+
+def _log(msg: str) -> None:
+    """api_chat 模块的轻量日志（同步 API 端点用，不写任务缓冲）。"""
+    try:
+        _current_app.logger.info(msg)
+    except Exception:
+        pass
 
 try:
     import zstandard as _zstd
@@ -170,16 +177,20 @@ def sessions():
 
     out = []
     for it in items.values():
-        un = it["username"]
-        display = names.get(un) or (it["summary"].split(":")[0].strip()
-                                    if ":" in it["summary"] else "") or un
+        un = (it.get("username") or "").strip()
+        if not un:
+            continue  # 跳过无用户名的脏数据
+        display = (names.get(un) or un).strip()
+        if not display:
+            continue  # 跳过名称为空的脏数据
         out.append({
             "username": un, "display": display,
             "is_group": un.endswith("@chatroom"),
-            "preview": (it["summary"] or "")[:60],
-            "last_time": it["last_time"], "msg_count": 0,
+            "preview": (it.get("summary") or "")[:60],
+            "last_time": it.get("last_time", 0),
         })
     out.sort(key=lambda x: x["last_time"], reverse=True)
+    _log(f"[sessions] 账号={account}, 返回 {len(out)} 个会话")
     return jsonify({"account": account, "sessions": out})
 
 
@@ -262,7 +273,7 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
         finally:
             conn.close()
 
-    rows.sort(key=lambda r: r[3] or 0)
+    rows.sort(key=lambda r: (r[3] or 0, r[0] or 0))
     msgs = []
     for local_id, server_id, ltype, ts, origin, rsid, content, packed, smap in rows:
         if start_ts and (ts or 0) < start_ts:
@@ -360,6 +371,7 @@ def messages():
     names = _contact_names(acc)
     my_base = account.split("_6")[0] if "_6" in account else account
     is_group = chat.endswith("@chatroom")
+    _log(f"[msg] 查询消息: account={account}, chat={chat}, table={table}, before={before}, limit={limit}")
 
     # 每个分片单独查（分片内按 create_time 有序），合并后取最新的 limit 条
     candidates = []
@@ -392,9 +404,11 @@ def messages():
         finally:
             conn.close()
 
-    # 合并排序，取最新的 limit 条
-    candidates.sort(key=lambda x: x[0][3] or 0, reverse=True)
-    page = candidates[:limit]
+    _log(f"[msg] 候选总数: {len(candidates)}, 分片数: {shard_idx}")
+
+    # 合并排序（ASC 旧→新），取最新的 limit 条
+    candidates.sort(key=lambda x: (x[0][3] or 0, x[0][0] or 0))
+    page = candidates[-limit:]  # 取最后 limit 条（最新的）
     has_more = len(candidates) > limit
 
     msgs = []
@@ -454,6 +468,7 @@ def messages():
         })
 
     display = names.get(chat, chat)
+    _log(f"[msg] 返回 {len(msgs)} 条消息, has_more={has_more}")
     return jsonify({"account": account, "chat": chat, "display": display,
                     "is_group": is_group, "messages": msgs, "has_more": has_more})
 

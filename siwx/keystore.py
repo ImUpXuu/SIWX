@@ -7,6 +7,7 @@
 import ctypes
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
@@ -70,8 +71,19 @@ def _unprotect(data: bytes) -> bytes:
 
 
 def store_path() -> Path:
-    base = os.environ.get("LOCALAPPDATA", ".")
+    base = (os.environ.get("LOCALAPPDATA")
+            or os.environ.get("USERPROFILE")
+            or str(_safe_root()))
     return Path(base) / "stories-in-wx" / "keystore.bin"
+
+
+def _safe_root() -> Path:
+    """LOCALAPPDATA/USERPROFILE 都缺失时的最后兜底（导入放函数内避免循环）。"""
+    try:
+        from siwx.paths import app_root
+        return app_root()
+    except Exception:
+        return Path(tempfile.gettempdir())
 
 
 def load() -> dict:

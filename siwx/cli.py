@@ -109,6 +109,13 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_mcp(_args) -> int:
+    """MCP stdio 服务器：由 AI 客户端拉起，收发 JSON-RPC。"""
+    from siwx.mcp_server import run_mcp_server
+    run_mcp_server()
+    return 0
+
+
 def main() -> int:
     import os
     if os.name != "nt":
@@ -150,6 +157,9 @@ def main() -> int:
     p_serve.add_argument("--port", type=int, default=8787)
     p_serve.add_argument("--no-open", action="store_true")
     p_serve.set_defaults(fn=cmd_serve)
+
+    p_mcp = sub.add_parser("mcp", parents=[common], help="MCP 服务器 (stdio, 供 AI 客户端接入)")
+    p_mcp.set_defaults(fn=cmd_mcp)
 
     args = ap.parse_args()
     if not getattr(args, "cmd", None):

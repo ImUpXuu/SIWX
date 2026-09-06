@@ -25,13 +25,15 @@ UI_DIR = _ui_dir()
 
 app = Flask(__name__, static_folder=None)
 
-# 模块化 API 蓝图（聊天查看 / 设置 / 导出）
+# 模块化 API 蓝图（聊天查看 / 设置 / 导出 / MCP）
 from siwx.api_chat import bp as chat_bp  # noqa: E402
 from siwx.api_settings import bp as settings_bp  # noqa: E402
 from siwx.api_export import bp as export_bp  # noqa: E402
+from siwx.api_mcp import bp as mcp_bp  # noqa: E402
 app.register_blueprint(chat_bp)
 app.register_blueprint(settings_bp)
 app.register_blueprint(export_bp)
+app.register_blueprint(mcp_bp)
 
 _job = {"running": False, "mode": None, "done": False, "ok": False,
         "logs": [], "report": None}
@@ -69,50 +71,72 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
              export_opts=None) -> None:
     """任务执行器。keys/decrypt 支持指定 db_dir（引导页单账号流程）。"""
     use_cache = not no_cache
+    _log(f"[job] 模式={mode}, 指定目录={db_dir or '无'}, 缓存={use_cache}, 进程数={workers or '默认'}")
     try:
         dirs = ([(wxid_of(db_dir), db_dir)] if db_dir else find_wechat_data_dirs())
         if not dirs:
             raise RuntimeError("未找到微信数据目录 — 请确认本机登录过微信")
+        _log(f"[job] 发现 {len(dirs)} 个账号")
 
         if mode == "keys":
+            _log("[job] 步骤1/2: 收集数据库文件…")
             entries_by_dir = {db: collect_db_files(db) for _w, db in dirs}
+            total_dbs = sum(len(v) for v in entries_by_dir.values())
+            _log(f"[job] 共 {total_dbs} 个数据库")
+            _log("[job] 步骤2/2: 提取密钥…")
             preset_full = extract._keystore_preset(entries_by_dir, _log) if use_cache else None
             if preset_full is not None:
                 preset = preset_full
-                _log("[keystore] 密钥缓存全覆盖，跳过内存扫描")
+                _log("[job] 密钥缓存全覆盖，跳过内存扫描")
             else:
+                _log("[job] 全局收割: 一次内存扫描联合验证…")
                 gm, _ga = extract.global_harvest(dirs, entries_by_dir, _log)
                 store = keystore.load()
                 preset = {**{s: r["key"] for s, r in store.items()}, **gm}
+                _log(f"[job] 收割完成, 预置 {len(preset)} 个密钥")
             accounts = []
             for wxid, db in dirs:
+                _log(f"[job] 提取账号 {wxid}…")
                 accounts.append(extract.extract_keys_for_dir(
                     db, _log, preset=preset,
                     entries=entries_by_dir.get(db), use_memory=False))
             report = {"kind": "keys", "accounts": accounts}
+            total_ok = sum(a["verified"] for a in accounts)
+            total_salts = sum(a["total_salts"] for a in accounts)
+            _log(f"[job] 密钥提取完成: {total_ok}/{total_salts} 已验证")
 
         elif mode == "decrypt":
             out_root = out_dir or str(_paths.out_root())
+            _log(f"[job] 解密输出目录: {out_root}")
             accounts = []
             for wxid, db in dirs:
+                _log(f"[job] 解密账号 {wxid}…")
                 accounts.append({"wxid": wxid,
                                  "decrypt": extract.decrypt_dir(
                                      db, str(Path(out_root) / wxid), _log,
                                      workers=workers, use_cache=use_cache)})
             report = {"kind": "decrypt", "accounts": accounts}
+            total_ok = sum(a["decrypt"]["ok"] for a in accounts)
+            total_cached = sum(a["decrypt"].get("cached", 0) for a in accounts)
+            _log(f"[job] 解密完成: {total_ok} 成功, {total_cached} 缓存命中")
 
         elif mode == "auto":
             out_root = out_dir or str(_paths.out_root())
+            _log(f"[job] 全自动: 输出目录={out_root}")
             accounts = []
             for wxid, db in dirs:
+                _log(f"[job] 账号 {wxid}: 提取密钥…")
                 rep = extract.extract_keys_for_dir(db, _log)
-                _log(f"账号 {wxid}: 密钥 {rep['verified']}/{rep['total_salts']}")
+                _log(f"[job] 账号 {wxid}: 密钥 {rep['verified']}/{rep['total_salts']}")
                 dec = None
                 if rep["verified"] > 0:
+                    _log(f"[job] 账号 {wxid}: 开始解密…")
                     dec = extract.decrypt_dir(db, str(Path(out_root) / wxid), _log,
                                               workers=workers, use_cache=use_cache)
+                    _log(f"[job] 账号 {wxid}: 解密完成 {dec['ok']} 成功")
                 accounts.append({**rep, "decrypt": dec})
             report = {"kind": "auto", "accounts": accounts}
+            _log(f"[job] 全自动完成")
 
         elif mode == "sync":
             """增量同步：密钥缓存优先 → 收割缺失 → 只解密变更库。"""
@@ -140,23 +164,34 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             acc_dir = _paths.out_root() / (data.get("account") or "")
             if not (acc_dir / "message").is_dir():
                 raise RuntimeError("该账号还没有解密产物，请先完成引导")
+            chats = data.get("chats") or []
+            if not chats and data.get("chat"):
+                chats = [{"chat": data.get("chat"), "display": data.get("display") or ""}]
+            if not chats:
+                raise RuntimeError("未选择要导出的会话")
             start = data.get("start")
             end = data.get("end")
             start_ts = int(datetime.strptime(start, "%Y-%m-%d").timestamp()) if start else None
             end_ts = int(datetime.strptime(end, "%Y-%m-%d").replace(
                 hour=23, minute=59, second=59).timestamp()) if end else None
-            res = exporter.run_export(
-                acc_dir, data.get("account"), data.get("chat"),
-                data.get("display") or "", data.get("format", "json"),
-                start_ts, end_ts,
+            _log(f"[export] 账号={data.get('account')} 会话数={len(chats)} 格式={data.get('format', 'json')}")
+            _log(f"[export] 消息={data.get('messages', True)} 媒体={data.get('media', False)} "
+                 f"头像={data.get('avatars', False)} 打包={data.get('pack', 'folder')}")
+            if start_ts:
+                _log(f"[export] 时间范围: {start} ~ {end or '现在'}")
+            res = exporter.run_export_multi(
+                acc_dir, data.get("account"), chats,
+                fmt=data.get("format", "json"),
+                start_ts=start_ts, end_ts=end_ts,
                 want_messages=data.get("messages", True),
                 want_media=data.get("media", False),
                 want_avatars=data.get("avatars", False),
-                export_root=Path.cwd() / "exports",
-                pack=data.get("pack", "zip"),
+                export_root=_paths.exports_root(),
+                pack=data.get("pack", "folder"),
                 progress=lambda pct, msg: _log(f"[export] {pct}% {msg}"))
-            _log(f"[export] 完成：{res['message_count']} 条消息，"
-                 f"媒体 {res['media_count']}，头像 {res['avatar_count']}")
+            _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
+                 f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"
+                 f"耗时 {res.get('duration_ms', 0)}ms")
             report = {"kind": "export", **res}
 
         else:
@@ -246,11 +281,56 @@ def run():
     return jsonify({"started": True})
 
 
+def _tail_mcp_log(limit: int = 500) -> list:
+    """读取 MCP 日志文件末尾，转换为 [ts_ms, message] 格式。"""
+    from siwx.mcp_server import _mcp_log_path
+    p = _mcp_log_path()
+    if not p.is_file():
+        return []
+    try:
+        with open(p, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            block = min(size, 64 * 1024)
+            f.seek(-block, 2)
+            tail = f.read(block).decode("utf-8", errors="replace")
+        lines = [ln for ln in tail.splitlines() if ln.strip()][-limit:]
+        result = []
+        for ln in lines:
+            # 解析 "2026-09-06 20:00:00 [INFO] ..." → ts_ms
+            try:
+                dt = datetime.strptime(ln[:19], "%Y-%m-%d %H:%M:%S")
+                ts_ms = int(dt.timestamp() * 1000)
+            except (ValueError, IndexError):
+                ts_ms = 0
+            result.append([ts_ms, f"[MCP] {ln}"])
+        return result
+    except Exception:
+        return []
+
+
 @app.get("/api/logs")
 def api_logs():
-    """返回环形日志缓冲（供日志页展示）。"""
+    """返回环形日志缓冲 + MCP 调用日志（合并按时间排序）。"""
     with _lock:
-        return jsonify({"logs": _LOG_RING})
+        web_logs = list(_LOG_RING)
+    mcp_logs = _tail_mcp_log(500)
+    merged = sorted(web_logs + mcp_logs, key=lambda x: x[0])
+    return jsonify({"logs": merged})
+
+
+@app.get("/api/job")
+def api_job():
+    """返回当前任务状态（供前端轮询）。"""
+    with _lock:
+        return jsonify({
+            "running": _job["running"],
+            "done": _job["done"],
+            "ok": _job["ok"],
+            "mode": _job["mode"],
+            "logs": _job["logs"],
+            "report": _job["report"],
+        })
 
 
 def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:

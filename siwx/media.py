@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import struct
+import tempfile
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -43,7 +44,9 @@ _KEY_FILE_NAME = "media_key.json"
 
 
 def _key_file() -> Path:
-    base = os.environ.get("LOCALAPPDATA", ".")
+    base = (os.environ.get("LOCALAPPDATA")
+            or os.environ.get("USERPROFILE")
+            or str(Path(tempfile.gettempdir())))
     return Path(base) / "stories-in-wx" / "media_key.json"
 
 

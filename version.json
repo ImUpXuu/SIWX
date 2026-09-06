@@ -1,10 +1,10 @@
 {
-  "version": "0.2.5",
-  "date": "2026-09-06 10:06:56",
-  "notes": "fix: 聊天无限滚动(取oldest ts)+导出时序+日志页+sync速度对齐；v0.2.5",
+  "version": "0.3.0",
+  "date": "2026-09-06 22:00:00",
+  "notes": "v0.3.0: MCP服务器(stdio,6工具,零依赖); 多选会话批量导出; 导出页重写; 路径防弹重写; UI极简现代重设计; 完整文档(18模块); 修复时序/路径/UI多项bug",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/stories-in-wx-v0.2.5-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/stories-in-wx-v0.2.5-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.0/stories-in-wx-v0.3.0-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.0/stories-in-wx-v0.3.0-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/SHA256SUMS.txt"
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.0/SHA256SUMS.txt"
 }
