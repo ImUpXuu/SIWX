@@ -157,9 +157,9 @@ def try_mmkv_offline(log):
     wxid = "wxid_demo"   # 清洗后 wxid
     codes = set()
     pats = [
-        r"C:/Users/li/AppData/Roaming/Tencent/xwechat/net/kvcomm/key_*_*.statistic",
-        r"C:/Users/li/AppData/Roaming/Tencent/xwechat/ilink/kvcomm/key_*_*.statistic",
-        r"C:/Users/li/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_*_*.statistic",
+        r"C:/Users/*/AppData/Roaming/Tencent/xwechat/net/kvcomm/key_*_*.statistic",
+        r"C:/Users/*/AppData/Roaming/Tencent/xwechat/ilink/kvcomm/key_*_*.statistic",
+        r"C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_*_*.statistic",
     ]
     for pat in pats:
         for f in glob.glob(pat):
