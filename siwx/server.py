@@ -112,7 +112,8 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 if rep["verified"] > 0:
                     dec = extract.decrypt_dir(
                         db, str(_paths.out_root() / wxid), _log,
-                        entries=entries, use_cache=True, workers=2)
+                        entries=entries, use_cache=True,
+                        workers=min(8, (os.cpu_count() or 4)))
                     _log(f"[sync] {wxid}: 解密 {dec['ok']} 成功 / "
                          f"缓存 {dec['cached']} / 新增 {dec['failed']}")
             report = {"kind": "sync", "message": "增量同步完成"}

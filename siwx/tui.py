@@ -138,32 +138,44 @@ def make_status_bar(getter) -> Text:
 
 
 def run_live_status(getter, on_start):
-    """启动 Live 状态栏。getter 返回状态 dict；on_start 在 Live 就绪后回调。
-
-    用法（server.py）：
-        tui.run_live_status(getter_dict_fn, lambda: app.run(...))
-    """
+    """常驻状态栏：后台线程 + ANSI 转义码，Windows cmd 可靠。"""
+    import os
+    import sys
     import threading
+    import time
 
-    console.print()
+    if os.name == "nt":
+        import ctypes
+        try:
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+        except Exception:
+            pass
+
     on_start()
 
-    def _render():
+    status = ["初始化…"]
+    running = True
+
+    def _bar():
         try:
             return make_status_bar(getter())
         except Exception:
             return make_status_bar({})
 
-    with Live(
-        _render(),
-        console=console,
-        refresh_per_second=1,
-        vertical_overflow="visible",
-    ) as live:
-        import time
-        while True:
+    def _loop():
+        while running:
+            text = _bar()
+            sys.stdout.write(f"\0337\033[999;0H\033[2K{text}\0338")
+            sys.stdout.flush()
             time.sleep(1)
-            try:
-                live.update(_render())
-            except Exception:
-                break
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        running = False
+        raise
