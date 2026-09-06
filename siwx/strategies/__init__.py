@@ -10,13 +10,24 @@ import platform
 from siwx.strategies import config_cipher, keystore_source, mmkv, memscan
 
 # 顺序即优先级：密钥库秒回 → MMKV 离线 → Config.Cipher 主力 → 内存字面量兜底
-STRATEGY_REGISTRY = [keystore_source, mmkv, config_cipher, memscan]
+STRATEGY_REGISTRY_WIN = [keystore_source, mmkv, config_cipher, memscan]
 
 # macOS 专用策略（LLDB + PBKDF2）
 if platform.system() == "Darwin":
     try:
         from siwx.strategies import macos_lldb
-        STRATEGY_REGISTRY.append(macos_lldb)
+        STRATEGY_REGISTRY = STRATEGY_REGISTRY_WIN + [macos_lldb]
+    except ImportError:
+        STRATEGY_REGISTRY = STRATEGY_REGISTRY_WIN
+else:
+    STRATEGY_REGISTRY = STRATEGY_REGISTRY_WIN
+
+# 依赖微信进程的策略（use_memory=False 时跳过）
+_PROCESS_DEPENDENT = {config_cipher, memscan}
+if platform.system() == "Darwin":
+    try:
+        from siwx.strategies import macos_lldb as _macos_lldb_mod
+        _PROCESS_DEPENDENT.add(_macos_lldb_mod)
     except ImportError:
         pass
 
@@ -26,8 +37,7 @@ def run_strategies(ctx):
         if len(ctx["key_map"]) >= len(ctx["page1_by_salt"]):
             break
         # use_memory=False 时跳过依赖微信进程的策略（全局收割已覆盖）
-        if not ctx.get("use_memory", True) and mod in (config_cipher, memscan,
-                                                         'macos_lldb' if platform.system() == "Darwin" else None):
+        if not ctx.get("use_memory", True) and mod in _PROCESS_DEPENDENT:
             continue
         try:
             mod.extract(ctx)

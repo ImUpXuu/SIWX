@@ -100,12 +100,17 @@ def collect_db_files(db_dir: str):
 
 
 def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int:
-    """流式整库解密：页读 → AES-256-CBC → 明文 SQLite 写出。返回总页数。"""
+    """流式整库解密：页读 → AES-256-CBC → 明文 SQLite 写出。返回总页数。
+
+    优化（v0.3.0）:
+    - 内联 CBC XOR：消除函数调用开销
+    - 进度回调降频：每 100 页回调一次，减少 Python 开销
+    - 预计算常量：CT_LEN / body_len 提到循环外
+    """
     from Crypto.Cipher import AES
 
     tmp_copy = None
     try:
-        # 4MB 缓冲：逐页 4KB 读写成 13 万次系统调用是 IO 瓶颈
         fin = open(src, "rb", buffering=4 * 1024 * 1024)
     except OSError:
         tmp_copy = Path(tempfile.gettempdir()) / f"siwx_db_{os.getpid()}.tmp"
@@ -124,21 +129,17 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
         total_pages = (size + PAGE_SZ - 1) // PAGE_SZ
 
         with open(dst, "wb", buffering=4 * 1024 * 1024) as fout:
-            # 手动 CBC：同 key 的 ECB cipher 跨页复用（无 IV 概念），
-            # 每页一次解 251 块 + 大整数 XOR 恢复链 —— 消掉 13.7 万次
-            # AES.new 的 key schedule 开销（自动走 AES-NI）。
             aes = AES.new(enc_key, AES.MODE_ECB)
             body_len = PAGE_SZ - RESERVE_SZ  # 4016
+            CT_LEN = body_len - SALT_SZ      # 4000
 
-            def cbc_decrypt(ct: bytes, iv: bytes) -> bytes:
-                raw = aes.decrypt(ct)
-                prev = iv + ct[: len(ct) - 16]
-                n = int.from_bytes(raw, "little") ^ int.from_bytes(prev, "little")
-                return n.to_bytes(len(ct), "little")
-
-            # 页 1：前 16 字节是 salt，密文从 16 开始
+            # 页 1
             iv = page1[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + IV_SZ]
-            pt = cbc_decrypt(page1[SALT_SZ: body_len], iv)
+            ct = page1[SALT_SZ: body_len]
+            raw = aes.decrypt(ct)
+            prev = iv + ct[:CT_LEN - 16]
+            n = int.from_bytes(raw, "little") ^ int.from_bytes(prev, "little")
+            pt = n.to_bytes(CT_LEN, "little")
             fout.write(SQLITE_HDR)
             fout.write(pt)
             fout.write(b"\x00" * RESERVE_SZ)
@@ -147,20 +148,23 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
 
             pgno = 1
             zeros = b"\x00" * RESERVE_SZ
-            while True:
-                page = fin.read(PAGE_SZ)
-                if not page:
-                    break
+            for chunk in iter(lambda: fin.read(PAGE_SZ), b""):
                 pgno += 1
-                if len(page) < PAGE_SZ:
-                    page = page + b"\x00" * (PAGE_SZ - len(page))
-                iv = page[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + IV_SZ]
-                pt = cbc_decrypt(page[:body_len], iv)
+                if len(chunk) < PAGE_SZ:
+                    chunk = chunk + b"\x00" * (PAGE_SZ - len(chunk))
+                iv = chunk[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + IV_SZ]
+                ct = chunk[SALT_SZ: body_len]
+                raw = aes.decrypt(ct)
+                prev = iv + ct[:CT_LEN - 16]
+                n = int.from_bytes(raw, "little") ^ int.from_bytes(prev, "little")
+                pt = n.to_bytes(CT_LEN, "little")
                 fout.write(pt)
                 fout.write(zeros)
-                if progress:
+                if progress and pgno % 100 == 0:
                     progress(pgno, total_pages)
-        return total_pages
+            if progress:
+                progress(total_pages, total_pages)
+            return total_pages
     finally:
         fin.close()
         if tmp_copy:

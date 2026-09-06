@@ -1,12 +1,12 @@
 {
-  "version": "0.3.0",
-  "date": "2026-09-06 13:56:15",
-  "notes": "v0.3.0: 流式导出性能优化 + 自动更新体系\n\n性能优化（流式导出）:\n- export_stream.py: heapq.merge K路归并, 增量JSON/TXT/CSV/MD写入\n- exporter.py: 双遍扫描(轻量元数据+流式写出), 并行媒体解密\n- 万条聊天内存 <50MB (旧版>200MB), 4939条仅需422ms\n\n自动更新体系:\n- auto_update.py: 版本检查 + 平台检测(frozen/source) + 增量更新\n- api_update.py: /api/update/check + /api/update/do + /api/update/current\n- scripts/update_win.bat: 杀进程→下载→校验SHA256→替换→重启\n- scripts/update_mac.sh: 杀进程→下载DMG→挂载→替换→重启\n- 设置页: 版本信息 + 一键更新按钮\n- raw.gh.1s.fan 代理访问 GitHub raw\n\nCI/CD:\n- release.yml: 生成version.json含update_scripts字段\n- 创建GitHub Release + 上传资产",
+  "version": "0.3.1",
+  "date": "2026-09-06 23:00:00",
+  "notes": "v0.3.1: 流式导出性能优化(195MB/s) + 自动更新体系(Win/Mac) + macOS LLDB密钥提取 + AGPL-3.0许可证 + 贡献者",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.0/stories-in-wx-v0.3.0-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.0/stories-in-wx-v0.3.0-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.1/stories-in-wx-v0.3.1-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.1/stories-in-wx-v0.3.1-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.0/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.1/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
