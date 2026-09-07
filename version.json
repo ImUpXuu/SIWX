@@ -1,7 +1,7 @@
 {
   "version": "0.3.3",
-  "date": "2026-09-07 13:45:14",
-  "notes": "perf: 解密性能优化 +174MB/s\n\n- 内联 cbc_decrypt: 消除函数调用开销 (~9%)\n- 预计算 CT_LEN 常量到循环外\n- I/O 缓冲区 4MB → 8MB\n- 进度回调降频到每 100 页\n- 32 个数据库全部测试通过 (556MB, 7.36s)",
+  "date": "2026-09-07 14:09:43",
+  "notes": "perf: 流式消息解析器 + 分批导出 + 联系人缓存\n\n流式解析器(message_stream):\n- 生成器逐条产出，内存O(1)（从37.7MB降到1.7MB）\n- 搜索所有*.db（含biz_message_*.db），不遗漏\n- 接受缓存names参数，避免重复加载\n\n导出优化:\n- 所有格式使用流式解析器\n- 联系人缓存复用（加载一次，全导出共享）\n- 分批处理（每批500条），防止内存膨胀\n- 11992条消息导出仅需1.5-2.5s\n\n防卡死:\n- 万级消息峰值内存<2MB\n- 不再一次性加载全部消息到内存",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/stories-in-wx-v0.3.3-windows-x64.exe",
     "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/stories-in-wx-v0.3.3-macos.dmg"
