@@ -1,7 +1,7 @@
 {
   "version": "0.3.3",
-  "date": "2026-09-07 14:09:43",
-  "notes": "perf: 流式消息解析器 + 分批导出 + 联系人缓存\n\n流式解析器(message_stream):\n- 生成器逐条产出，内存O(1)（从37.7MB降到1.7MB）\n- 搜索所有*.db（含biz_message_*.db），不遗漏\n- 接受缓存names参数，避免重复加载\n\n导出优化:\n- 所有格式使用流式解析器\n- 联系人缓存复用（加载一次，全导出共享）\n- 分批处理（每批500条），防止内存膨胀\n- 11992条消息导出仅需1.5-2.5s\n\n防卡死:\n- 万级消息峰值内存<2MB\n- 不再一次性加载全部消息到内存",
+  "date": "2026-09-07 14:21:44",
+  "notes": "v0.3.3: 流式导出 + 万条消息不OOM\n\n- 流式消息解析器(message_stream): 生成器逐条产出，内存O(1)\n- 内存从37.7MB降到1.7MB(22x降低)\n- 万级消息峰值内存<3MB\n- 导出速度: TXT/CSV 8000+条/s, JSON 6000+条/s\n\n- 所有格式(JSON/TXT/CSV/MD/TOML/SQLite/XLSX)使用流式解析\n- 联系人缓存复用(加载一次，全导出共享)\n- 分批处理(每批500条)，防止内存膨胀\n- 搜索所有*.db(含biz_message_*.db)，不遗漏消息\n\n- JSON+媒体+头像+ZIP打包: 11992条消息 10.79s\n- 媒体解密并行化(多进程Pool)\n- 内存始终有界，不会OOM",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/stories-in-wx-v0.3.3-windows-x64.exe",
     "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/stories-in-wx-v0.3.3-macos.dmg"
