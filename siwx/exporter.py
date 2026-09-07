@@ -206,10 +206,10 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
            "xlsx": "xlsx"}.get(fmt, "json")
     out_file = export_dir / f"{fname}.{ext}"
 
+    # 传入缓存的 names，避免重复加载
     if fmt == "json":
-        # JSON 需要注入 mediaFile → 先映射再写
         def json_stream():
-            for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account):
+            for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
                 msg["mediaFile"] = media_map.get(msg["localId"])
                 yield msg
         written = stream_export_json(out_file, session, json_stream(), progress)
@@ -218,17 +218,17 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                                         end_ts, account, names, media_map, avatar_map, progress)
     elif fmt == "txt":
         written = stream_export_txt(out_file, session,
-                                    message_stream(acc_out_dir, chat, start_ts, end_ts, account), progress)
+                                    message_stream(acc_out_dir, chat, start_ts, end_ts, account, names), progress)
     elif fmt == "csv":
         written = stream_export_csv(out_file,
-                                    message_stream(acc_out_dir, chat, start_ts, end_ts, account), progress)
+                                    message_stream(acc_out_dir, chat, start_ts, end_ts, account, names), progress)
     elif fmt == "markdown":
         written = stream_export_md(out_file, session,
-                                   message_stream(acc_out_dir, chat, start_ts, end_ts, account), progress)
+                                   message_stream(acc_out_dir, chat, start_ts, end_ts, account, names), progress)
     elif fmt in ("toml", "sqlite", "xlsx"):
         # 这些格式需要全量数据 → 降级为流式分批（每批 500 条）
         written = _write_batch(out_file, fmt, session,
-                               acc_out_dir, chat, start_ts, end_ts, account, media_map, progress)
+                               acc_out_dir, chat, start_ts, end_ts, account, names, media_map, progress)
     else:
         raise ValueError(f"未知格式: {fmt}")
 
@@ -278,18 +278,18 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
     return count
 
 
-def _write_batch(path, fmt, session, acc_dir, chat, start_ts, end_ts, account,
+def _write_batch(path, fmt, session, acc_dir, chat, start_ts, end_ts, account, names,
                  media_map, progress=None):
     """TOML/SQLite/XLSX 流式分批写入。"""
     if fmt == "toml":
-        return _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, media_map, progress)
+        return _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress)
     elif fmt == "sqlite":
-        return _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, media_map, progress)
+        return _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress)
     elif fmt == "xlsx":
-        return _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, media_map, progress)
+        return _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress)
 
 
-def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, media_map, progress):
+def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress):
     def toml_str(s):
         return json.dumps(str(s), ensure_ascii=False)
     lines = ["[exportInfo]", f'version = {toml_str("1.0")}',
@@ -304,7 +304,7 @@ def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, m
             lines.append(f'{k} = {v}')
     lines.append("")
     count = 0
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account):
+    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
         msg["mediaFile"] = media_map.get(msg["localId"])
         count += 1
         lines.append("[[messages]]")
@@ -323,7 +323,7 @@ def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, m
     return count
 
 
-def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, media_map, progress):
+def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress):
     if path.exists():
         path.unlink()
     conn = sqlite3.connect(path)
@@ -340,7 +340,7 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
                   session["isGroup"], session["messageCount"],
                   session["firstTimestamp"], session["lastTimestamp"]))
     count = 0
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account):
+    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
         msg["mediaFile"] = media_map.get(msg["localId"])
         count += 1
         conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -359,14 +359,14 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
     return count
 
 
-def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, media_map, progress):
+def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress):
     from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
     ws.title = "聊天记录"
     ws.append(["localId", "时间", "类型", "发送者", "是否自己", "内容"])
     count = 0
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account):
+    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
         msg["mediaFile"] = media_map.get(msg["localId"])
         count += 1
         ws.append([msg["localId"],

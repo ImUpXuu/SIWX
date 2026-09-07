@@ -20,10 +20,36 @@ from siwx.api_chat import (
     _parse_appmsg, _parse_refer, _sender_map, _fmt,
 )
 
+"""流式导出管线 —— 解决万条聊天 OOM 问题。
+
+核心策略：
+1. 流式解析：生成器逐条产出消息，内存 O(1)
+2. 增量写入：JSON/TXT/CSV 直接写文件句柄，不构建巨型字符串
+3. 并行媒体：multiprocessing.Pool 并行解密图片（CPU 密集型 AES）
+4. 联系人缓存：只加载一次，跨调用复用
+5. 分批处理：每批 500 条，防止内存膨胀
+"""
+import heapq
+import hashlib
+import json
+import os
+import re
+import sqlite3
+from pathlib import Path
+
+from siwx import media
+from siwx.api_chat import (
+    KIND_MAP, SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
+    _parse_appmsg, _parse_refer, _sender_map, _fmt,
+)
+
 # 精简消息字段（去掉 rawContent 重复、去掉前端专用字段）
 _KEEP_FIELDS = ("localId", "createTime", "localType", "typeName",
                 "content", "isSend", "senderUsername", "senderDisplayName",
                 "md5", "bubbleMd5", "quote", "link")
+
+# 分批大小
+BATCH_SIZE = 500
 
 
 def _enrich_row(row, names, my_base, is_group, chat, account):
@@ -87,21 +113,45 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
     }
 
 
-def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
-                   account=None):
-    """流式生成器：按 create_time 顺序逐条产出消息。
+def count_messages(acc, chat):
+    """统计消息总数（不加载全部消息到内存）。"""
+    table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+    total = 0
+    for db in sorted((acc / "message").glob("*.db")):
+        conn = sqlite3.connect(db)
+        try:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone()
+            if exists:
+                cnt = conn.execute(f'SELECT COUNT(*) FROM [{table}]').fetchone()[0]
+                total += cnt
+        except Exception:
+            pass
+        finally:
+            conn.close()
+    return total
 
-    使用 heapq.merge 做 K 路归并，内存占用 O(分片数) 而非 O(消息总数)。
-    每个分片内已按 create_time 有序，归并时只缓存每分片第一条。
+
+def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
+                   account=None, names=None):
+    """流式生成器：按 create_time 顺序逐条产出消息，内存 O(分片数)。
+
+    使用 heapq.merge 做 K 路归并，每个分片内已按 create_time 有序。
+    搜索所有 *.db（含 biz_message_*.db），不遗漏任何消息。
+
+    参数:
+        names: 联系人名 dict，不传则自动加载（建议外部缓存传入以避免重复加载）
     """
     account = account or acc.name
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
-    names = _contact_names(acc)
+    if names is None:
+        names = _contact_names(acc)
     my_base = account.split("_6")[0] if "_6" in account else account
     is_group = chat.endswith("@chatroom")
 
     iterators = []
-    for db in sorted((acc / "message").glob("message_*.db")):
+    for db in sorted((acc / "message").glob("*.db")):
         conn = sqlite3.connect(db)
         exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -119,7 +169,6 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
     if not iterators:
         return
 
-    # K 路归并：每条 = (ts, local_id, (row_data))
     merged = heapq.merge(*iterators, key=lambda x: (x[0] or 0, x[1] or 0))
     for ts, local_id, (ltype, origin, rsid, content, packed, smap) in merged:
         if start_ts and (ts or 0) < start_ts:
