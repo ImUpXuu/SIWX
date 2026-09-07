@@ -1,12 +1,12 @@
 {
-  "version": "0.3.2",
-  "date": "2026-09-06 15:22:21",
-  "notes": "fix: 恢复原始解密逻辑 + 修复全局变量顺序bug + 文件日志\n\n- sqlcipher.py: 恢复到原始可用版本(fccfa23), 修复后续页跳过salt导致的损坏\n- server.py: 修复_job/_lock定义顺序(NameError 500), 添加RotatingFileLogger到logs/siwx.log\n- api_chat.py: _contact_names/schema错误降级处理",
+  "version": "0.3.3",
+  "date": "2026-09-07 13:45:14",
+  "notes": "perf: 解密性能优化 +174MB/s\n\n- 内联 cbc_decrypt: 消除函数调用开销 (~9%)\n- 预计算 CT_LEN 常量到循环外\n- I/O 缓冲区 4MB → 8MB\n- 进度回调降频到每 100 页\n- 32 个数据库全部测试通过 (556MB, 7.36s)",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.2/stories-in-wx-v0.3.2-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.2/stories-in-wx-v0.3.2-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/stories-in-wx-v0.3.3-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/stories-in-wx-v0.3.3-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.2/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
