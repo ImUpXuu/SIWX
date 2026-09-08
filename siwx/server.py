@@ -1,46 +1,17 @@
 """Web 控制台：Flask 壳 —— 页面路由 + 任务槽；业务 API 在 api_*.py 模块化蓝图中。"""
-import logging
-import os
 import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, Response
 
 from siwx import extract, keystore
+from siwx import logger as log
 from siwx import paths as _paths
 from siwx.discover import find_wechat_data_dirs, find_wechat_pids, wxid_of
 from siwx.sqlcipher import collect_db_files
-
-
-# ── 文件日志（详细）──────────────────────────────────────────────
-def _setup_file_logger():
-    log_dir = _paths.app_root() / "logs"
-    log_dir.mkdir(exist_ok=True)
-    logger = logging.getLogger("siwx")
-    logger.setLevel(logging.DEBUG)
-    # 避免重复添加
-    if logger.handlers:
-        return logger
-    fh = RotatingFileHandler(log_dir / "siwx.log", maxBytes=10 * 1024 * 1024,
-                              backupCount=5, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"))
-    logger.addHandler(fh)
-    # 控制台也输出 INFO+
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logger.addHandler(ch)
-    return logger
-
-_siwx_logger = _setup_file_logger()
 
 
 def _ui_dir() -> Path:
@@ -53,6 +24,10 @@ def _ui_dir() -> Path:
 UI_DIR = _ui_dir()
 
 app = Flask(__name__, static_folder=None)
+
+# 屏蔽 werkzeug HTTP 请求日志（太吵）
+import logging as _logging
+_logging.getLogger("werkzeug").setLevel(_logging.WARNING)
 
 # 模块化 API 蓝图（聊天查看 / 设置 / 导出 / MCP）
 from siwx.api_chat import bp as chat_bp  # noqa: E402
@@ -81,23 +56,13 @@ def _handle_exception(e):
     """未捕获异常 → 记录日志 + 返回 JSON（避免白屏 500）。"""
     import traceback
     tb = traceback.format_exc()
-    _siwx_logger.error(f"未捕获异常: {e}\n{tb}")
-    with _lock:
-        _job["logs"].append([int(time.time() * 1000), f"[错误] {type(e).__name__}: {e}"])
+    log.error("server", f"未捕获异常: {e}\n{tb}")
     return jsonify({"error": f"{type(e).__name__}: {e}", "traceback": tb}), 500
 
 
 def _log(msg: str) -> None:
-    """写入任务日志 + 全局环形缓冲 + 文件日志。"""
-    _siwx_logger.info(msg)
-    with _lock:
-        ts = int(time.time() * 1000)
-        _job["logs"].append([ts, msg])
-        if len(_job["logs"]) > 1200:
-            del _job["logs"][:400]
-        _LOG_RING.append([ts, msg])
-        if len(_LOG_RING) > _LOG_RING_MAX:
-            del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
+    """写入任务日志（兼容旧接口，使用新日志系统）。"""
+    log.rough("job", msg)
 
 
 def _now_ms() -> int:
@@ -348,12 +313,43 @@ def _tail_mcp_log(limit: int = 500) -> list:
 
 @app.get("/api/logs")
 def api_logs():
-    """返回环形日志缓冲 + MCP 调用日志（合并按时间排序）。"""
-    with _lock:
-        web_logs = list(_LOG_RING)
-    mcp_logs = _tail_mcp_log(500)
-    merged = sorted(web_logs + mcp_logs, key=lambda x: x[0])
-    return jsonify({"logs": merged})
+    """返回环形日志缓冲（供日志页展示）。"""
+    limit = min(int(request.args.get("limit", "2000")), 5000)
+    logs = log.get_logs(limit=limit)
+    return jsonify({"logs": logs, "level": log.get_level().value})
+
+
+@app.get("/api/logs/settings")
+def api_log_settings():
+    """获取日志设置。"""
+    return jsonify({"level": log.get_level().value})
+
+
+@app.post("/api/logs/settings")
+def api_log_settings_save():
+    """设置日志模式。"""
+    data = request.get_json(silent=True) or {}
+    level = data.get("level", "rough")
+    if level == "detailed":
+        log.set_level(log.LogLevel.DETAILED)
+    else:
+        log.set_level(log.LogLevel.ROUGH)
+    return jsonify({"level": log.get_level().value})
+
+
+@app.get("/api/logs/export")
+def api_log_export():
+    """导出脱敏日志。"""
+    start_ts = request.args.get("start")
+    end_ts = request.args.get("end")
+    desensitize = request.args.get("desensitize", "1") == "1"
+
+    start = int(start_ts) if start_ts else None
+    end = int(end_ts) if end_ts else None
+
+    text = log.export_logs(start_ts=start, end_ts=end, desensitize=desensitize)
+    return Response(text, mimetype="text/plain",
+                    headers={"Content-Disposition": "attachment; filename=siwx_log.txt"})
 
 
 @app.get("/api/job")

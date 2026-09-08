@@ -12,15 +12,12 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, current_app as _current_app
 
+from siwx import logger as log
 from siwx import media
 
 def _log(msg: str) -> None:
-    """api_chat 模块的轻量日志（同步 API 端点用，不写任务缓冲）。"""
-    try:
-        import logging
-        logging.getLogger("siwx").info(msg)
-    except Exception:
-        pass
+    """兼容旧接口。"""
+    log.rough("chat", msg)
 
 try:
     import zstandard as _zstd
