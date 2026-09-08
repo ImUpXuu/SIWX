@@ -1,61 +1,47 @@
-/* 引导页 —— 毛玻璃风格 + 丝滑动画 */
+/* 引导页 —— 白底细边框 + 简洁专业 */
 .guide { max-width: 860px; margin: 0 auto; }
-
-.g-steps { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.g-steps { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
 .g-chip {
-  font-size: 11.5px; font-weight: 600; padding: 5px 14px;
+  font-size: 11.5px; font-weight: 600; padding: 4px 12px;
   border: 1px solid var(--line); border-radius: 999px;
   background: var(--card); color: var(--muted);
-  transition: all .25s var(--transition);
+  transition: all .15s ease;
 }
-.g-chip.on { background: var(--blue-light); color: var(--blue-deep); border-color: var(--blue); box-shadow: 0 0 12px rgba(99,102,41,.2); }
-.g-chip.done { background: var(--ok-bg); color: var(--ok-fg); border-color: rgba(52,211,153,.3); }
+.g-chip.on { background: var(--blue-light); color: var(--blue); border-color: #bfdbfe; }
+.g-chip.done { background: var(--ok-bg); color: var(--ok-fg); border-color: #6ee7b7; }
 
 .g-macos-hint {
-  background: var(--warn-bg); border: 1px solid rgba(251,191,36,.3); border-radius: var(--radius-sm);
+  background: var(--warn-bg); border: 1px solid #fcd34d; border-radius: var(--radius-sm);
   padding: 10px 14px; margin-bottom: 12px; font-size: 12.5px; color: var(--warn-fg);
-  animation: shake .5s ease-in-out;
 }
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-4px); }
-  75% { transform: translateX(4px); }
-}
-
-.g-desc { margin-bottom: 16px; }
-.g-check {
-  border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 14px 18px;
-  font-size: 13px; background: var(--card-warm);
-  animation: scaleIn .3s var(--transition);
-}
+.g-desc { margin-bottom: 14px; }
+.g-check { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 12px 16px;
+           font-size: 13px; background: var(--card-warm); }
 .g-check div { padding: 2px 0; }
-.g-nav { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+.g-nav { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 
-.accounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.accounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
 .acc {
-  display: flex; align-items: center; gap: 12px; cursor: pointer;
-  padding: 14px 16px; border-radius: var(--radius);
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 12px 14px; border-radius: var(--radius);
   border: 1px solid var(--line); background: var(--card);
-  backdrop-filter: var(--blur);
-  box-shadow: var(--shadow-sm);
-  transition: all .3s var(--transition);
-  animation: slideUp .4s var(--transition) both;
+  box-shadow: var(--shadow); transition: all .15s ease;
+  animation: slideUp .3s ease both;
 }
 .acc:nth-child(1) { animation-delay: 0ms; }
-.acc:nth-child(2) { animation-delay: 60ms; }
-.acc:nth-child(3) { animation-delay: 120ms; }
-.acc:nth-child(4) { animation-delay: 180ms; }
-.acc:nth-child(5) { animation-delay: 240ms; }
-.acc:nth-child(6) { animation-delay: 300ms; }
-.acc:hover { background: var(--card-alt); box-shadow: var(--shadow-md); transform: translateY(-2px); }
-.acc.sel { background: var(--blue-light); border-color: var(--blue); box-shadow: var(--shadow-glow); }
+.acc:nth-child(2) { animation-delay: 40ms; }
+.acc:nth-child(3) { animation-delay: 80ms; }
+.acc:nth-child(4) { animation-delay: 120ms; }
+.acc:nth-child(5) { animation-delay: 160ms; }
+.acc:nth-child(6) { animation-delay: 200ms; }
+.acc:hover { border-color: var(--line-strong); box-shadow: var(--shadow-md); }
+.acc.sel { background: var(--blue-light); border-color: var(--blue); }
 .avatar {
-  width: 40px; height: 40px; border-radius: 12px; flex: none;
-  background: linear-gradient(135deg, var(--blue), var(--purple));
-  color: #fff; font-weight: 700; font-size: 13px;
+  width: 36px; height: 36px; border-radius: 8px; flex: none;
+  background: #e5e7eb; color: #6b7280; font-weight: 700; font-size: 12px;
   display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 2px 8px rgba(99,102,241,.3);
 }
+.acc.sel .avatar { background: var(--blue); color: #fff; }
 .acc-main { min-width: 0; flex: 1; margin-right: 6px; line-height: 1.4; }
 .acc-main b { font-size: 13px; font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis;
               white-space: nowrap; max-width: 150px; color: var(--text-bright); }
