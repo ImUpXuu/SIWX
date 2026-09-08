@@ -145,3 +145,13 @@ AGPL-3.0（不可商用）。详见 [LICENSE](./LICENSE)。
 ## 免责声明
 
 本项目仅供个人数据备份与研究使用。使用者应遵守所在法律法规，严禁用于未经授权访问他人数据。使用本项目产生的任何法律责任由使用者自行承担。
+
+---
+
+<div align="center">
+
+**开发者**: [UPXUU](https://upxuu.com) · **博客**: [upxuu.com](https://upxuu.com)
+
+**License**: AGPL-3.0（不可商用）· **Copyright**: © 2026 UPXUU
+
+</div>
