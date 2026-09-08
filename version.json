@@ -1,12 +1,12 @@
 {
-  "version": "0.3.3",
-  "date": "2026-09-07 14:21:44",
-  "notes": "v0.3.3: 流式导出 + 万条消息不OOM\n\n- 流式消息解析器(message_stream): 生成器逐条产出，内存O(1)\n- 内存从37.7MB降到1.7MB(22x降低)\n- 万级消息峰值内存<3MB\n- 导出速度: TXT/CSV 8000+条/s, JSON 6000+条/s\n\n- 所有格式(JSON/TXT/CSV/MD/TOML/SQLite/XLSX)使用流式解析\n- 联系人缓存复用(加载一次，全导出共享)\n- 分批处理(每批500条)，防止内存膨胀\n- 搜索所有*.db(含biz_message_*.db)，不遗漏消息\n\n- JSON+媒体+头像+ZIP打包: 11992条消息 10.79s\n- 媒体解密并行化(多进程Pool)\n- 内存始终有界，不会OOM",
+  "version": "0.3.5",
+  "date": "2026-09-08 13:35:53",
+  "notes": "v0.3.5: 版本修复 + macOS 引导 + README 重写\n\n- 打包产物版本号显示 0.0.0 → 正确读取 version.json + __version__ 兜底\n- macOS spec 添加 version.json 到打包资源\n\n- 引导页新增 macOS 提示：密钥未缓存时需在 60 秒内重新登录微信\n- LLDB 策略增加详细诊断日志（符号查找/断点命中/超时/进程状态）\n- 支持 x86_64 + arm64 双架构寄存器读取\n\n- README 重写：完整使用指南（源码运行 / Release 下载 / 构建发布）\n- 新增性能基准数据表\n- 新增架构说明\n\n- 解密: ~175MB/s\n- 导出: 6000-8000 条/s\n- 内存: < 3MB（万级消息不 OOM）",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/stories-in-wx-v0.3.3-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/stories-in-wx-v0.3.3-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.5/stories-in-wx-v0.3.5-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.5/stories-in-wx-v0.3.5-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.3/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.5/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
