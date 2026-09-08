@@ -1,8 +1,11 @@
+/* 日志页 —— 毛玻璃风格 + 丝滑动画 */
 .logs { max-width: 900px; margin: 0 auto; }
-.log-actions { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
-.log-actions .btn { padding: 6px 14px; font-size: 13px; }
+.log-actions { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
+.log-actions .btn { padding: 7px 16px; font-size: 13px; }
 .log-actions .chk { font-size: 12.5px; color: var(--muted); cursor: pointer; margin-left: auto; }
 #log-box { height: calc(100vh - 200px); max-height: 600px; }
+.log-line { transition: background .15s; padding: 2px 4px; border-radius: 4px; }
+.log-line:hover { background: var(--card-alt); }
 .log-line.warn { color: var(--warn-fg); }
 .log-line.err { color: var(--err-fg); }
 .log-line.ok { color: var(--ok-fg); }

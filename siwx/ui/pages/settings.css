@@ -1,15 +1,27 @@
+/* 设置页 —— 毛玻璃风格 + 丝滑动画 */
 .settings { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
-.s-card { /* 复用全局 card */ }
-.s-actions { display: flex; flex-direction: column; gap: 12px; }
+.s-card { /* uses global card */ }
+.s-actions { display: flex; flex-direction: column; gap: 14px; }
 .s-item {
   display: grid; grid-template-columns: 130px 1fr auto; gap: 12px; align-items: center;
-  border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 12px 14px;
+  border: 1px dashed var(--line); border-radius: var(--radius); padding: 14px 16px;
+  transition: all .25s var(--transition);
 }
-.s-item b { font-size: 13px; font-weight: 600; }
+.s-item:hover { border-color: var(--line-strong); background: var(--card-alt); }
+.s-item b { font-size: 13px; font-weight: 600; color: var(--text-bright); }
 .s-item span { font-size: 12px; }
+.s-item select, .s-item input[type="text"] {
+  font-family: inherit; font-size: 13px; color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: rgba(0,0,0,.3); padding: 7px 10px; outline: none;
+  transition: all .25s var(--transition);
+}
+.s-item select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-light); }
 @media (max-width: 700px) {
   .s-item { grid-template-columns: 1fr; }
 }
 .ov-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
-          padding: 6px 0; border-top: 1px dashed var(--line); font-size: 13px; }
+          padding: 7px 0; border-top: 1px dashed var(--line); font-size: 13px;
+          transition: background .2s; }
 .ov-row:first-child { border-top: none; }
+.ov-row:hover { background: var(--card-alt); margin: 0 -8px; padding: 7px 8px; border-radius: 6px; }
