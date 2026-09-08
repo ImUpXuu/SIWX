@@ -51,6 +51,12 @@ _LOG_RING_MAX = 2000
 
 
 # ── 全局错误处理：确保所有异常都有日志 + JSON 响应 ──────────────
+@app.errorhandler(404)
+def _handle_404(e):
+    """404 不记录为错误（浏览器自动请求 favicon 等）。"""
+    return jsonify({"error": "not found"}), 404
+
+
 @app.errorhandler(Exception)
 def _handle_exception(e):
     """未捕获异常 → 记录日志 + 返回 JSON（避免白屏 500）。"""
@@ -58,6 +64,12 @@ def _handle_exception(e):
     tb = traceback.format_exc()
     log.error("server", f"未捕获异常: {e}\n{tb}")
     return jsonify({"error": f"{type(e).__name__}: {e}", "traceback": tb}), 500
+
+
+@app.get("/favicon.ico")
+def favicon():
+    """返回空 favicon 避免 404。"""
+    return "", 204
 
 
 def _log(msg: str) -> None:
