@@ -10,6 +10,7 @@
 import time
 from pathlib import Path
 
+from siwx import logger as log
 from siwx import keystore
 from siwx.discover import find_wechat_data_dirs, wxid_of
 from siwx.pool import decrypt_parallel, load_manifest, save_manifest
@@ -27,7 +28,17 @@ def _round_mb(n: float) -> float:
     return round(n / 1048576.0, 1)
 
 
-def _discover(log):
+def _discover(log_fn):
+    """发现微信数据目录。"""
+    dirs = find_wechat_data_dirs()
+    if not dirs:
+        log_fn("✗ 未找到微信数据目录 (xwechat_files/*/db_storage)")
+        log.detailed("discover", "搜索路径: USERPROFILE/Documents/xwechat_files, USERPROFILE/xwechat_files, A-Z:/xwechat_files")
+    else:
+        log_fn(f"自动扫描到 {len(dirs)} 个微信账号")
+        for wxid, db_dir in dirs:
+            log.detailed("discover", f"账号={wxid}, 路径={db_dir}")
+    return dirs
     dirs = find_wechat_data_dirs()
     if not dirs:
         log("✗ 未找到微信数据目录 (xwechat_files/*/db_storage)")
@@ -102,23 +113,33 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
         page1_by_salt.setdefault(e.salt_hex, e.page1)
         salt_to_dbs.setdefault(e.salt_hex, []).append(e.rel)
     log(f"[extract] 唯一 salt 数: {len(page1_by_salt)}")
+    for salt_hex, dbs in salt_to_dbs.items():
+        log.detailed("extract", f"salt={salt_hex[:16]}... 关联{len(dbs)}个库: {', '.join(dbs[:3])}{'...' if len(dbs)>3 else ''}")
 
     key_map, attrib = {}, {}
     cached_keys = 0
 
     # 0) 预置密钥（全局收割 / 密钥库缓存），逐个 HMAC 复核
+    preset_miss = 0
     for salt, key in (preset or {}).items():
         if salt in page1_by_salt and salt not in key_map:
             try:
                 kb = parse_key(key)
             except ValueError:
+                log.detailed("extract", f"预置密钥解析失败 salt={salt[:16]}...")
                 continue
             if verify_enc_key(kb, page1_by_salt[salt]):
                 key_map[salt] = key.lower()
                 attrib[salt] = "缓存"
                 cached_keys += 1
+            else:
+                preset_miss += 1
+                log.detailed("extract", f"预置密钥HMAC失败 salt={salt[:16]}...")
     if cached_keys:
         log(f"[keystore] 缓存命中 {cached_keys} 个")
+    if preset_miss:
+        log(f"[extract] 预置密钥未命中 {preset_miss} 个")
+    log.detailed("extract", f"预置密钥处理完成: 命中{cached_keys}, 未命中{preset_miss}, 待验证{len(page1_by_salt)-len(key_map)}")
 
     ctx = {
         "db_dir": str(db_dir), "entries": entries,
@@ -127,8 +148,10 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
         "use_memory": use_memory,
     }
     run_strategies(ctx)
+    log.detailed("extract", f"策略链执行后: 已验证{len(key_map)}/{len(page1_by_salt)}")
 
     # 交叉验证：已知密钥复测缺失 salt
+    cross_ok = 0
     for salt, page1 in page1_by_salt.items():
         if salt in key_map:
             continue
@@ -141,7 +164,10 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
                 log(f"  [交叉验证] salt={salt[:16]}… 复用已知密钥")
                 key_map[salt] = k
                 attrib[salt] = "交叉验证"
+                cross_ok += 1
                 break
+    if cross_ok:
+        log(f"[extract] 交叉验证命中 {cross_ok} 个")
 
     if key_map:
         store = keystore.load()

@@ -5,6 +5,28 @@
   </div>
 
   <div class="card">
+    <div class="card-head"><h2>日志</h2><span class="hint">日志模式控制与脱敏导出</span></div>
+    <div class="s-actions">
+      <div class="s-item">
+        <b>日志模式</b>
+        <span class="dim">详细模式记录所有操作步骤，便于排查问题（会增加日志量）</span>
+        <select id="s-log-level" class="f-select">
+          <option value="rough">粗略（默认）</option>
+          <option value="detailed">详细</option>
+        </select>
+      </div>
+      <div class="s-item">
+        <b>导出脱敏日志</b>
+        <span class="dim">导出时自动去除密钥/wxid/路径等敏感信息，可安全分享用于调试</span>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <label class="f-chk"><input type="checkbox" id="s-log-desensitize" checked> 脱敏</label>
+          <button class="btn" id="s-export-log">📥 导出日志</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-head"><h2>缓存状态</h2><span class="hint">密钥与解密产物都有缓存，重跑不会重复计算</span></div>
     <div id="s-overview">加载中…</div>
   </div>

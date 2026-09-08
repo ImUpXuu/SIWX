@@ -115,6 +115,34 @@ export async function init() {
     resetSetup();
     go('#/guide');
   });
-}
+
+  // ── 日志模式 ──────────────────────────────────────────
+  async function loadLogSettings() {
+    try {
+      const s = await fetchJSON('/api/logs/settings');
+      el('s-log-level').value = s.level || 'rough';
+    } catch (e) { /* 忽略 */ }
+  }
+
+  el('s-log-level').addEventListener('change', async (e) => {
+    await fetchJSON('/api/logs/settings', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ level: e.target.value }),
+    });
+    window.alert(`日志模式已切换为: ${e.target.value === 'detailed' ? '详细' : '粗略'}`);
+  });
+
+  // ── 脱敏日志导出 ──────────────────────────────────────
+  el('s-export-log').addEventListener('click', () => {
+    const desensitize = el('s-log-desensitize').checked;
+    const url = `/api/logs/export?desensitize=${desensitize ? '1' : '0'}`;
+    // 触发下载
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `siwx_log_${Date.now()}.txt`;
+    a.click();
+  });
+
+  await loadLogSettings();
 
 export function destroy() { /* 无常驻定时器 */ }

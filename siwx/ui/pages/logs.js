@@ -7,11 +7,15 @@ let lastLen = 0;
 
 function el(id) { return document.getElementById(id); }
 
-function levelClass(m) {
-  if (m.includes("[错误]") || m.includes("✗") || m.includes("失败")) return "log-line err";
-  if (m.includes("✔") || m.includes("成功") || m.includes("已验证")) return "log-line ok";
-  if (m.includes("⚠") || m.includes("跳过") || m.includes("缺失")) return "log-line warn";
-  return "log-line dim";
+function levelClass(level, msg) {
+  // 使用日志级别（新格式）
+  if (level === "ERROR") return "log-line err";
+  if (level === "WARN") return "log-line warn";
+  if (level === "DEBUG") return "log-line dim";
+  // INFO: 根据内容判断
+  if (msg.includes("✔") || msg.includes("成功") || msg.includes("已验证") || msg.includes("完成")) return "log-line ok";
+  if (msg.includes("✗") || msg.includes("失败") || msg.includes("错误")) return "log-line err";
+  return "log-line";
 }
 
 function renderLogs(logs) {
@@ -19,14 +23,24 @@ function renderLogs(logs) {
   if (logs.length === lastLen) return;
   // 只追加新增条目（避免全量重绘）
   for (let i = lastLen; i < logs.length; i++) {
-    const [, m] = logs[i];
+    const entry = logs[i];
+    // 兼容旧格式 [ts, msg] 和新格式 [ts, level, module, msg]
+    let level, module, msg;
+    if (entry.length >= 4) {
+      [, level, module, msg] = entry;
+    } else {
+      [, msg] = entry;
+      level = "INFO";
+      module = "";
+    }
     const div = document.createElement("div");
-    div.className = levelClass(m);
-    div.textContent = m;
+    div.className = levelClass(level, msg);
+    const timeStr = new Date(entry[0]).toLocaleTimeString("zh-CN", { hour12: false });
+    div.textContent = `${timeStr} [${module}] ${msg}`;
     box.appendChild(div);
   }
   // 限制 DOM 节点数
-  while (box.children.length > 1000) box.removeChild(box.firstChild);
+  while (box.children.length > 2000) box.removeChild(box.firstChild);
   lastLen = logs.length;
   el("log-count").textContent = `${logs.length} 条`;
   if (autoScroll) box.scrollTop = box.scrollHeight;
@@ -35,8 +49,13 @@ function renderLogs(logs) {
 async function poll() {
   if (paused) return;
   try {
-    const d = await fetchJSON("/api/logs");
+    const d = await fetchJSON("/api/logs?limit=2000");
     renderLogs(d.logs || []);
+    // 显示当前日志模式
+    if (d.level) {
+      const modeEl = el("log-mode");
+      if (modeEl) modeEl.textContent = d.level === "detailed" ? "详细模式" : "粗略模式";
+    }
   } catch (e) { /* 忽略 */ }
 }
 
@@ -57,4 +76,4 @@ export async function init() {
   setInterval(poll, 1000);
 }
 
-export function destroy() { /* 由 router 清理 */}
+export function destroy() { /* 由 router 清理 */ }
