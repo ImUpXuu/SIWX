@@ -25,7 +25,7 @@ class LogLevel(Enum):
 
 # 全局状态
 _lock = threading.Lock()
-_log_level = LogLevel.ROUGH
+_log_level = LogLevel.ROUGH  # 默认粗略模式
 _LOG_RING: list = []          # 环形缓冲（供日志页展示）
 _LOG_RING_MAX = 5000          # 详细模式保留更多
 _FILE_LOG: list = []          # 完整日志（供导出）
