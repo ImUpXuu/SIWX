@@ -1,26 +1,22 @@
-/* 导出页 —— 毛玻璃风格 + 丝滑动画 */
+/* 导出页 —— 白底细边框 + 简洁专业 */
 .export-wrap {
-  display: grid; grid-template-columns: 280px 1fr; gap: 16px;
-  height: calc(100vh - 52px - 40px); min-height: 480px;
-  align-items: stretch;
+  display: grid; grid-template-columns: 260px 1fr; gap: 16px;
+  height: calc(100vh - 52px - 40px); min-height: 480px; align-items: stretch;
 }
 
-/* ── 左侧：多选会话列表 ─────────────────── */
 .e-list {
   display: flex; flex-direction: column; min-height: 0;
-  background: var(--card);
-  backdrop-filter: var(--blur);
-  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-lg);
   overflow: hidden; box-shadow: var(--shadow);
 }
-.e-top { padding: 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.e-top { padding: 10px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
 #e-account, #e-search {
   width: 100%; font-size: 13px; color: var(--text);
   border: 1px solid var(--line); border-radius: var(--radius-sm);
-  background: rgba(0,0,0,.3); padding: 8px 10px; outline: none;
-  transition: all .25s var(--transition);
+  background: var(--card); padding: 7px 10px; outline: none;
+  transition: all .15s ease;
 }
-#e-account:focus, #e-search:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-light); }
+#e-account:focus, #e-search:focus { border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-light); }
 .e-selall { font-size: 12px; color: var(--muted); cursor: pointer;
             display: flex; align-items: center; gap: 6px; user-select: none; }
 .e-selall input { accent-color: var(--blue); }
@@ -31,57 +27,56 @@
 
 .e-sess {
   position: relative; display: flex; align-items: center; gap: 8px;
-  padding: 10px 12px 10px 36px; min-height: 50px;
-  cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.03);
-  transition: all .2s var(--transition);
+  padding: 8px 10px 8px 32px; min-height: 46px; cursor: pointer;
+  border-bottom: 1px solid rgba(0,0,0,.03);
+  transition: background .12s ease;
 }
 .e-sess:hover { background: var(--card-alt); }
 .e-sess.sel { background: var(--blue-light); }
 .e-sess input[type=checkbox] {
-  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
-  width: 15px; height: 15px; accent-color: var(--blue);
+  position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; accent-color: var(--blue);
 }
 .e-body { min-width: 0; flex: 1; }
 .e-sess .name {
   display: block; font-size: 12.5px; font-weight: 600; color: var(--text);
-  line-height: 17px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-right: 6px;
+  line-height: 16px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-right: 6px;
 }
-.e-sess.sel .name { color: var(--blue-deep); }
+.e-sess.sel .name { color: var(--blue); }
 .e-sess .prev {
   display: block; font-size: 11px; color: var(--muted);
-  line-height: 15px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-right: 52px;
+  line-height: 14px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-right: 48px;
 }
-.e-sess .tm { position: absolute; right: 12px; top: 10px; font-size: 10px; color: var(--muted); }
+.e-sess .tm { position: absolute; right: 10px; top: 8px; font-size: 10px; color: var(--muted); }
 
-/* ── 右侧：配置 + 进度 + 日志 ────────────── */
-.e-side { display: flex; flex-direction: column; gap: 16px; min-width: 0; min-height: 0; overflow-y: auto; }
-.f-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.e-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow-y: auto; }
+.f-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .f-grid2 label { font-size: 12px; color: var(--muted); font-weight: 500; display: flex; flex-direction: column; gap: 4px; }
 .f-grid2 select, .f-grid2 input {
   font-family: inherit; font-size: 13px; color: var(--text);
   border: 1px solid var(--line); border-radius: var(--radius-sm);
-  background: rgba(0,0,0,.3); padding: 8px 10px; outline: none;
-  transition: all .25s var(--transition);
+  background: var(--card); padding: 7px 9px; outline: none;
+  transition: all .15s ease;
 }
-.f-grid2 select:focus, .f-grid2 input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-light); }
-.f-checks { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; }
-.f-chk { font-size: 13px; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
-.f-chk input { width: 15px; height: 15px; accent-color: var(--blue); }
-.g-nav { margin-top: 14px; }
+.f-grid2 select:focus, .f-grid2 input:focus { border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-light); }
+.f-checks { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; }
+.f-chk { font-size: 13px; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 5px; }
+.f-chk input { width: 14px; height: 14px; accent-color: var(--blue); }
+.g-nav { margin-top: 12px; }
 
-.e-logcard { flex: 1; min-height: 180px; display: flex; flex-direction: column; }
-.e-logcard .console { flex: 1; min-height: 120px; max-height: 320px; }
+.e-logcard { flex: 1; min-height: 160px; display: flex; flex-direction: column; }
+.e-logcard .console { flex: 1; min-height: 100px; max-height: 300px; }
 #e-result { margin-top: 10px; }
 
-.res-row { font-size: 13px; font-weight: 600; padding: 4px 0; }
+.res-row { font-size: 13px; font-weight: 600; padding: 3px 0; }
 .res-ok { color: var(--ok-fg); }
 .res-err { color: var(--err-fg); }
 .res-meta { font-size: 12px; color: var(--muted); padding: 2px 0; }
-.res-meta a { color: var(--blue-deep); text-decoration: none; }
+.res-meta a { color: var(--blue); text-decoration: none; }
 .res-meta a:hover { text-decoration: underline; }
-.res-actions { padding: 6px 0; display: flex; gap: 12px; }
-.res-actions a { color: var(--blue-deep); text-decoration: none; font-size: 13px; font-weight: 500; }
-.res-logs-detail { margin-top: 8px; font-size: 12px; }
+.res-actions { padding: 5px 0; display: flex; gap: 10px; }
+.res-actions a { color: var(--blue); text-decoration: none; font-size: 12px; font-weight: 500; }
+.res-logs-detail { margin-top: 6px; font-size: 11.5px; }
 .res-logs-detail summary { cursor: pointer; color: var(--muted); }
 .res-logs-detail .log-line { padding: 1px 0; }
 
