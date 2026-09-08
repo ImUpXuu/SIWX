@@ -119,4 +119,13 @@ siwx/
 ## 说明
 
 - 未登录账号的密钥不在微信内存中（微信按需懒加载数据库），切换登录后重新运行即可提取。
+## Star History
+
+<a href="https://www.star-history.com/?repos=imupxuu%2Fsiwx&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=imupxuu/siwx&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=imupxuu/siwx&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=imupxuu/siwx&type=date&legend=top-left" />
+ </picture>
+</a>
 - macOS 端需要微信已登录且安装 Xcode Command Line Tools（提供 lldb）。
