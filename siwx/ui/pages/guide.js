@@ -75,7 +75,12 @@ async function screen2() {
 function screen3() {
   show(3);
   if (state.account) {
-    document.getElementById('g3-hint').textContent =
+    const isMac = navigator.platform === 'MacIntel' || navigator.platform === 'macOS' || navigator.platform.includes('Mac');
+    const macHint = isMac
+      ? '<div class="g-macos-hint">⚠️ macOS 提示：若密钥未缓存，请在点击「提取并解密」前 <b>60 秒内重新登录微信</b>（退出再打开），确保密钥在内存中。</div>'
+      : '';
+    document.getElementById('g3-hint').innerHTML =
+      macHint +
       `对 ${state.account.wxid} 一键提取密钥并解密（${state.account.keys_cached}/${state.account.total_salts} 已缓存）。` +
       `请保持微信在线；已有缓存则秒回。`;
   }
