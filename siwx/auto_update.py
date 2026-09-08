@@ -25,12 +25,24 @@ TIMEOUT = 10
 
 
 def current_version() -> str:
-    """读取本地 version.json 的版本号。"""
+    """获取当前版本号。
+
+    优先级:
+    1. 打包产物: 从 bundled version.json 读取
+    2. 源码运行: 从 siwx.__version__ 读取
+    """
+    # 打包产物中 version.json 在 app_root()
     p = paths.app_root() / "version.json"
     try:
-        return json.loads(p.read_text(encoding="utf-8")).get("version", "0.0.0")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        v = data.get("version", "")
+        if v:
+            return v
     except Exception:
-        return "0.0.0"
+        pass
+    # 源码运行兜底
+    from siwx import __version__
+    return __version__
 
 
 def is_frozen() -> bool:

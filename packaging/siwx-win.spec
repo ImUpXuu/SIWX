@@ -8,7 +8,10 @@ ROOT = Path(SPECPATH).parent
 a = Analysis(
     [str(ROOT / "run.py")],
     pathex=[str(ROOT)],
-    datas=[(str(ROOT / "siwx" / "ui"), "ui")],
+    datas=[
+        (str(ROOT / "siwx" / "ui"), "ui"),
+        (str(ROOT / "version.json"), "."),
+    ],
     hiddenimports=[],
     binaries=[],
     noarchive=False,
