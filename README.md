@@ -119,6 +119,8 @@ siwx/
 ## 说明
 
 - 未登录账号的密钥不在微信内存中（微信按需懒加载数据库），切换登录后重新运行即可提取。
+-  macOS 端需要微信已登录且安装 Xcode Command Line Tools（提供 lldb）。
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=imupxuu%2Fsiwx&type=date&legend=top-left">
