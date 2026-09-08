@@ -23,3 +23,12 @@
 .ov-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
           padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
 .ov-row:first-child { border-top: none; }
+
+/* ── 关于 ───────────────────────────── */
+.about-block { font-size: 13px; line-height: 1.8; }
+.about-block p { margin-bottom: 10px; color: var(--muted); }
+.a-row { display: flex; justify-content: space-between; padding: 5px 0; border-top: 1px solid var(--line); }
+.a-row:first-of-type { border-top: none; }
+.a-row span { color: var(--muted); }
+.a-row a { color: var(--blue); text-decoration: none; font-weight: 500; }
+.a-row a:hover { text-decoration: underline; }
