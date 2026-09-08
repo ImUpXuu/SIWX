@@ -7,7 +7,8 @@
 }
 .g-chip.on { background: var(--blue-light); color: var(--blue); border-color: var(--blue); }
 .g-chip.done { background: var(--ok-bg); color: var(--ok-fg); border-color: #6ee7b7; }
-.g-title { font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.g-macos-hint { background: var(--warn-bg); border: 1px solid var(--warn-fg); border-radius: 8px;
+                padding: 8px 12px; margin-bottom: 10px; font-size: 12.5px; color: var(--warn-fg); }
 .g-desc { margin-bottom: 14px; }
 .g-check { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 12px 16px;
            font-size: 13px; background: var(--card-warm); }
