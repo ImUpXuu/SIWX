@@ -1,12 +1,12 @@
 {
-  "version": "0.3.5",
-  "date": "2026-09-08 13:35:53",
-  "notes": "v0.3.5: 版本修复 + macOS 引导 + README 重写\n\n- 打包产物版本号显示 0.0.0 → 正确读取 version.json + __version__ 兜底\n- macOS spec 添加 version.json 到打包资源\n\n- 引导页新增 macOS 提示：密钥未缓存时需在 60 秒内重新登录微信\n- LLDB 策略增加详细诊断日志（符号查找/断点命中/超时/进程状态）\n- 支持 x86_64 + arm64 双架构寄存器读取\n\n- README 重写：完整使用指南（源码运行 / Release 下载 / 构建发布）\n- 新增性能基准数据表\n- 新增架构说明\n\n- 解密: ~175MB/s\n- 导出: 6000-8000 条/s\n- 内存: < 3MB（万级消息不 OOM）",
+  "version": "0.4.0",
+  "date": "2026-09-08 14:59:19",
+  "notes": "stories-in-wx v0.4.0\n\n性能:\n- 解密: ~175MB/s\n- 导出: 6000-8000条/s, 内存<3MB\n- 流式解析: 万级消息不OOM\n\n功能:\n- 聊天查看/多格式导出/MCP服务器\n- 自动更新/跨平台Win+Mac\n- 双模式日志系统+脱敏导出",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.5/stories-in-wx-v0.3.5-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.5/stories-in-wx-v0.3.5-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.0/stories-in-wx-v0.4.0-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.0/stories-in-wx-v0.4.0-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.3.5/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.0/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
