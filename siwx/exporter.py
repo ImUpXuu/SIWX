@@ -270,7 +270,7 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                 progress(0, f"已收集 {count} 条…")
     lines.extend(batch)
 
-    session = {"wxid": chat, "sessionName": names.get(chat, chat),
+    session = {"wxid": chat, "displayName": names.get(chat, chat),
                "isGroup": chat.endswith("@chatroom"), "messageCount": count}
     from siwx.html_template import build_chat_data
     html = render_html(build_chat_data(session, lines, avatar_map))
