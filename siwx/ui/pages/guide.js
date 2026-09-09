@@ -213,8 +213,8 @@ export async function init(view) {
           const full = mine.verified >= mine.total_salts;
           const dec = mine.decrypt;
           if (g3Result) g3Result.innerHTML =
-            `<span class="badge ${full ? 'badge-full' : 'badge-part'}">密钥 {mine.verified}/{mine.total_salts}</span>` +
-            (dec ? ` <span class="badge badge-full">解密 {dec.ok} 库（缓存 {dec.cached || 0}）</span>` : '');
+            `<span class="badge ${full ? 'badge-full' : 'badge-part'}">密钥 ${mine.verified}/${mine.total_salts}</span>` +
+            (dec ? ` <span class="badge badge-full">解密 ${dec.ok} 库（缓存 ${dec.cached || 0}）</span>` : '');
         }
         const gFinish = document.getElementById('g-finish');
         if (gFinish) gFinish.classList.remove('hidden');
