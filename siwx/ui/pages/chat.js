@@ -162,11 +162,11 @@ function avaHtml(username, letters) {
 
 function bubble(m) {
   if (m.type === 10000 || m.type === 10002) {
-    return `<div class="m-row sys"><div class="m-bubble">${esc(m.text)}</div></div>`;
+    return `<div class="msg-row sys"><div class="m-bubble">${esc(m.text)}</div></div>`;
   }
   const who = m.is_me ? 'me' : '';
   const avaUser = m.is_me ? account : (m.sender_wxid || currentChat.username);
-  const ava = `<div class="cell-ava">${avaHtml(avaUser, (m.sender_name || '?').slice(0, 2).toUpperCase())}</div>`;
+  const ava = avaHtml(avaUser, (m.sender_name || '?').slice(0, 2).toUpperCase());
   const name = (!m.is_me && currentChat && currentChat.is_group && m.sender_name)
     ? `<div class="m-name">${esc(m.sender_name)}</div>` : '';
   let inner = '';
@@ -197,6 +197,19 @@ function bubble(m) {
   }
   let quoteHtml = '';
   if (m.quote && m.kind !== 'quote') {
+    quoteHtml = `<div class="m-quote"><div class="m-quote-n">${esc(m.quote.displayname)}</div>` +
+                `<div class="m-quote-t">${esc(m.quote.content)}</div></div>`;
+  }
+  return `
+    <div class="msg-row ${who}">
+      ${ava}
+      <div class="m-col">
+        ${name}
+        <div class="m-bubble">${quoteHtml}${inner}</div>
+        <div class="m-time">${fmtTs(m.ts)}</div>
+      </div>
+    </div>`;
+}
     quoteHtml = `<div class="m-quote"><div class="m-quote-n">${esc(m.quote.displayname)}</div>` +
                 `<div class="m-quote-t">${esc(m.quote.content)}</div></div>`;
   }
