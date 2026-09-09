@@ -1,12 +1,12 @@
 {
-  "version": "0.4.0",
-  "date": "2026-09-08 14:59:19",
-  "notes": "stories-in-wx v0.4.0\n\n性能:\n- 解密: ~175MB/s\n- 导出: 6000-8000条/s, 内存<3MB\n- 流式解析: 万级消息不OOM\n\n功能:\n- 聊天查看/多格式导出/MCP服务器\n- 自动更新/跨平台Win+Mac\n- 双模式日志系统+脱敏导出",
+  "version": "0.4.1",
+  "date": "2026-09-09 13:31:05",
+  "notes": "fix: 聊天UI flex布局重写 + 头像修复\n\n- 彻底重写chat.css: flex布局替代table布局\n- 修复头像: 移除重复position属性, 使用flex居中\n- 修复消息对齐: msg-row + m-col 结构\n- 头像文字fallback始终可见",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.0/stories-in-wx-v0.4.0-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.0/stories-in-wx-v0.4.0-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.1/stories-in-wx-v0.4.1-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.1/stories-in-wx-v0.4.1-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.0/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.4.1/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
