@@ -190,18 +190,20 @@ export async function init(view) {
     }
 
     setBusy(true);
-    document.getElementById('g3-progress').classList.remove('hidden');
-    const logEl = document.getElementById('g3-log');
-    logEl.classList.remove('hidden');
-    logEl.innerHTML = '';
-    document.getElementById('g3-result').innerHTML = '';
+    const g3Progress = document.getElementById('g3-progress');
+    const g3Log = document.getElementById('g3-log');
+    const g3Result = document.getElementById('g3-result');
+    if (g3Progress) g3Progress.classList.remove('hidden');
+    if (g3Log) { g3Log.classList.remove('hidden'); g3Log.innerHTML = ''; }
+    if (g3Result) g3Result.innerHTML = '';
+
     startJob({ mode: 'auto', db_dir: state.account.db_dir },
-      (logs) => renderLog(logEl, logs),
+      (logs) => { if (g3Log) renderLog(g3Log, logs); },
       (job) => {
         setBusy(false);
-        document.getElementById('g3-progress').classList.add('hidden');
+        if (g3Progress) g3Progress.classList.add('hidden');
         if (job.error) {
-          document.getElementById('g3-result').innerHTML =
+          if (g3Result) g3Result.innerHTML =
             `<span class="badge badge-none">❌ ${esc(job.error)}</span>`;
           return;
         }
@@ -210,11 +212,12 @@ export async function init(view) {
         if (mine) {
           const full = mine.verified >= mine.total_salts;
           const dec = mine.decrypt;
-          document.getElementById('g3-result').innerHTML =
-            `<span class="badge ${full ? 'badge-full' : 'badge-part'}">密钥 ${mine.verified}/${mine.total_salts}</span>` +
-            (dec ? ` <span class="badge badge-full">解密 ${dec.ok} 库（缓存 ${dec.cached || 0}）</span>` : '');
+          if (g3Result) g3Result.innerHTML =
+            `<span class="badge ${full ? 'badge-full' : 'badge-part'}">密钥 {mine.verified}/{mine.total_salts}</span>` +
+            (dec ? ` <span class="badge badge-full">解密 {dec.ok} 库（缓存 {dec.cached || 0}）</span>` : '');
         }
-        document.getElementById('g-finish').classList.remove('hidden');
+        const gFinish = document.getElementById('g-finish');
+        if (gFinish) gFinish.classList.remove('hidden');
       });
   });
 
@@ -224,4 +227,4 @@ export async function init(view) {
   });
 }
 
-export function destroy() { /* 无常驻定时器 */ }
+export function destroy() { /* no timers */ }
