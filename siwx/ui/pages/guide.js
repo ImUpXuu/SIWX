@@ -45,28 +45,42 @@ async function screen2() {
   const el = document.getElementById('g-accounts');
   const s = await fetchJSON('/api/status');
   state.accounts = s.accounts;
-  if (!s.accounts.length) {
-    el.innerHTML = '<div class="empty">未找到账号</div>';
+  if (!s.accounts.length && !state.manualAccounts?.length) {
+    el.innerHTML = '<div class="empty">未找到账号 — 请使用下方「手动指定路径」添加</div>';
     return;
   }
-  el.innerHTML = s.accounts.map((a, i) => `
-    <div class="acc ${state.account && state.account.db_dir === a.db_dir ? 'sel' : ''}" data-i="${i}">
-      <div class="avatar">${esc(a.wxid.replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
-      <div class="acc-main"><b>${esc(a.wxid)}</b><span>${a.db_count} 个数据库</span></div>
-      ${badge(a.keys_cached, a.total_salts)}
-    </div>`).join('');
+  renderAccounts2();
+}
+
+function renderAccounts2() {
+  const el = document.getElementById('g-accounts');
+  const autoAccounts = state.accounts || [];
+  const manualAccounts = state.manualAccounts || [];
+  const all = [...autoAccounts, ...manualAccounts];
+  el.innerHTML = all.map((a, i) => {
+    const isManual = a.manual;
+    const isSel = state.account && state.account.db_dir === a.db_dir;
+    return `
+    <div class="acc ${isSel ? 'sel' : ''}" data-i="${i}" data-manual="${isManual ? '1' : '0'}">
+      <div class="avatar" style="${isManual ? 'background:#10b981' : ''}">${esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
+      <div class="acc-main"><b>${esc(a.wxid)}</b><span>${a.db_count || '?'} 个数据库${isManual ? ' · 手动' : ''}</span></div>
+      ${!isManual ? badge(a.keys_cached, a.total_salts) : '<span class="pill pill-gray">手动</span>'}
+    </div>`;
+  }).join('');
   el.querySelectorAll('.acc').forEach(card => {
     card.addEventListener('click', () => {
-      state.account = s.accounts[Number(card.dataset.i)];
+      const i = Number(card.dataset.i);
+      const isManual = card.dataset.manual === '1';
+      state.account = isManual ? state.manualAccounts[i - state.accounts.length] : state.accounts[i];
       el.querySelectorAll('.acc').forEach(c => c.classList.remove('sel'));
       card.classList.add('sel');
       document.getElementById('g-to3').disabled = false;
       document.getElementById('g3-hint').textContent =
-        `对 ${state.account.wxid} 一键提取密钥并解密（${state.account.keys_cached}/${state.account.total_salts} 已缓存）。`;
+        `对 ${state.account.wxid} 一键提取密钥并解密${state.account.keys_cached ? ` (${state.account.keys_cached}/${state.account.total_salts} 已缓存)` : ''}。`;
     });
   });
   if (state.account) {
-    const idx = s.accounts.findIndex(a => a.db_dir === state.account.db_dir);
+    const idx = all.findIndex(a => a.db_dir === state.account.db_dir);
     if (idx >= 0) el.querySelector(`.acc[data-i="${idx}"]`)?.classList.add('sel');
     document.getElementById('g-to3').disabled = false;
   }
@@ -103,6 +117,48 @@ export async function init(view) {
     });
   });
   document.getElementById('g-to3').addEventListener('click', screen3);
+
+  // ── 手动路径 ──────────────────────────────────────────
+  const manualToggle = document.getElementById('g-manual-toggle');
+  const manualBox = document.getElementById('g-manual-box');
+  const manualPath = document.getElementById('g-manual-path');
+  const manualAdd = document.getElementById('g-manual-add');
+  const manualMsg = document.getElementById('g-manual-msg');
+  if (manualToggle) {
+    manualToggle.addEventListener('click', () => manualBox.classList.toggle('hidden'));
+  }
+  if (manualAdd) {
+    manualAdd.addEventListener('click', async () => {
+      const path = manualPath.value.trim();
+      if (!path) { manualMsg.textContent = '请输入路径'; return; }
+      manualAdd.disabled = true;
+      manualAdd.textContent = '验证中...';
+      try {
+        const r = await fetch('/api/discover/validate', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path }),
+        });
+        const d = await r.json();
+        if (d.ok) {
+          if (!state.manualAccounts) state.manualAccounts = [];
+          state.manualAccounts.push({ wxid: d.wxid, db_dir: d.db_dir, manual: true });
+          manualMsg.textContent = `✓ 已添加: ${d.wxid}`;
+          manualMsg.style.color = 'var(--ok-fg)';
+          manualPath.value = '';
+          renderAccounts2();
+        } else {
+          manualMsg.textContent = `✗ ${d.error}`;
+          manualMsg.style.color = 'var(--err-fg)';
+        }
+      } catch (e) {
+        manualMsg.textContent = `✗ ${e.message}`;
+        manualMsg.style.color = 'var(--err-fg)';
+      } finally {
+        manualAdd.disabled = false;
+        manualAdd.textContent = '添加';
+      }
+    });
+  }
 
   document.getElementById('g-run').addEventListener('click', () => {
     if (state.running || !state.account) return;

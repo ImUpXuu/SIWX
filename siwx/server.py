@@ -370,6 +370,15 @@ def api_job():
         })
 
 
+@app.post("/api/discover/validate")
+def api_validate_path():
+    """验证手动输入的微信存储路径。"""
+    from siwx.discover import validate_db_path
+    data = request.get_json(silent=True) or {}
+    result = validate_db_path(data.get("path", ""))
+    return jsonify(result)
+
+
 def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
     """serve 模式：rich TUI 状态栏 + 日志流，Flask 完全静默。"""
     import logging
