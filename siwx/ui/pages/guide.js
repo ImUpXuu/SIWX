@@ -173,7 +173,6 @@ export async function init(view) {
       }
     });
   }
-}
 
   document.getElementById('g-run').addEventListener('click', () => {
     if (state.running || !state.account) return;
