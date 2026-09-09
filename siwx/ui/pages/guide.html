@@ -24,6 +24,19 @@
     <h2 class="g-title">选择微信号</h2>
     <p class="dim g-desc">已列出本机全部数据目录；带"缓存 ✓"的账号之前配置过，重跑也是秒回。</p>
     <div id="g-accounts" class="accounts"><div class="empty">检测中…</div></div>
+    <div class="g-manual">
+      <button class="btn btn-sm" id="g-manual-toggle">⚙ 手动指定路径</button>
+      <div id="g-manual-box" class="hidden" style="margin-top:10px">
+        <p class="dim" style="font-size:12px;margin-bottom:6px">如果自动检测未找到，可手动指定微信数据目录（包含 db_storage 的目录）。<br>
+        微信内获取路径：微信设置 → 文件管理 → 打开文件夹 → 复制地址栏路径。</p>
+        <div style="display:flex;gap:6px">
+          <input id="g-manual-path" type="text" placeholder="例如: D:\xwechat_files\wxid_xxx\db_storage"
+                 style="flex:1;font-size:12px;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--text);outline:none">
+          <button class="btn btn-primary" id="g-manual-add">添加</button>
+        </div>
+        <div id="g-manual-msg" style="font-size:12px;margin-top:4px"></div>
+      </div>
+    </div>
     <div class="g-nav">
       <button class="btn" data-goto="1">← 上一步</button>
       <button class="btn btn-primary" id="g-to3" disabled>下一步 →</button>
