@@ -295,6 +295,15 @@ def run():
     return jsonify({"started": True})
 
 
+@app.post("/api/discover/validate")
+def api_validate_path():
+    """验证手动输入的微信存储路径。"""
+    from siwx.discover import validate_db_path
+    data = request.get_json(silent=True) or {}
+    result = validate_db_path(data.get("path", ""))
+    return jsonify(result)
+
+
 def _tail_mcp_log(limit: int = 500) -> list:
     """读取 MCP 日志文件末尾，转换为 [ts_ms, message] 格式。"""
     from siwx.mcp_server import _mcp_log_path

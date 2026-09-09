@@ -44,29 +44,46 @@ def find_wechat_data_dirs():
     roots = []
 
     if system == "Windows":
-        # Windows: 搜索所有盘符
         up = os.environ.get("USERPROFILE", "")
         if up:
             roots.append(Path(up) / "Documents" / "xwechat_files")
             roots.append(Path(up) / "xwechat_files")
+        # 搜索所有盘符
         for letter in string.ascii_uppercase:
             drive = Path(f"{letter}:\\")
             if drive.is_dir():
                 roots.append(drive / "xwechat_files")
+                # 也搜索 Documents 目录
+                docs = drive / "Users"
+                if docs.is_dir():
+                    try:
+                        for user_dir in docs.iterdir():
+                            if user_dir.is_dir():
+                                roots.append(user_dir / "Documents" / "xwechat_files")
+                                roots.append(user_dir / "xwechat_files")
+                    except OSError:
+                        pass
     elif system == "Darwin":
-        # macOS: 标准路径
         home = Path.home()
         containers = home / "Library" / "Containers"
-        # 微信数据可能在 Containers 下
         if containers.is_dir():
             for entry in containers.iterdir():
                 if entry.is_dir() and "wechat" in entry.name.lower():
                     wx_dir = entry / "Data" / "Documents" / "xwechat_files"
                     if wx_dir.is_dir():
                         roots.append(wx_dir)
-        # 也检查用户目录
         roots.append(home / "Documents" / "xwechat_files")
         roots.append(home / "xwechat_files")
+        # 也搜索 /Users 下其他用户
+        users_dir = Path("/Users")
+        if users_dir.is_dir():
+            try:
+                for user_dir in users_dir.iterdir():
+                    if user_dir.is_dir() and user_dir != home:
+                        roots.append(user_dir / "Documents" / "xwechat_files")
+                        roots.append(user_dir / "xwechat_files")
+            except OSError:
+                pass
     else:
         return []
 
@@ -84,3 +101,44 @@ def find_wechat_data_dirs():
             continue
     out.sort()
     return out
+
+
+def validate_db_path(path_str: str) -> dict:
+    """验证手动输入的路径是否有效。
+
+    返回 {"ok": bool, "wxid": str, "db_dir": str, "error": str}
+    """
+    p = Path(path_str.strip().strip('"').strip("'"))
+    if not p.is_dir():
+        return {"ok": False, "error": f"目录不存在: {p}"}
+    # 检查是否是 db_storage 目录
+    if p.name == "db_storage":
+        return {"ok": True, "wxid": p.parent.name, "db_dir": str(p)}
+    # 检查目录下是否有 db_storage
+    db_storage = p / "db_storage"
+    if db_storage.is_dir():
+        return {"ok": True, "wxid": p.name, "db_dir": str(db_storage)}
+    # 检查目录下是否有 .db 文件（可能是 message 等子目录）
+    dbs = list(p.glob("*.db"))
+    if dbs:
+        return {"ok": True, "wxid": p.parent.name, "db_dir": str(p)}
+    return {"ok": False, "error": "未找到 db_storage 子目录或 .db 文件，请确认路径"}
+
+
+def find_wechat_storage_in_wechat() -> str:
+    """尝试从微信进程中获取存储路径（通过进程命令行或内存）。"""
+    # 微信 4.x 默认路径通常在注册表中
+    # Windows: HKEY_CURRENT_USER\Software\Tencent\WeChat
+    system = platform.system()
+    if system == "Windows":
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Tencent\WeChat")
+            install_path, _ = winreg.QueryValueEx(key, "InstallPath")
+            winreg.CloseKey(key)
+            if install_path:
+                return str(Path(install_path).parent / "xwechat_files")
+        except Exception:
+            pass
+    return ""

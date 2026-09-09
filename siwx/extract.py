@@ -104,6 +104,7 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
     t0 = time.time()
     wxid = wxid_of(db_dir)
     log(f"── 账号 {wxid} ──")
+    _d = lambda m: log(f"[extract] {m}") if log else None
 
     if entries is None:
         entries = collect_db_files(db_dir)
@@ -114,7 +115,7 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
         salt_to_dbs.setdefault(e.salt_hex, []).append(e.rel)
     log(f"[extract] 唯一 salt 数: {len(page1_by_salt)}")
     for salt_hex, dbs in salt_to_dbs.items():
-        log.detailed("extract", f"salt={salt_hex[:16]}... 关联{len(dbs)}个库: {', '.join(dbs[:3])}{'...' if len(dbs)>3 else ''}")
+        _d(f"salt={salt_hex[:16]}... 关联{len(dbs)}个库: {', '.join(dbs[:3])}{'...' if len(dbs)>3 else ''}")
 
     key_map, attrib = {}, {}
     cached_keys = 0
@@ -126,7 +127,7 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
             try:
                 kb = parse_key(key)
             except ValueError:
-                log.detailed("extract", f"预置密钥解析失败 salt={salt[:16]}...")
+                _d(f"预置密钥解析失败 salt={salt[:16]}...")
                 continue
             if verify_enc_key(kb, page1_by_salt[salt]):
                 key_map[salt] = key.lower()
@@ -134,12 +135,12 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
                 cached_keys += 1
             else:
                 preset_miss += 1
-                log.detailed("extract", f"预置密钥HMAC失败 salt={salt[:16]}...")
+                _d(f"预置密钥HMAC失败 salt={salt[:16]}...")
     if cached_keys:
         log(f"[keystore] 缓存命中 {cached_keys} 个")
     if preset_miss:
         log(f"[extract] 预置密钥未命中 {preset_miss} 个")
-    log.detailed("extract", f"预置密钥处理完成: 命中{cached_keys}, 未命中{preset_miss}, 待验证{len(page1_by_salt)-len(key_map)}")
+    _d(f"预置密钥处理完成: 命中{cached_keys}, 未命中{preset_miss}, 待验证{len(page1_by_salt)-len(key_map)}")
 
     ctx = {
         "db_dir": str(db_dir), "entries": entries,
@@ -148,7 +149,7 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
         "use_memory": use_memory,
     }
     run_strategies(ctx)
-    log.detailed("extract", f"策略链执行后: 已验证{len(key_map)}/{len(page1_by_salt)}")
+    _d(f"策略链执行后: 已验证{len(key_map)}/{len(page1_by_salt)}")
 
     # 交叉验证：已知密钥复测缺失 salt
     cross_ok = 0
