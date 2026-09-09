@@ -256,13 +256,18 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                           names, media_map, avatar_map, progress=None):
     """HTML 流式导出：分批渲染，避免一次性构建巨型 JSON。"""
-    from siwx.html_template import render_html
+    from siwx.html_template import render_html, build_chat_data
     lines = []
     batch, count = [], 0
+    first_ts = last_ts = 0
     for msg in message_stream(acc_dir, chat, start_ts, end_ts, account):
         msg["mediaFile"] = media_map.get(msg["localId"])
         batch.append(msg)
         count += 1
+        ts = msg.get("createTime", 0) or 0
+        if count == 1:
+            first_ts = ts
+        last_ts = ts
         if len(batch) >= 500:
             lines.extend(batch)
             batch = []
@@ -270,9 +275,12 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                 progress(0, f"已收集 {count} 条…")
     lines.extend(batch)
 
-    session = {"wxid": chat, "displayName": names.get(chat, chat),
-               "isGroup": chat.endswith("@chatroom"), "messageCount": count}
-    from siwx.html_template import build_chat_data
+    display = names.get(chat, chat)
+    session = {
+        "wxid": chat, "displayName": display,
+        "isGroup": chat.endswith("@chatroom"), "messageCount": count,
+        "firstTimestamp": first_ts, "lastTimestamp": last_ts,
+    }
     html = render_html(build_chat_data(session, lines, avatar_map))
     path.write_text(html, encoding="utf-8")
     return count
