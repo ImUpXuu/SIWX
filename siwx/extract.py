@@ -196,6 +196,17 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
     }
     log(f"提取完成: {report['verified']}/{report['total_salts']} salt 已验证 "
         f"(耗时 {report['duration_ms']} ms)")
+
+    # 提取失败时给出明确提示
+    if report["verified"] == 0 and report["total_salts"] > 0:
+        log("[extract] ✗ 未能提取到任何密钥！可能原因:")
+        log("  1. 微信未登录 — 请先启动并登录微信")
+        log("  2. 微信版本不支持 — 需要 WeChat 4.1.x (Windows) 或 4.1.80+ (macOS)")
+        log("  3. 密钥已过期 — 尝试在微信中重新打开聊天后重跑")
+        from siwx.discover import find_wechat_pids
+        if not find_wechat_pids():
+            log("[extract] ⚠ 未检测到微信进程！请先启动微信")
+
     return report
 
 

@@ -26,6 +26,7 @@ async function screen1() {
   el.textContent = '正在检测环境…';
   try {
     const s = await fetchJSON('/api/status');
+    state.wechatRunning = s.wechat_running;
     const wx = s.wechat_running ? `✅ 微信运行中（${s.pids.length} 进程）`
                                 : `⚠️ 微信未运行 —— 提取密钥需要微信在线，请先启动并登录`;
     const accs = s.accounts.length
@@ -176,6 +177,18 @@ export async function init(view) {
 
   document.getElementById('g-run').addEventListener('click', () => {
     if (state.running || !state.account) return;
+
+    // 预检查：微信是否运行
+    if (!state.wechatRunning) {
+      const ok = window.confirm(
+        '⚠ 未检测到微信进程！\n\n' +
+        '提取密钥需要微信正在运行。\n' +
+        '请启动并登录微信后重试。\n\n' +
+        '仍要继续吗？（将跳过内存扫描，仅尝试离线提取）'
+      );
+      if (!ok) return;
+    }
+
     setBusy(true);
     document.getElementById('g3-progress').classList.remove('hidden');
     const logEl = document.getElementById('g3-log');
