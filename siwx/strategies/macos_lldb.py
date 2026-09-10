@@ -100,13 +100,22 @@ def extract(ctx) -> int:
     return found
 
 
-def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
-    """LLDB breakpoint to capture sqlite3_key passphrase arg, with detailed logging."""
+def _build_lldb_script(pid: int) -> str:
+    """渲染 LLDB 内嵌 Python 脚本。
+
+    注意: pid 必须在此处插值注入到脚本顶部。此前版本脚本内直接引用了
+    未定义的 `pid` 变量，`command script import` 执行时立即抛出
+    NameError，LLDB 对外只显示 "error: module importing failed"，
+    导致密钥捕获永远失败 (issue #3)。
+    """
     script = f"""
 import lldb, time, sys
 
+pid = {pid}
+
 debugger = lldb.SBDebugger.Create()
-debugger.SetAsync(False)
+# 异步模式: process.Continue() 立即返回，下方轮询循环的 30s deadline 才有效
+debugger.SetAsync(True)
 target = debugger.CreateTarget("")
 if not target:
     print("FAIL:CreateTarget")
@@ -114,31 +123,54 @@ if not target:
 
 error = lldb.SBError()
 process = target.AttachToProcessWithID(debugger, pid, error)
-if error.Fail():
+if error.Fail() or not process.IsValid():
     print(f"FAIL:Attach:{{error}}")
     sys.exit(1)
 
-# Search all modules for sqlite3_key
-addr = None
-found_mod = None
-for mod in target.module_iter():
-    for fn in ["sqlite3_key", "sqlite3_key_v2"]:
-        sym = mod.FindSymbol(fn)
-        if sym and sym.addr.IsValid():
-            addr = sym.addr
-            found_mod = mod.GetFileSpec().GetFilename()
-            break
-    if addr:
-        break
+# Attach 后按名字在所有模块上创建断点（兼容符号表/导出表两种形态）
+bp_key = target.BreakpointCreateByName("sqlite3_key")
+bp_v2 = target.BreakpointCreateByName("sqlite3_key_v2")
+n_loc = bp_key.GetNumLocations() + bp_v2.GetNumLocations()
 
-if not addr:
-    process.Kill()
+# Fallback: 扫描各模块符号表按地址建断点
+# (SBModule.FindSymbol 返回 SBSymbolContextList，需取 .symbol 才有 .addr)
+if n_loc == 0:
+    for mod in target.module_iter():
+        for fn in ["sqlite3_key", "sqlite3_key_v2"]:
+            try:
+                sc_list = mod.FindSymbol(fn)
+            except Exception:
+                continue
+            if not sc_list:
+                continue
+            for i in range(sc_list.GetSize()):
+                sym = sc_list.GetContextAtIndex(i).symbol
+                if not sym:
+                    continue
+                sa = sym.addr
+                if sa and sa.IsValid():
+                    la = sa.GetLoadAddress(target)
+                    if la != lldb.LLDB_INVALID_ADDRESS:
+                        target.BreakpointCreateByAddress(la)
+                        n_loc += 1
+
+print(f"BP:{{n_loc}}")
+if n_loc == 0:
+    try:
+        process.Detach()
+    except Exception:
+        pass
     print("FAIL:NoSymbol")
     sys.exit(1)
 
-print(f"SYM:{{found_mod}}:{{hex(addr.GetLoadAddress(target))}}")
-bp = target.BreakpointCreateByAddress(addr)
 process.Continue()
+
+def _reg(regs, names):
+    for n in names:
+        r = regs.GetRegisterByName(n)
+        if r and r.IsValid():
+            return r.GetValueAsUnsigned()
+    return None
 
 deadline = time.time() + 30
 found = False
@@ -147,52 +179,68 @@ while time.time() < deadline:
     if not process.IsValid():
         print(f"PROCESS_DEAD:{{process.GetState()}}")
         break
-    state = process.GetState()
-    if state == lldb.eStateStopped:
+    if process.GetState() == lldb.eStateStopped:
         for thread in process:
-            if thread.GetStopReason() == lldb.eStopReasonBreakpoint:
-                hits += 1
-                frame = thread.GetFrameAtIndex(0)
-                regs = frame.GetRegisters()
-                # x86_64: rdi=arg1, rsi=arg2, rdx=arg3
-                # arm64: x0=arg1, x1=arg2, x2=arg3
-                pKey_val = None
-                nKey_val = None
-                for reg_name in ["rsi", "x1"]:
-                    reg = regs.GetRegisterByName(reg_name)
-                    if reg and reg.IsValid():
-                        pKey_val = reg.GetValueAsUnsigned()
-                        break
-                for reg_name in ["rdx", "x2"]:
-                    reg = regs.GetRegisterByName(reg_name)
-                    if reg and reg.IsValid():
-                        nKey_val = reg.GetValueAsUnsigned()
-                        break
-                if pKey_val is None:
-                    val = frame.EvaluateExpression("(const void*)$arg2")
-                    if val and val.IsValid():
-                        pKey_val = val.GetValueAsUnsigned()
-                if nKey_val is None:
-                    val = frame.EvaluateExpression("(int)$arg3")
-                    if val and val.IsValid():
-                        nKey_val = val.GetValueAsUnsigned()
-                if pKey_val and nKey_val and nKey_val == 32:
-                    data = process.ReadMemory(pKey_val, 32, error)
-                    if not error.Fail() and len(data) == 32:
-                        print(f"OK:{{data.hex()}}")
-                        found = True
-                        break
-                else:
-                    print(f"HIT:pk={{pKey_val}} nk={{nKey_val}} hits={{hits}}")
+            if thread.GetStopReason() != lldb.eStopReasonBreakpoint:
+                continue
+            hits += 1
+            # 用断点 ID 区分命中了哪个函数，二者参数位不同:
+            # sqlite3_key(db, pKey, nKey)         -> pKey=arg2, nKey=arg3
+            # sqlite3_key_v2(db, zDb, pKey, nKey) -> pKey=arg3, nKey=arg4
+            is_v2 = (thread.GetStopReasonDataAtIndex(0) == bp_v2.GetID())
+            frame = thread.GetFrameAtIndex(0)
+            regs = frame.GetRegisters()
+            # x86_64: rdi/rsi/rdx/rcx = arg1/2/3/4; arm64: x0..x3
+            if is_v2:
+                pKey_val = _reg(regs, ["rdx", "x2"])
+                nKey_val = _reg(regs, ["rcx", "x3"])
+            else:
+                pKey_val = _reg(regs, ["rsi", "x1"])
+                nKey_val = _reg(regs, ["rdx", "x2"])
+            if pKey_val is None:
+                expr = "(const void*)$arg3" if is_v2 else "(const void*)$arg2"
+                v = frame.EvaluateExpression(expr)
+                if v and v.IsValid():
+                    pKey_val = v.GetValueAsUnsigned()
+            if nKey_val is None:
+                expr = "(int)$arg4" if is_v2 else "(int)$arg3"
+                v = frame.EvaluateExpression(expr)
+                if v and v.IsValid():
+                    nKey_val = v.GetValueAsUnsigned()
+            if nKey_val is not None:
+                nKey_val &= 0xFFFFFFFF  # int 参数高位可能残留脏数据 (arm64 w3)
+            if pKey_val and nKey_val == 32:
+                data = process.ReadMemory(pKey_val, 32, error)
+                if not error.Fail() and len(data) == 32:
+                    print(f"OK:{{data.hex()}}")
+                    found = True
+                    break
+            else:
+                print(f"HIT:v2={{is_v2}} pk={{pKey_val}} nk={{nKey_val}} hits={{hits}}")
         if found:
             break
-        process.Continue()
+        try:
+            process.Continue()
+        except Exception:
+            break
     time.sleep(0.05)
 
 if not found:
     print(f"FAIL:Timeout hits={{hits}}")
-process.Kill()
+
+# Detach（而非 Kill），保留断点现场恢复，让微信继续运行
+try:
+    if process.IsValid():
+        process.Detach()
+except Exception:
+    pass
 """
+    return script
+
+
+def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
+    """LLDB breakpoint to capture sqlite3_key passphrase arg, with detailed logging."""
+    script = _build_lldb_script(pid)
 
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -201,13 +249,15 @@ process.Kill()
 
         result = subprocess.run(
             ["lldb", "-b", "-O", f"command script import {script_path}"],
-            capture_output=True, text=True, timeout=45)
+            capture_output=True, text=True, timeout=90)
         os.unlink(script_path)
 
         # Parse and log output
         for line in result.stdout.splitlines():
             if line.startswith("OK:"):
                 return line[3:].strip()
+            elif line.startswith("BP:"):
+                log(f"[macos_lldb] 断点位置数: {line[3:]}")
             elif line.startswith("FAIL:"):
                 log(f"[macos_lldb] LLDB: {line}")
             elif line.startswith("SYM:"):
@@ -221,7 +271,7 @@ process.Kill()
             if err:
                 log(f"[macos_lldb] stderr: {err}")
     except subprocess.TimeoutExpired:
-        log("[macos_lldb] error: LLDB timeout (45s)")
+        log("[macos_lldb] error: LLDB timeout (90s)")
     except Exception as e:
         log(f"[macos_lldb] error: {e}")
 
