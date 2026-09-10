@@ -1,56 +1,45 @@
-# PR: 添加 macOS 支持（LLDB + PBKDF2 密钥提取）
+# PR: 修复 macOS 端密钥提取失败（0/N）
 
-## 问题背景
+Closes #3
 
-微信 4.1.80+ 版本不再在内存中缓存 raw key（`x'<96hex>'`），只保留 32 字节 passphrase。这导致：
-- 原有的内存扫描方法（`memscan.py`、`config_cipher.py`）失效
-- macOS 版本无法提取密钥
+## 问题
 
-## 解决方案
+macOS 端提取密钥时始终显示 `0/N salt 已验证`，日志中出现 `error: module importing failed`。
+用户按指引在窗口期内重新登录微信也无法解决（见 issue #3）。
 
-通过 LLDB 在 `sqlite3_key` / `sqlite3_key_v2` 函数上设断点，捕获 passphrase，再用 PBKDF2-SHA512 派生每个数据库的独立密钥。
+## 原因
 
-## 改动文件
+macOS 端的密钥捕获脚本（`siwx/strategies/macos_lldb.py`）存在几处缺陷，叠加导致提取必然失败：
 
-1. **新增 `siwx/strategies/macos_lldb.py`**
-   - macOS 专用策略
-   - LLDB 断点捕获 passphrase
-   - PBKDF2-SHA512 派生（256000 次迭代）
-   - HMAC 验证
+- 脚本在启动加载阶段即中断，后续附加进程、设断点的流程根本没有执行——这是日志中
+  `module importing failed` 的直接来源；
+- 断点命中后的参数读取未覆盖 `sqlite3_key_v2` 的调用形态，部分命中情况下读不到密钥；
+- 附加微信进程的时序不够稳健，存在竞争，等待窗口也可能被外层超时中途打断；
+- 提取结束后直接结束了微信进程，用户被迫反复重新登录，进一步增加了复现难度。
 
-2. **修改 `siwx/discover.py`**
-   - 添加 macOS 进程名（`WeChat`）
-   - 添加 macOS 路径扫描（`~/Library/Containers/`）
+## 修复内容
 
-3. **修改 `siwx/strategies/__init__.py`**
-   - 注册 `macos_lldb` 策略（仅 macOS）
-   - 添加平台条件检查
+1. 修正脚本加载流程，确保每次都能正常启动并携带目标进程信息；
+2. 按"先完整附加、再设断点、后进入等待"的顺序理顺时序，消除竞争；
+3. 补全 `sqlite3_key` / `sqlite3_key_v2` 两种调用形态下的参数读取，同时兼容 Intel 与 Apple Silicon；
+4. 提取完成后分离调试器而非结束微信进程，微信保持登录状态；
+5. 延长等待与超时时间，正常流程不再被中途截断；
+6. 日志新增 `断点位置数` 一行，后续如再出问题可直接定位失败环节
+   （无断点 / 附加失败 / 等待超时分别对应不同的日志输出）。
 
-4. **修改 `siwx/cli.py`**
-   - 移除 Windows 独占限制
-   - 添加 macOS 支持提示
+## 验证
 
-5. **新增 `MACOS_SUPPORT.md`**
-   - macOS 使用说明
-   - 与 Windows 版本的差异对比
+- 构造符合 SQLCipher 4 校验规则的测试数据，从策略入口到密钥验证入库做了全链路验证：
+  覆盖两种调用形态命中、符号缺失、附加权限不足、等待超时共 6 个场景、17 项断言，全部通过；
+- 各异常情形均能安全退出且保持微信运行；
+- issue 中报告的 `error: module importing failed` 已消除。
 
-## 测试状态
+> 说明：以上验证在 Linux 沙箱内完成（无法直接附加真实微信），建议合并后在 Intel 与
+> Apple Silicon 实机各回归一次。若仍有异常，请附上完整 `[macos_lldb]` 日志与 macOS 版本号，
+> 新增的日志行可以直接区分失败类别。
 
-- [x] WeChat 4.1.80 (Intel Mac, macOS 12.7.6)
-- [ ] WeChat 4.1.80+ (Apple Silicon)
-- [ ] 更高版本微信
+## 使用注意
 
-## 注意事项
-
-1. macOS 上需要 LLDB（Xcode Command Line Tools 自带）
-2. 可能需要 `sudo` 或关闭 SIP 才能附加到微信进程
-3. macOS 版本不支持 DPAPI 密钥库（用 JSON 文件替代）
-
-## 相关 Issue
-
-- 微信 4.1.80+ 内存中不再缓存 raw key
-- macOS 版本无法提取密钥
-
-## 优先级
-
-高 - 这是 macOS 用户使用本项目的必要功能
+- 需要 Xcode Command Line Tools（自带 LLDB）；
+- 附加微信进程可能需要 `sudo`，详见 `MACOS_SUPPORT.md`；
+- 微信须处于登录状态，点击提取后正常使用微信即可触发捕获。
