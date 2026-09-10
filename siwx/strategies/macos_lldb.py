@@ -114,8 +114,9 @@ import lldb, time, sys
 pid = {pid}
 
 debugger = lldb.SBDebugger.Create()
-# 异步模式: process.Continue() 立即返回，下方轮询循环的 30s deadline 才有效
-debugger.SetAsync(True)
+# 同步 attach: 异步模式下 AttachToProcessWithID 不等 attach 完成就返回，
+# 随后建断点/Continue 都会在"半挂载"状态下执行而失败，必须先同步
+debugger.SetAsync(False)
 target = debugger.CreateTarget("")
 if not target:
     print("FAIL:CreateTarget")
@@ -163,6 +164,8 @@ if n_loc == 0:
     print("FAIL:NoSymbol")
     sys.exit(1)
 
+# attach 与建断点完成后切异步: Continue() 立即返回，下方轮询循环的 30s deadline 才有效
+debugger.SetAsync(True)
 process.Continue()
 
 def _reg(regs, names):
