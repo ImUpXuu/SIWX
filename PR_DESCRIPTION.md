@@ -7,19 +7,22 @@ Closes #3
 macOS 端提取密钥时始终显示 `0/N salt 已验证`，日志中出现 `error: module importing failed`。
 用户按指引在窗口期内重新登录微信也无法解决（见 issue #3）。
 
-## 原因
+## 定位与原因
 
-macOS 端的密钥捕获脚本（`siwx/strategies/macos_lldb.py`）存在几处缺陷，叠加导致提取必然失败：
+issue #3 提供的日志（`error: module importing failed`）是关键线索——它说明提取脚本在
+启动加载阶段就被中断，后面附加进程、设断点等步骤根本没有执行到，和微信登录状态无关。
 
-- 脚本在启动加载阶段即中断，后续附加进程、设断点的流程根本没有执行——这是日志中
-  `module importing failed` 的直接来源；
-- 断点命中后的参数读取未覆盖 `sqlite3_key_v2` 的调用形态，部分命中情况下读不到密钥；
-- 附加微信进程的时序不够稳健，存在竞争，等待窗口也可能被外层超时中途打断；
-- 提取结束后直接结束了微信进程，用户被迫反复重新登录，进一步增加了复现难度。
+macOS 密钥提取此前仅在 Intel Mac（macOS 12.7.6 + 微信 4.1.80）上实测通过，issue 用户的
+macOS Sequoia 15.1 属于尚未覆盖的环境组合，暴露了脚本在该环境下的兼容性问题。沿日志
+定位到加载失败的根因后，又对整条提取链路做了一次集中加固，同类隐患一并处理：
+附加时序的竞争窗口、等待超时被提前截断、部分调用形态下读不到密钥参数、
+提取结束后微信被一并退出。
+
+感谢 @LatteCoconut 提供的完整日志，这次定位省了不少弯路。
 
 ## 修复内容
 
-1. 修正脚本加载流程，确保每次都能正常启动并携带目标进程信息；
+1. 修正脚本在上述环境下的加载流程，确保每次都能正常启动并携带目标进程信息；
 2. 按"先完整附加、再设断点、后进入等待"的顺序理顺时序，消除竞争；
 3. 补全 `sqlite3_key` / `sqlite3_key_v2` 两种调用形态下的参数读取，同时兼容 Intel 与 Apple Silicon；
 4. 提取完成后分离调试器而非结束微信进程，微信保持登录状态；
@@ -37,10 +40,11 @@ macOS 端的密钥捕获脚本（`siwx/strategies/macos_lldb.py`）存在几处�
 - issue 中报告的 `error: module importing failed` 已消除。
 
 **关于实机测试的说明**：以上验证在 Linux 环境通过模拟 LLDB 完整链路完成；我手头没有
-Apple Silicon（ARM）架构的 Mac，无法完成 ARM 实机测试，Intel 实机也仅能覆盖我手头的
-设备环境。请有条件的维护者或用户在合并后于 Apple Silicon 实机回归一次；若仍有异常，
-请附上 `logs/siwx.log` 中完整 `[macos_lldb]` 段落与 macOS 版本号，新增的日志行可以直接
-区分失败类别（无断点 / 附加失败 / 等待超时）。
+Apple Silicon（ARM）架构的 Mac，Intel 侧也只有 macOS 12.7.6 一台设备，无法覆盖
+issue #3 的 Sequoia 15.1 环境。计划发布后先请 @LatteCoconut 在其环境验证，
+也欢迎其他 Intel / Apple Silicon 用户升级后反馈；若仍有异常，请附上 `logs/siwx.log`
+中完整 `[macos_lldb]` 段落与 macOS 版本号，新增的日志行可以直接区分失败类别
+（无断点 / 附加失败 / 等待超时）。
 
 ## macOS 使用教程
 
