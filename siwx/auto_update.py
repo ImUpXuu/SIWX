@@ -20,27 +20,13 @@ from pathlib import Path
 from siwx import paths
 
 RAW_BASE = "https://raw.gh.1s.fan/ImUpXuu/SIWX/main"
-VERSION_URL = f"{RAW_BASE}/version.json"
+GITHUB_RAW_BASE = "https://raw.githubusercontent.com/ImUpXuu/SIWX/main"
+VERSION_URLS = [f"{RAW_BASE}/version.json", f"{GITHUB_RAW_BASE}/version.json"]
 TIMEOUT = 10
 
 
 def current_version() -> str:
-    """获取当前版本号。
-
-    优先级:
-    1. 打包产物: 从 bundled version.json 读取
-    2. 源码运行: 从 siwx.__version__ 读取
-    """
-    # 打包产物中 version.json 在 app_root()
-    p = paths.app_root() / "version.json"
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        v = data.get("version", "")
-        if v:
-            return v
-    except Exception:
-        pass
-    # 源码运行兜底
+    """获取当前版本号；唯一源头是 siwx.__version__。"""
     from siwx import __version__
     return __version__
 
@@ -62,13 +48,26 @@ def system_platform() -> str:
 
 def fetch_remote_version() -> dict | None:
     """拉取远程 version.json。失败返回 None。"""
-    try:
-        import urllib.request
-        req = urllib.request.Request(VERSION_URL, headers={"User-Agent": "stories-in-wx"})
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except Exception:
-        return None
+    import urllib.request
+    for url in VERSION_URLS:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "stories-in-wx"})
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                data = json.loads(r.read().decode("utf-8"))
+                if isinstance(data, dict) and data.get("version"):
+                    return data
+        except Exception:
+            continue
+    return None
+
+
+def _version_tuple(v: str) -> tuple:
+    """宽松语义版本比较：v5.0.0 / 5.0.0-rc1 都能比较。"""
+    import re
+    nums = [int(x) for x in re.findall(r"\d+", str(v or ""))[:3]]
+    while len(nums) < 3:
+        nums.append(0)
+    return tuple(nums)
 
 
 def has_update() -> tuple[bool, dict | None, str]:
@@ -76,23 +75,13 @@ def has_update() -> tuple[bool, dict | None, str]:
 
     返回: (是否有更新, 远程 version.json, 当前版本)
     """
-    if not is_frozen():
-        return False, None, current_version()
-
+    cur = current_version()
     remote = fetch_remote_version()
     if not remote:
-        return False, None, current_version()
+        return False, None, cur
 
-    cur = current_version()
     new = remote.get("version", "0.0.0")
-
-    try:
-        cur_parts = [int(x) for x in cur.split(".")]
-        new_parts = [int(x) for x in new.split(".")]
-        newer = new_parts > cur_parts
-    except (ValueError, AttributeError):
-        newer = new != cur
-
+    newer = _version_tuple(new) > _version_tuple(cur)
     return newer, remote, cur
 
 

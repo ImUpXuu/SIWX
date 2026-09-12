@@ -112,6 +112,7 @@ async function run() {
       end: el('e-end').value || null,
       messages: el('e-msg').checked,
       media: el('e-media').checked,
+      voice: el('e-voice').checked,
       avatars: el('e-ava').checked,
     },
   };
@@ -192,7 +193,7 @@ function renderResult(job) {
   }
   const dur = ((r.duration_ms || 0) / 1000).toFixed(1);
   lines.push(`<div class="res-row res-ok">✔ 导出完成：${r.ok_count}/${r.sessions.length} 个会话，`
-    + `共 ${r.message_count} 条消息，媒体 ${r.media_count}，头像 ${r.avatar_count}（${dur}s）</div>`);
+    + `共 ${r.message_count} 条消息，图片 ${r.image_count || 0}，语音 ${r.voice_count || 0}，头像 ${r.avatar_count}（${dur}s）</div>`);
   if (r.total_dir) {
     lines.push(`<div class="res-meta">目录：<span class="mono">${esc(r.total_dir)}</span></div>`);
     lines.push(`<div class="res-actions"><a href="#" onclick="SX.openPath('${esc(r.total_dir)}');return false">📂 打开目录</a></div>`);
@@ -209,7 +210,8 @@ function renderResult(job) {
       lines.push(`<div class="res-meta res-err">✗ ${esc(s.display)}：${esc(s.error)}</div>`);
     } else {
       const dl = s.file ? ` · <a href="/api/export/download?path=${encodeURIComponent(s.file)}">下载文件</a>` : '';
-      lines.push(`<div class="res-meta">✓ ${esc(s.display)} — ${s.message_count} 条消息${dl}</div>`);
+      const media = (s.image_count || s.voice_count) ? ` · 图片 ${s.image_count || 0} · 语音 ${s.voice_count || 0}` : '';
+      lines.push(`<div class="res-meta">✓ ${esc(s.display)} — ${s.message_count} 条消息${media}${dl}</div>`);
     }
   }
   lines.push('</details>');

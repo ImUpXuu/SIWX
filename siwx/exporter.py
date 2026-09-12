@@ -217,7 +217,8 @@ def _try_export_voice(acc_dir, chat, local_id, svr_id, ts, dst_base):
 
 def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                fmt: str, start_ts=None, end_ts=None,
-               want_messages=True, want_media=True, want_avatars=True,
+               want_messages=True, want_media=True, want_voice=False,
+               want_avatars=True,
                export_root: Path = None, pack: str = "zip",
                folder_name: str = None,
                progress=lambda pct, msg: None) -> dict:
@@ -265,21 +266,21 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     stats_media = 0
     stats_voice = 0
     media_map = {}
-    if want_media and (images or voices):
+    if (want_media and images) or (want_voice and voices):
         media_dest = export_dir / "media"
-        if images:
+        if want_media and images:
             progress(35, f"解密图片（{len(images)} 张）…")
             image_map = _decrypt_media_parallel(acc_out_dir, account, chat, images,
                                                 media_dest, progress)
             media_map.update(image_map)
             stats_media = len(image_map)
-        if voices:
+        if want_voice and voices:
             progress(55, f"转码语音（{len(voices)} 条）…")
             voice_map = _export_voice_media(acc_out_dir, account, chat, voices,
                                             media_dest, progress)
             media_map.update(voice_map)
             stats_voice = len(voice_map)
-        progress(70, f"媒体处理完成: 图片 {stats_media}/{len(images)}，语音 {stats_voice}/{len(voices)}")
+        progress(70, f"媒体处理完成: 图片 {stats_media}/{len(images) if want_media else 0}，语音 {stats_voice}/{len(voices) if want_voice else 0}")
 
     # ── 第二遍：流式写出 ─────────────────────────────────
     progress(75, "写入文件…")
@@ -290,26 +291,24 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
            "xlsx": "xlsx"}.get(fmt, "json")
     out_file = export_dir / f"{fname}.{ext}"
 
+    def export_stream_with_media():
+        for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
+            msg["mediaFile"] = media_map.get(msg["localId"])
+            yield msg
+
     # 传入缓存的 names，避免重复加载
     if fmt == "json":
-        def json_stream():
-            for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
-                msg["mediaFile"] = media_map.get(msg["localId"])
-                yield msg
-        written = stream_export_json(out_file, session, json_stream(), progress)
+        written = stream_export_json(out_file, session, export_stream_with_media(), progress)
     elif fmt == "html":
         written = _write_html_streaming(out_file, acc_out_dir, chat, start_ts,
                                         end_ts, account, names, media_map,
                                         avatar_map, progress, display)
     elif fmt == "txt":
-        written = stream_export_txt(out_file, session,
-                                    message_stream(acc_out_dir, chat, start_ts, end_ts, account, names), progress)
+        written = stream_export_txt(out_file, session, export_stream_with_media(), progress)
     elif fmt == "csv":
-        written = stream_export_csv(out_file,
-                                    message_stream(acc_out_dir, chat, start_ts, end_ts, account, names), progress)
+        written = stream_export_csv(out_file, export_stream_with_media(), progress)
     elif fmt == "markdown":
-        written = stream_export_md(out_file, session,
-                                   message_stream(acc_out_dir, chat, start_ts, end_ts, account, names), progress)
+        written = stream_export_md(out_file, session, export_stream_with_media(), progress)
     elif fmt in ("toml", "sqlite", "xlsx"):
         # 这些格式需要全量数据 → 降级为流式分批（每批 500 条）
         written = _write_batch(out_file, fmt, session,
@@ -467,7 +466,7 @@ def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, med
     wb = Workbook()
     ws = wb.active
     ws.title = "聊天记录"
-    ws.append(["localId", "时间", "类型", "发送者", "是否自己", "内容"])
+    ws.append(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
     count = 0
     for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
         msg["mediaFile"] = media_map.get(msg["localId"])
@@ -475,7 +474,8 @@ def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, med
         ws.append([msg["localId"],
                    datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                    msg["typeName"], msg["senderDisplayName"],
-                   "是" if msg["isSend"] else "否", msg["content"][:30000]])
+                   "是" if msg["isSend"] else "否", msg["content"][:30000],
+                   msg.get("mediaFile") or ""])
         if count % 1000 == 0 and progress:
             progress(0, f"已写入 {count} 条…")
     wb.save(path)
@@ -484,7 +484,8 @@ def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, med
 
 def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "json",
                      start_ts=None, end_ts=None,
-                     want_messages=True, want_media=False, want_avatars=False,
+                     want_messages=True, want_media=False, want_voice=False,
+                     want_avatars=False,
                      export_root: Path = None, pack: str = "folder",
                      progress=lambda pct, msg: None) -> dict:
     """多会话批量导出。"""
@@ -507,7 +508,11 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
 
         try:
             res = run_export(acc_out_dir, account, chat, display, fmt,
-                             start_ts, end_ts, want_messages, want_media, want_avatars,
+                             start_ts, end_ts,
+                             want_messages=want_messages,
+                             want_media=want_media,
+                             want_voice=want_voice,
+                             want_avatars=want_avatars,
                              export_root=total_dir,
                              folder_name=f"{i + 1:02d}_{display or chat}",
                              pack=("zip" if pack == "each" else "none"),

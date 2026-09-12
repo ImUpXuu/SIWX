@@ -26,6 +26,36 @@ async function loadOverview() {
   }
 }
 
+function fmtLastRun(ts) {
+  if (!ts) return '未运行';
+  const d = new Date(Number(ts) * 1000);
+  return Number.isNaN(d.getTime()) ? '未运行' : d.toLocaleString();
+}
+
+async function loadAutoSync() {
+  const status = el('s-auto-sync-status');
+  try {
+    const cfg = await fetchJSON('/api/settings/auto-sync');
+    el('s-auto-sync-enabled').checked = !!cfg.enabled;
+    el('s-auto-sync-interval').value = cfg.interval_minutes || 30;
+    const ok = cfg.last_ok === null || cfg.last_ok === undefined ? '' : (cfg.last_ok ? ' · 上次成功' : ' · 上次失败');
+    status.textContent = `状态：${cfg.enabled ? '已开启' : '未开启'} · 间隔 ${cfg.interval_minutes || 30} 分钟 · 上次：${fmtLastRun(cfg.last_run)}${ok} · ${cfg.last_message || ''}`;
+  } catch (e) {
+    status.textContent = e.message;
+  }
+}
+
+async function saveAutoSync() {
+  const enabled = el('s-auto-sync-enabled').checked;
+  const interval = Math.max(1, Math.min(Number(el('s-auto-sync-interval').value || 30), 1440));
+  const cfg = await fetchJSON('/api/settings/auto-sync', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled, interval_minutes: interval }),
+  });
+  el('s-auto-sync-interval').value = cfg.interval_minutes || interval;
+  await loadAutoSync();
+}
+
 async function loadVersion() {
   const box = el('s-version');
   const meta = el('s-version-meta');
@@ -90,6 +120,16 @@ function confirmThen(msg, fn) {
 export async function init() {
   await loadVersion();
   await loadOverview();
+  await loadAutoSync();
+
+  el('s-auto-sync-save').addEventListener('click', async () => {
+    try {
+      await saveAutoSync();
+      window.alert('自动刷新设置已保存');
+    } catch (e) {
+      window.alert('保存失败: ' + e.message);
+    }
+  });
 
   el('s-clear-output').addEventListener('click', () =>
     confirmThen('确定删除全部解密输出？\n（密钥保留，重跑解密即可恢复）', async () => {

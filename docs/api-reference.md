@@ -51,6 +51,7 @@
     "end": "2026-09-06",
     "messages": true,
     "media": true,
+    "voice": true,
     "avatars": true,
     "pack": "zip"
   }
@@ -291,6 +292,32 @@
   ],
   "output_root": "G:/project/.../output"
 }
+```
+
+---
+
+### `GET /api/settings/auto-sync`
+
+**读取自动刷新数据库配置**。
+
+```json
+{
+  "enabled": true,
+  "interval_minutes": 30,
+  "last_run": 1789197000,
+  "last_ok": true,
+  "last_message": "增量同步完成"
+}
+```
+
+---
+
+### `POST /api/settings/auto-sync`
+
+**保存自动刷新数据库配置**。启用后 serve 模式会在微信在线且到达间隔时执行增量 `sync`。
+
+```json
+{"enabled": true, "interval_minutes": 30}
 ```
 
 ---
