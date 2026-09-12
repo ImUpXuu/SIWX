@@ -100,7 +100,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
       - name: 校验 tag 与 siwx.__version__ 一致
         env:
@@ -119,11 +118,16 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
-        run: python3 scripts/generate_version_json.py --tag "$TAG" --repo "$REPO"
-      - name: 提交 version.json
+        run: |
+          python3 scripts/generate_version_json.py --tag "$TAG" --repo "$REPO"
+          cp version.json /tmp/siwx-version.json
+      - name: 提交 version.json 到 main
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          cp /tmp/siwx-version.json version.json
           git add version.json
           if git diff --cached --quiet; then
             echo "version.json 无变化"
