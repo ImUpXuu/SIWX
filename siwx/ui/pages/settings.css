@@ -1,15 +1,21 @@
-.settings { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.settings { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
 .s-card { /* 复用全局 card */ }
 .s-actions { display: flex; flex-direction: column; gap: 12px; }
 .s-item {
-  display: grid; grid-template-columns: 130px 1fr auto; gap: 12px; align-items: center;
-  border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 12px 14px;
+  display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 14px; align-items: center;
+  border: 1px dashed var(--line); border-radius: var(--radius); padding: 14px 16px;
+  background: var(--card);
 }
-.s-item b { font-size: 13px; font-weight: 600; }
-.s-item span { font-size: 12px; }
-@media (max-width: 700px) {
-  .s-item { grid-template-columns: 1fr; }
+.s-item b { font-size: 13px; font-weight: 700; }
+.s-item span { font-size: 12px; line-height: 1.55; }
+.ov-row {
+  display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 1.3fr) auto; gap: 12px; align-items: center;
+  padding: 10px 0; border-top: 1px dashed var(--line); font-size: 13px;
 }
-.ov-row { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center;
-          padding: 6px 0; border-top: 1px dashed var(--line); font-size: 13px; }
 .ov-row:first-child { border-top: none; }
+.ov-row .dim { word-break: break-word; }
+@media (max-width: 760px) {
+  .s-item { grid-template-columns: 1fr; }
+  .s-item .btn { width: 100%; }
+  .ov-row { grid-template-columns: 1fr; gap: 4px; }
+}
