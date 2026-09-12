@@ -1,20 +1,42 @@
-"""微信语音消息读取。
+"""微信语音消息读取与轻量转码。
 
 微信 4.x 解密后的语音数据位于 message/media_*.db 的 VoiceInfo 表：
   - Name2Id.rowid -> chat_name_id
   - VoiceInfo.local_id / svr_id / create_time 与 Msg_* 表中的消息对应
-  - VoiceInfo.voice_data 已是明文 SILK 数据；有些记录在 #!SILK_V3 前带 1 个控制字节，
-    需要剥掉前缀后再作为 .silk 导出/下载。
+  - VoiceInfo.voice_data 通常已是明文 SILK 数据；有些记录在 #!SILK_V3 前带
+    1 个控制字节，需要剥掉前缀后再作为 .silk 导出/下载。
 
-注意：浏览器通常不能直接播放 SILK。当前模块负责把明文语音安全取出，前端提供
-下载入口；若后续内置 SILK 解码器，可在本模块上层增加 wav/mp3 转码。
+转码策略保持“无新增强依赖”：项目不新增 pip 包，也不要求 ffmpeg。若当前环境已
+安装 pilk 会自动复用；否则可通过 SIWX_SILK_DECODER 或 PATH 中已有的
+silk_v3_decoder/silk-decoder/decoder 等本地解码器把 SILK 解为 PCM，再用 Python
+标准库 wave 封装为 WAV；仍不可转码时保留原始 SILK 下载/导出，并给出明确原因。
 """
+import os
 import re
+import shlex
+import shutil
 import sqlite3
+import subprocess
+import tempfile
+import wave
 from pathlib import Path
 
 
 SILK_MAGIC = b"#!SILK_V3"
+WAV_MAGIC = b"RIFF"
+DEFAULT_SAMPLE_RATE = 24000
+DEFAULT_CHANNELS = 1
+DEFAULT_SAMPLE_WIDTH = 2      # 16-bit PCM
+
+
+_AUDIO_SIGS = (
+    (b"RIFF", "wav", "audio/wav"),
+    (b"ID3", "mp3", "audio/mpeg"),
+    (b"\xff\xfb", "mp3", "audio/mpeg"),
+    (b"OggS", "ogg", "audio/ogg"),
+    (b"#!AMR", "amr", "audio/amr"),
+    (SILK_MAGIC, "silk", "audio/silk"),
+)
 
 
 def parse_voice_meta(text: str) -> dict | None:
@@ -51,6 +73,173 @@ def _clean_voice_data(data: bytes) -> tuple[bytes, int]:
     if pos >= 0:
         return data[pos:], pos
     return data, -1
+
+
+def detect_audio(data: bytes) -> tuple[str, str]:
+    """识别常见音频封装，返回 (ext, mimetype)。"""
+    head = data[:16] if data else b""
+    if head.startswith(WAV_MAGIC) and len(head) >= 12 and head[8:12] == b"WAVE":
+        return "wav", "audio/wav"
+    for sig, ext, ctype in _AUDIO_SIGS:
+        if head.startswith(sig):
+            return ext, ctype
+    return "bin", "application/octet-stream"
+
+
+def pcm_to_wav(pcm: bytes, sample_rate: int = DEFAULT_SAMPLE_RATE,
+               channels: int = DEFAULT_CHANNELS,
+               sample_width: int = DEFAULT_SAMPLE_WIDTH) -> bytes:
+    """用标准库把裸 PCM 封装成 WAV。"""
+    import io
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _split_command(spec: str) -> list[str]:
+    """把环境变量里的命令拆成 argv；纯路径即使含空格也保留为一个参数。"""
+    spec = (spec or "").strip()
+    if not spec:
+        return []
+    if Path(spec).is_file():
+        return [spec]
+    return shlex.split(spec, posix=(os.name != "nt"))
+
+
+def _decoder_candidates() -> list[tuple[str, list[str]]]:
+    """返回可尝试的本地 SILK 解码器命令。"""
+    out: list[tuple[str, list[str]]] = []
+    env = os.environ.get("SIWX_SILK_DECODER")
+    if env:
+        parts = _split_command(env)
+        if parts:
+            out.append(("SIWX_SILK_DECODER", parts))
+    for name in ("silk_v3_decoder", "silk-decoder", "silk_decoder", "decoder"):
+        exe = shutil.which(name)
+        if exe:
+            out.append((name, [exe]))
+    return out
+
+
+def _run_decoder_command(parts: list[str], silk_path: Path, pcm_path: Path,
+                         sample_rate: int) -> tuple[bytes | None, str]:
+    """执行本地解码器，约定输出裸 PCM。"""
+    tokens = []
+    has_placeholder = False
+    for p in parts:
+        if any(x in p for x in ("{input}", "{output}", "{rate}")):
+            has_placeholder = True
+            p = (p.replace("{input}", str(silk_path))
+                   .replace("{output}", str(pcm_path))
+                   .replace("{rate}", str(sample_rate)))
+        tokens.append(p)
+    if not has_placeholder:
+        tokens.extend([str(silk_path), str(pcm_path)])
+
+    flags = 0
+    if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        flags = subprocess.CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(tokens, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=20, check=False, creationflags=flags)
+    except Exception as e:
+        return None, str(e)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or b"").decode("utf-8", errors="replace")
+        return None, err.strip()[:300] or f"退出码 {proc.returncode}"
+    if pcm_path.is_file() and pcm_path.stat().st_size > 0:
+        return pcm_path.read_bytes(), ""
+    if proc.stdout:
+        return proc.stdout, ""
+    return None, "解码器未输出 PCM"
+
+
+def _decode_silk_to_pcm_with_pilk(data: bytes) -> tuple[bytes | None, str, str]:
+    """若环境已安装 pilk，则直接使用它解码；不把 pilk 作为项目依赖。"""
+    try:
+        import pilk  # type: ignore
+    except Exception:
+        return None, "", ""
+    try:
+        with tempfile.TemporaryDirectory(prefix="siwx_voice_") as td:
+            silk_path = Path(td) / "input.silk"
+            pcm_path = Path(td) / "output.pcm"
+            silk_path.write_bytes(data)
+            pilk.decode(str(silk_path), str(pcm_path))
+            if pcm_path.is_file() and pcm_path.stat().st_size > 0:
+                return pcm_path.read_bytes(), "", "pilk"
+    except Exception as e:
+        return None, str(e), "pilk"
+    return None, "pilk 未输出 PCM", "pilk"
+
+
+def _decode_silk_to_pcm_with_command(data: bytes, sample_rate: int) -> tuple[bytes | None, str, str]:
+    """尝试使用本机已有命令行解码器把 SILK 解成 PCM。"""
+    candidates = _decoder_candidates()
+    if not candidates:
+        return None, "未找到本地 SILK 解码器（可设置 SIWX_SILK_DECODER）", ""
+
+    last_err = ""
+    with tempfile.TemporaryDirectory(prefix="siwx_voice_") as td:
+        silk_path = Path(td) / "input.silk"
+        pcm_path = Path(td) / "output.pcm"
+        silk_path.write_bytes(data)
+        for name, parts in candidates:
+            pcm, err = _run_decoder_command(parts, silk_path, pcm_path, sample_rate)
+            if pcm:
+                return pcm, "", name
+            last_err = err or last_err
+            try:
+                if pcm_path.exists():
+                    pcm_path.unlink()
+            except OSError:
+                pass
+    return None, last_err or "SILK 解码失败", ""
+
+
+def transcode_voice(data: bytes, target: str = "wav",
+                    sample_rate: int = DEFAULT_SAMPLE_RATE) -> tuple[bytes | None, str | dict]:
+    """把语音数据转成目标格式。
+
+    返回：
+      - 成功: (body, {"format", "mimetype", "ext", "engine"})
+      - 失败: (None, reason)
+
+    当前无新增依赖地支持：
+      1. 已是 WAV 时直接返回；
+      2. SILK 通过本机可选 decoder → PCM → 标准库 WAV；
+      3. target=silk/raw 时返回清理后的原始数据。
+    """
+    body, _offset = _clean_voice_data(data)
+    if not body:
+        return None, "语音数据为空"
+    ext, ctype = detect_audio(body)
+    target = (target or "wav").lower()
+    if target in ("silk", "raw", "original"):
+        return body, {"format": ext, "mimetype": ctype, "ext": ext, "engine": "original"}
+    if target not in ("wav", "wave"):
+        return None, f"暂不支持的语音格式: {target}"
+    if ext == "wav":
+        return body, {"format": "wav", "mimetype": "audio/wav", "ext": "wav", "engine": "passthrough"}
+    if ext != "silk":
+        return None, f"当前只能将 SILK 转为 WAV，实际格式为 {ext}"
+
+    pcm, err, engine = _decode_silk_to_pcm_with_pilk(body)
+    if not pcm:
+        pcm, err, engine = _decode_silk_to_pcm_with_command(body, sample_rate)
+    if not pcm:
+        return None, err
+    if len(pcm) % DEFAULT_SAMPLE_WIDTH:
+        pcm = pcm[:-1]
+    if not pcm:
+        return None, "解码器输出的 PCM 为空"
+    wav = pcm_to_wav(pcm, sample_rate=sample_rate)
+    return wav, {"format": "wav", "mimetype": "audio/wav", "ext": "wav", "engine": engine or "decoder"}
 
 
 def _chat_id(conn, chat: str):
@@ -109,6 +298,7 @@ def get_voice(acc_dir: Path, chat: str = "", local_id: int = 0,
                     raw, offset = _clean_voice_data(bytes(row[4]))
                     if not raw:
                         continue
+                    ext, ctype = detect_audio(raw)
                     return raw, {
                         "db": db.name,
                         "chatNameId": row[0],
@@ -119,7 +309,8 @@ def get_voice(acc_dir: Path, chat: str = "", local_id: int = 0,
                         "size": len(raw),
                         "rawSize": len(row[4]),
                         "silkOffset": offset,
-                        "format": "silk" if raw.startswith(SILK_MAGIC) else "unknown",
+                        "format": ext,
+                        "mimetype": ctype,
                     }
             finally:
                 conn.close()

@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from siwx import media
+from siwx import media, voice
 from siwx import paths as _paths
 from siwx.api_chat import _contact_names
 from siwx.export_stream import (
@@ -78,9 +78,10 @@ def collect_avatars(acc_out_dir: Path, usernames: list, dest: Path, progress=Non
 
 
 def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
-    """第一遍：轻量扫描，只采集计数/发送者/图片引用。内存 O(发送者数 + 图片数)。"""
+    """第一遍：轻量扫描，只采集计数/发送者/媒体引用。内存 O(发送者数 + 媒体数)。"""
     senders = set()
     images = []       # (md5, bubble_md5, localId, ts) 引用
+    voices = []       # (localId, serverId, ts) 引用
     count = 0
     first_ts = last_ts = 0
     for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
@@ -93,7 +94,9 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
         if msg.get("md5") or msg.get("bubbleMd5"):
             images.append((msg.get("md5"), msg.get("bubbleMd5"),
                            msg["localId"], ts))
-    return count, first_ts, last_ts, senders, images
+        if msg.get("localType") == 34:
+            voices.append((msg["localId"], msg.get("platformMessageId") or "", ts))
+    return count, first_ts, last_ts, senders, images, voices
 
 
 def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=None):
@@ -177,6 +180,41 @@ def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
     return None
 
 
+def _export_voice_media(acc_out_dir, account, chat, voices, dest, progress=None):
+    """导出语音媒体：优先 WAV，缺少解码器时保留 SILK。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    media_map = {}
+    for i, (local_id, svr_id, ts) in enumerate(voices):
+        out = _try_export_voice(acc_out_dir, chat, local_id, svr_id, ts,
+                                dest / f"voice_{i:04d}_{local_id or 'msg'}")
+        if out:
+            media_map[local_id] = f"media/{out.name}"
+        if (i + 1) % 10 == 0 and progress:
+            progress(0, f"语音 {i + 1}/{len(voices)}")
+    return media_map
+
+
+def _try_export_voice(acc_dir, chat, local_id, svr_id, ts, dst_base):
+    """读取并尝试转码一条语音。成功返回实际写出的 Path，失败返回 None。"""
+    try:
+        body, info = voice.get_voice(Path(acc_dir), chat=chat or "",
+                                     local_id=local_id or 0,
+                                     svr_id=int(svr_id or 0), ts=ts or 0)
+        if body is None:
+            return None
+        wav, meta = voice.transcode_voice(body, "wav")
+        if wav is not None:
+            dst = Path(dst_base).with_suffix(".wav")
+            dst.write_bytes(wav)
+            return dst
+        # 无本地解码器时不阻塞导出，保留清理后的 SILK 原文，供用户后续转换。
+        dst = Path(dst_base).with_suffix(".silk")
+        dst.write_bytes(body)
+        return dst
+    except Exception:
+        return None
+
+
 def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                fmt: str, start_ts=None, end_ts=None,
                want_messages=True, want_media=True, want_avatars=True,
@@ -191,9 +229,9 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
     # ── 第一遍：轻量采集元数据 ─────────────────────────────
     progress(3, "扫描消息元数据…")
-    count, first_ts, last_ts, senders, images = _collect_metadata(
+    count, first_ts, last_ts, senders, images, voices = _collect_metadata(
         acc_out_dir, chat, start_ts, end_ts, account, names)
-    progress(10, f"共 {count} 条消息，{len(images)} 张图片")
+    progress(10, f"共 {count} 条消息，{len(images)} 张图片，{len(voices)} 条语音")
 
     display = display or names.get(chat, chat) or chat
     safe = _safe_name(display)
@@ -223,15 +261,25 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         stats_ava = len(avatar_map)
         progress(30, f"头像 {stats_ava}/{len(senders)}")
 
-    # ── 媒体（并行解密）──────────────────────────────────
+    # ── 媒体（图片并行解密，语音优先转 WAV）────────────────────────
     stats_media = 0
+    stats_voice = 0
     media_map = {}
-    if want_media and images:
-        progress(35, f"解密媒体（{len(images)} 张）…")
-        media_map = _decrypt_media_parallel(acc_out_dir, account, chat, images,
-                                            export_dir / "media", progress)
-        stats_media = len(media_map)
-        progress(70, f"媒体解密完成: {stats_media}/{len(images)}")
+    if want_media and (images or voices):
+        media_dest = export_dir / "media"
+        if images:
+            progress(35, f"解密图片（{len(images)} 张）…")
+            image_map = _decrypt_media_parallel(acc_out_dir, account, chat, images,
+                                                media_dest, progress)
+            media_map.update(image_map)
+            stats_media = len(image_map)
+        if voices:
+            progress(55, f"转码语音（{len(voices)} 条）…")
+            voice_map = _export_voice_media(acc_out_dir, account, chat, voices,
+                                            media_dest, progress)
+            media_map.update(voice_map)
+            stats_voice = len(voice_map)
+        progress(70, f"媒体处理完成: 图片 {stats_media}/{len(images)}，语音 {stats_voice}/{len(voices)}")
 
     # ── 第二遍：流式写出 ─────────────────────────────────
     progress(75, "写入文件…")
@@ -285,7 +333,9 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "zip": zip_path,
         "file": str(out_file),
         "format": fmt, "pack": pack,
-        "message_count": written, "media_count": stats_media, "avatar_count": stats_ava,
+        "message_count": written, "media_count": stats_media + stats_voice,
+        "image_count": stats_media, "voice_count": stats_voice,
+        "avatar_count": stats_ava,
         "duration_ms": int((time.time() - t0) * 1000),
     }
 
@@ -466,6 +516,8 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
             results.append({"chat": chat, "display": display or chat,
                             "message_count": res.get("message_count", 0),
                             "media_count": res.get("media_count", 0),
+                            "image_count": res.get("image_count", 0),
+                            "voice_count": res.get("voice_count", 0),
                             "avatar_count": res.get("avatar_count", 0),
                             "file": res.get("file")})
             progress(endp, f"[{i + 1}/{n}] ✔ {display or chat} ({res.get('message_count', 0)} 条)")
@@ -489,6 +541,8 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
         "pack": pack, "format": fmt, "sessions": results, "ok_count": ok_n,
         "message_count": sum(r.get("message_count", 0) for r in results),
         "media_count": sum(r.get("media_count", 0) for r in results),
+        "image_count": sum(r.get("image_count", 0) for r in results),
+        "voice_count": sum(r.get("voice_count", 0) for r in results),
         "avatar_count": sum(r.get("avatar_count", 0) for r in results),
         "duration_ms": int((time.time() - t0) * 1000),
     }

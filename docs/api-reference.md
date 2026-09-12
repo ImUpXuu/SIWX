@@ -170,6 +170,30 @@
 
 ---
 
+### `GET /api/chat/media/voice?account=&chat=&local_id=&svr_id=&ts=&format=`
+
+**读取或转码单条语音**。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `account` | 账号 wxid | 必填 |
+| `chat` | 会话 username | |
+| `local_id` | 消息 local_id | 0 |
+| `svr_id` / `server_id` | 消息 server_id | 0 |
+| `ts` | 时间戳 | 0 |
+| `format` / `fmt` | `silk` 原始下载，或 `wav` 转浏览器可播放 WAV | `silk` |
+
+```
+响应: audio/silk 或 audio/wav
+错误: {"error": "...", "fallback": "silk"}, 415  # 缺少本机 SILK 解码器时
+```
+
+说明：项目不新增强制外部依赖。`format=wav` 会优先使用环境中已存在的 `pilk`，
+其次使用本机可选解码器（例如通过 `SIWX_SILK_DECODER` 指定的命令，输出裸 PCM 后由
+Python 标准库封装为 WAV）；不可转码时仍可使用默认 `format=silk` 下载原始语音。
+
+---
+
 ### `GET /api/chat/media/image?account=&md5=&chat=&bubble_md5=&hq=&local_id=&ts=`
 
 **按需解密单张图片**。

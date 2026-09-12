@@ -430,6 +430,40 @@ class TestVoiceMedia(TempRootCase):
         self.assertEqual(r.data, b"#!SILK_V3abc")
         self.assertEqual(r.headers.get("X-SIWX-Voice-Format"), "silk")
 
+    def test_pcm_to_wav_uses_stdlib_container(self):
+        from siwx import voice
+        wav = voice.pcm_to_wav(b"\x00\x00\x01\x00", sample_rate=24000)
+        self.assertTrue(wav.startswith(b"RIFF"))
+        self.assertIn(b"WAVE", wav[:16])
+        self.assertGreater(len(wav), 44)
+
+    def test_voice_api_transcodes_wav_when_decoder_available(self):
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        db = acc / "message" / "media_0.db"
+        conn = sqlite3.connect(db)
+        conn.execute("DROP TABLE unrelated")
+        conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+        conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (chat,))
+        conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
+                     "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
+        conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
+                     (1, 1700000000, 9, 123456789, b"\x02#!SILK_V3abc", "0"))
+        conn.commit(); conn.close()
+        from siwx import voice
+        from siwx.server import app
+        old = voice.transcode_voice
+        try:
+            voice.transcode_voice = lambda data, target="wav": (
+                b"RIFFxxxxWAVEfmt ", {"format": "wav", "mimetype": "audio/wav", "ext": "wav", "engine": "fake"})
+            r = app.test_client().get(
+                f"/api/chat/media/voice?account={account}&chat={chat}&local_id=9&svr_id=123456789&ts=1700000000&format=wav")
+        finally:
+            voice.transcode_voice = old
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "audio/wav")
+        self.assertEqual(r.headers.get("X-SIWX-Voice-Format"), "wav")
+        self.assertEqual(r.headers.get("X-SIWX-Voice-Transcoder"), "fake")
+
 
 class TestMediaExport(TempRootCase):
 
@@ -480,6 +514,40 @@ class TestMediaExport(TempRootCase):
         self.assertEqual(seen.get("ts"), 1_700_000_123)
         self.assertEqual(seen.get("local_id"), 42)
         self.assertEqual(seen.get("bubble_md5"), "c" * 32)
+
+    def test_export_includes_transcoded_voice_media(self):
+        from siwx import exporter as ex
+        t = _msg_table(self.chat)
+        conn = sqlite3.connect(self.acc / "message" / "message_0.db")
+        conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
+                     (99, 123456789, 34, 1_700_000_099, 0, 1,
+                      b'<msg><voicemsg voicelength="1000" length="12" /></msg>', None))
+        conn.commit(); conn.close()
+
+        db = self.acc / "message" / "media_0.db"
+        conn = sqlite3.connect(db)
+        conn.execute("DROP TABLE unrelated")
+        conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+        conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (self.chat,))
+        conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
+                     "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
+        conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
+                     (1, 1_700_000_099, 99, 123456789, b"\x02#!SILK_V3abc", "0"))
+        conn.commit(); conn.close()
+
+        old = ex.voice.transcode_voice
+        try:
+            ex.voice.transcode_voice = lambda data, target="wav": (
+                b"RIFFxxxxWAVEfmt ", {"format": "wav", "mimetype": "audio/wav", "ext": "wav", "engine": "fake"})
+            res = ex.run_export(self.acc, self.account, self.chat, "测试好友",
+                                fmt="html", want_media=True, want_avatars=False,
+                                export_root=self.tmp / "exports", pack="none")
+        finally:
+            ex.voice.transcode_voice = old
+        html = Path(res["file"]).read_text(encoding="utf-8")
+        self.assertEqual(res["voice_count"], 1)
+        self.assertTrue((Path(res["file"]).parent / "media" / "voice_0000_99.wav").is_file())
+        self.assertIn("voice_0000_99.wav", html)
 
 
 # ── 7. messages 的 limit 下限 ───────────────────────────────────

@@ -229,11 +229,14 @@ function bubble(m) {
     inner = `<div class="m-link"><a href="${esc(full)}" target="_blank" rel="noreferrer">${esc(m.link.title)}</a>` +
             (host ? `<div class="m-link-host">${esc(host)}</div>` : '') + `</div>`;
   } else if (m.kind === 'voice') {
-    const src = `/api/chat/media/voice?account=${encodeURIComponent(account)}` +
-                `&chat=${encodeURIComponent(currentChat.username)}` +
-                `&local_id=${m.id || 0}&svr_id=${encodeURIComponent(m.platformMessageId || '')}&ts=${m.ts || 0}`;
+    const base = `/api/chat/media/voice?account=${encodeURIComponent(account)}` +
+                 `&chat=${encodeURIComponent(currentChat.username)}` +
+                 `&local_id=${m.id || 0}&svr_id=${encodeURIComponent(m.platformMessageId || '')}&ts=${m.ts || 0}`;
+    const wav = base + '&format=wav';
+    const silk = base + '&format=silk';
     inner = `<div class="m-voice"><span>🎤 ${esc(voiceDuration(m.voice))}</span>` +
-            `<a href="${src}" download="voice_${m.id || 'msg'}.silk">下载 SILK</a></div>`;
+            `<audio controls preload="none" src="${wav}"></audio>` +
+            `<a href="${silk}" download="voice_${m.id || 'msg'}.silk">下载 SILK</a></div>`;
   } else if (m.kind === 'image') {
     const src = `/api/chat/media/image?account=${encodeURIComponent(account)}` +
                 (m.md5 ? `&md5=${encodeURIComponent(m.md5)}` : '') +

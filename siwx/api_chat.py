@@ -727,9 +727,14 @@ def avatar():
 
 @bp.get("/media/voice")
 def media_voice():
-    """读取解密后的语音数据（VoiceInfo.voice_data，通常为 SILK）。"""
+    """读取或转码解密后的语音数据。
+
+    默认保持向后兼容，返回原始 SILK；传 format=wav 时尝试用本机可选解码器
+    转成浏览器可播放的 WAV。项目不新增强制外部依赖，缺少解码器时返回 415。
+    """
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
+    fmt = (request.args.get("format") or request.args.get("fmt") or "silk").lower()
     try:
         local_id = int(request.args.get("local_id", "0") or 0)
         ts = int(request.args.get("ts", "0") or 0)
@@ -742,8 +747,24 @@ def media_voice():
                                  local_id=local_id, svr_id=svr_id, ts=ts)
     if body is None:
         return jsonify({"error": info}), 404
+
+    if fmt in ("wav", "wave"):
+        wav, meta = voice.transcode_voice(body, "wav")
+        if wav is None:
+            return jsonify({"error": meta, "fallback": "silk"}), 415
+        filename = f"voice_{local_id or info.get('localId') or 'msg'}.wav"
+        return Response(wav, mimetype=meta["mimetype"], headers={
+            "Cache-Control": "private, max-age=86400",
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "X-SIWX-Voice-Format": meta["format"],
+            "X-SIWX-Voice-Transcoder": meta.get("engine", ""),
+            "X-SIWX-Voice-Source": str(info.get("db", "")),
+        })
+
+    if fmt not in ("silk", "raw", "original"):
+        return jsonify({"error": f"暂不支持的语音格式: {fmt}"}), 400
     filename = f"voice_{local_id or info.get('localId') or 'msg'}.silk"
-    return Response(body, mimetype="audio/silk", headers={
+    return Response(body, mimetype=info.get("mimetype", "audio/silk"), headers={
         "Cache-Control": "private, max-age=86400",
         "Content-Disposition": f'inline; filename="{filename}"',
         "X-SIWX-Voice-Format": str(info.get("format", "unknown")),
