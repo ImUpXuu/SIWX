@@ -60,7 +60,8 @@ python run.py serve        # Web 控制台，默认 http://127.0.0.1:8787
 
 ### 2. 提取前准备
 
-- 安装 Xcode Command Line Tools（自带 LLDB）：`xcode-select --install`；
+- 确认终端里 `lldb --version` 能正常输出版本号（macOS 自带，无需额外安装；
+  若提示未找到，再执行 `xcode-select --install`）；
 - 微信保持登录状态（密钥只存在于运行中的进程里）；
 - 若此前提取失败过，建议先在设置里清空密钥缓存，避免旧缓存干扰判断；
 - 附加微信进程可能需要权限：终端方式可用 `sudo python run.py serve`，
