@@ -87,7 +87,7 @@ python run.py decrypt --out ./output
 ```
 stories-in-wx-py/
 ├── run.py                  # CLI 入口（multiprocessing.freeze_support）
-├── requirements.txt        # pycryptodome / flask / psutil / openpyxl / rich / zstandard
+├── requirements.txt        # pycryptodome / flask / psutil / openpyxl / rich / zstandard / pilk
 ├── version.json            # 版本信息 + 发布资产 URL
 ├── diag_*.py               # 诊断脚本（blob / media / verify）
 ├── packaging/              # PyInstaller spec（win / mac）

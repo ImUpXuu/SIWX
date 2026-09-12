@@ -1,6 +1,6 @@
 # 打包与发布
 
-> **工具**: PyInstaller | **平台**: Windows / macOS
+> ***工具****: PyInstaller |&#x20;****平台****: Windows / macOS*
 
 ---
 
@@ -15,7 +15,7 @@
 - 图标: (可选)
 - 数据文件: siwx/ui/ → ui/
 - 可选二进制: siwx/vendor/silk-decoder/**/silk_v3_decoder(.exe) → vendor/silk-decoder/
-- 隐藏导入: siwx.strategies.*
+- 隐藏导入: pilk
 ```
 
 ### macOS (`packaging/siwx-mac.spec`)
@@ -27,6 +27,7 @@
 - 格式: .dmg
 - 数据文件: siwx/ui/ → ui/
 - 可选二进制: siwx/vendor/silk-decoder/**/silk_v3_decoder → vendor/silk-decoder/
+- 隐藏导入: pilk
 ```
 
 ---
@@ -65,7 +66,7 @@ from multiprocessing import freeze_support
 freeze_support()
 ```
 
-Windows spawn 模式下，子进程以本 exe 重新拉起时，
+Windows spawn 模式下，子进程以本 exe 重新拉起时，  
 由 `freeze_support` 分流到 `spawn_main`，避免整包重跑 CLI。
 
 ### UI 资源

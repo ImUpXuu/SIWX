@@ -6,10 +6,10 @@
   - VoiceInfo.voice_data 通常已是明文 SILK 数据；有些记录在 #!SILK_V3 前带
     1 个控制字节，需要剥掉前缀后再作为 .silk 导出/下载。
 
-转码策略保持“无新增强依赖”：项目不新增 pip 包，也不要求 ffmpeg。若当前环境已
-安装 pilk 会自动复用；否则可通过 SIWX_SILK_DECODER 或 PATH 中已有的
-silk_v3_decoder/silk-decoder/decoder 等本地解码器把 SILK 解为 PCM，再用 Python
-标准库 wave 封装为 WAV；仍不可转码时保留原始 SILK 下载/导出，并给出明确原因。
+转码策略默认使用 pilk：SILK 先由 pilk 解为裸 PCM，再用 Python 标准库 wave
+封装为 WAV，不要求 ffmpeg。若 pilk 不可用，可通过 SIWX_SILK_DECODER、项目内置
+解码器或 PATH 中已有的 silk_v3_decoder/silk-decoder/decoder 兜底；仍不可转码时
+保留原始 SILK 下载/导出，并给出明确原因。
 """
 import os
 import re
@@ -217,7 +217,7 @@ def _run_decoder_command(parts: list[str], silk_path: Path, pcm_path: Path,
 
 
 def _decode_silk_to_pcm_with_pilk(data: bytes) -> tuple[bytes | None, str, str]:
-    """若环境已安装 pilk，则直接使用它解码；不把 pilk 作为项目依赖。"""
+    """默认用 pilk 解码 SILK；pilk 是项目依赖，不需要 ffmpeg。"""
     try:
         import pilk  # type: ignore
     except Exception:
@@ -267,9 +267,9 @@ def transcode_voice(data: bytes, target: str = "wav",
       - 成功: (body, {"format", "mimetype", "ext", "engine"})
       - 失败: (None, reason)
 
-    当前无新增依赖地支持：
+    支持：
       1. 已是 WAV 时直接返回；
-      2. SILK 通过项目内置/本机可选 decoder → PCM → 标准库 WAV；
+      2. SILK 通过 pilk（默认）或项目内置/本机可选 decoder → PCM → 标准库 WAV；
       3. target=silk/raw 时返回清理后的原始数据。
     """
     body, _offset = _clean_voice_data(data)
@@ -286,9 +286,9 @@ def transcode_voice(data: bytes, target: str = "wav",
     if ext != "silk":
         return None, f"当前只能将 SILK 转为 WAV，实际格式为 {ext}"
 
-    pcm, err, engine = _decode_silk_to_pcm_with_command(body, sample_rate)
+    pcm, err, engine = _decode_silk_to_pcm_with_pilk(body)
     if not pcm:
-        pcm, err, engine = _decode_silk_to_pcm_with_pilk(body)
+        pcm, err, engine = _decode_silk_to_pcm_with_command(body, sample_rate)
     if not pcm:
         return None, err or "未找到可用的 SILK 解码器"
     if len(pcm) % DEFAULT_SAMPLE_WIDTH:
