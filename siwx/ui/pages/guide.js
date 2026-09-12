@@ -64,7 +64,7 @@ function renderAccounts() {
     const isSel = state.account && state.account.db_dir === a.db_dir;
     return `
     <div class="acc ${isSel ? 'sel' : ''}" data-i="${i}" data-manual="${isManual ? '1' : '0'}">
-      <div class="avatar" style="${isManual ? 'background:linear-gradient(135deg,var(--green),var(--cyan))' : ''}">${esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
+      <div class="avatar" style="${isManual ? 'background:var(--text);color:var(--bg)' : ''}">${esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
       <div class="acc-main"><b>${esc(a.wxid)}</b><span>${a.db_count || '?'} 个数据库${isManual ? ' · 手动' : ''}</span></div>
       ${!isManual ? badge(a.keys_cached, a.total_salts) : '<span class="pill pill-gray">手动</span>'}
     </div>`;
@@ -154,13 +154,12 @@ export async function init(view) {
         });
         const d = await r.json();
         if (d.ok) {
-          // 添加到 accounts 列表
           if (!state.manualAccounts) state.manualAccounts = [];
           state.manualAccounts.push({ wxid: d.wxid, db_dir: d.db_dir, manual: true });
           manualMsg.textContent = `✓ 已添加: ${d.wxid}`;
           manualMsg.style.color = 'var(--ok-fg)';
           manualPath.value = '';
-          renderAccounts(); // 刷新列表
+          renderAccounts();
         } else {
           manualMsg.textContent = `✗ ${d.error}`;
           manualMsg.style.color = 'var(--err-fg)';

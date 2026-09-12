@@ -347,15 +347,15 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
     lines = []
     batch, count = [], 0
     first_ts = last_ts = 0
-    # 修复：复用外部传入的联系人缓存（原实现漏传 names，导致重复读 contact.db）
+    # 复用外部传入的联系人缓存，避免重复读 contact.db。
     for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
-        ts = msg["createTime"] or 0
-        if count == 0:
-            first_ts = ts
-        last_ts = ts
         msg["mediaFile"] = media_map.get(msg["localId"])
         batch.append(msg)
         count += 1
+        ts = msg.get("createTime", 0) or 0
+        if count == 1:
+            first_ts = ts
+        last_ts = ts
         if len(batch) >= 500:
             lines.extend(batch)
             batch = []
@@ -363,11 +363,6 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                 progress(0, f"已收集 {count} 条…")
     lines.extend(batch)
 
-    # 修复：session 的键必须匹配 build_chat_data 的契约（需要 displayName /
-    # firstTimestamp / lastTimestamp）。原实现给的是 sessionName 且缺两个时间戳，
-    # 导致 HTML 导出抛 KeyError: 'displayName'，该格式完全不可用。
-    # displayName 必须用调用方最终解析出的 display（run_export 已把空值回退到
-    # 联系人名），否则会出现「文件名用 display、页面标题用联系人名」的不一致。
     session = {"wxid": chat,
                "displayName": display or names.get(chat, chat) or chat,
                "isGroup": chat.endswith("@chatroom"),
