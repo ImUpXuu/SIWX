@@ -1,36 +1,49 @@
-.guide { max-width: 860px; margin: 0 auto; }
-.g-steps { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.guide { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.g-steps { display: flex; gap: 8px; margin-bottom: 2px; flex-wrap: wrap; }
 .g-chip {
-  font-size: 11.5px; font-weight: 600; padding: 4px 12px;
-  border: 1px solid var(--line-strong); border-radius: 999px;
+  font-size: 12px; font-weight: 700; padding: 5px 12px;
+  border: 1px solid var(--line); border-radius: 999px;
   background: var(--card); color: var(--muted);
 }
-.g-chip.on { background: var(--blue-light); color: var(--blue); border-color: var(--blue); }
-.g-chip.done { background: var(--ok-bg); color: var(--ok-fg); border-color: #6ee7b7; }
-.g-macos-hint { background: var(--warn-bg); border: 1px solid var(--warn-fg); border-radius: 8px;
-                padding: 8px 12px; margin-bottom: 10px; font-size: 12.5px; color: var(--warn-fg); }
-.g-desc { margin-bottom: 14px; }
-.g-check { border: 1px dashed var(--line-strong); border-radius: var(--radius); padding: 12px 16px;
-           font-size: 13px; background: var(--card-warm); }
-.g-check div { padding: 2px 0; }
-.g-nav { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
-.accounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.g-chip.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+.g-chip.done { background: var(--card); color: var(--text); border-style: dashed; }
+.g-macos-hint {
+  background: var(--card); border: 1px dashed var(--line); border-radius: var(--radius);
+  padding: 10px 12px; margin-bottom: 12px; font-size: 13px; color: var(--text);
+}
+.g-desc { margin-bottom: 18px; max-width: 720px; line-height: 1.75; }
+.g-title { font-size: 22px; line-height: 1.35; font-weight: 800; margin: 4px 0 8px; }
+.g-check {
+  border: 1px dashed var(--line); border-radius: var(--radius); padding: 14px 16px;
+  font-size: 13px; background: var(--card); color: var(--text);
+}
+.g-check div { padding: 3px 0; }
+.g-nav { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
+.accounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 12px; }
 .acc {
   display: flex; align-items: center; gap: 12px; cursor: pointer;
-  padding: 12px 14px; border-radius: var(--radius);
+  padding: 14px; border-radius: var(--radius);
   border: 1px solid var(--line); background: var(--card);
-  box-shadow: var(--shadow); transition: background .15s, box-shadow .15s;
+  box-shadow: none; transition: background .12s ease, color .12s ease;
 }
-.acc:hover { background: var(--card-alt); box-shadow: var(--shadow-md); }
-.acc.sel { background: var(--blue-light); border-color: var(--blue); }
+.acc:hover { background: var(--card-alt); }
+.acc.sel { background: var(--text); border-color: var(--text); color: var(--bg); }
+.acc.sel .acc-main span, .acc.sel .badge { color: var(--bg); border-color: var(--bg); background: transparent; }
 .avatar {
-  width: 38px; height: 38px; border-radius: 10px; flex: none;
-  background: #e2e8f0; color: #64748b;
+  width: 38px; height: 38px; border-radius: var(--radius-sm); flex: none;
+  background: var(--card); color: var(--text); border: 1px solid var(--line);
   font-weight: 700; font-size: 13px;
   display: flex; align-items: center; justify-content: center;
 }
-.acc-main { min-width: 0; flex: 1; margin-right: 6px; line-height: 1.4; }
-.acc-main b { font-size: 13px; font-weight: 600; display: block; overflow: hidden; text-overflow: ellipsis;
-              white-space: nowrap; max-width: 150px; }
-.acc-main span { font-size: 11.5px; color: var(--muted); }
+.acc.sel .avatar { background: var(--bg); color: var(--text); border-color: var(--bg); }
+.acc-main { min-width: 0; flex: 1; margin-right: 6px; line-height: 1.45; }
+.acc-main b { font-size: 13px; font-weight: 700; display: block; overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; max-width: 100%; }
+.acc-main span { font-size: 12px; color: var(--muted); }
 .g3-res, #g4-result { margin-top: 14px; }
+@media (max-width: 520px) {
+  .guide { gap: 14px; }
+  .accounts { grid-template-columns: 1fr; }
+  .g-title { font-size: 20px; }
+  .g-nav .btn { width: 100%; }
+}

@@ -8,12 +8,15 @@
     return window.SX.setupDone() ? 'chat' : 'guide';
   }
 
+  const UI_VERSION = '2026091201';
+
   function ensureCss(href) {
-    if (loadedCss[href]) return;
-    loadedCss[href] = true;
+    const key = `${href}?v=${UI_VERSION}`;
+    if (loadedCss[key]) return;
+    loadedCss[key] = true;
     const link = document.createElement('link');
     link.rel = 'stylesheet';
-    link.href = href;
+    link.href = key;
     document.head.appendChild(link);
   }
 
