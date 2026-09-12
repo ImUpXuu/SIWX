@@ -188,9 +188,10 @@
 错误: {"error": "...", "fallback": "silk"}, 415  # 缺少本机 SILK 解码器时
 ```
 
-说明：项目不新增强制外部依赖。`format=wav` 会优先使用环境中已存在的 `pilk`，
-其次使用本机可选解码器（例如通过 `SIWX_SILK_DECODER` 指定的命令，输出裸 PCM 后由
-Python 标准库封装为 WAV）；不可转码时仍可使用默认 `format=silk` 下载原始语音。
+说明：项目不新增强制外部依赖。`format=wav` 会优先查找项目内置解码器（如
+`siwx/vendor/silk-decoder/windows/silk_v3_decoder.exe`，打包时会随 PyInstaller 一起带入），
+其次使用 `SIWX_SILK_DECODER` 或 PATH 中的本机解码器，再尝试环境中已存在的 `pilk`；
+解出裸 PCM 后由 Python 标准库封装为 WAV。不可转码时仍可使用默认 `format=silk` 下载原始语音。
 
 ---
 

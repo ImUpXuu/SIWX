@@ -17,6 +17,7 @@ import shlex
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import wave
 from pathlib import Path
@@ -111,9 +112,65 @@ def _split_command(spec: str) -> list[str]:
     return shlex.split(spec, posix=(os.name != "nt"))
 
 
-def _decoder_candidates() -> list[tuple[str, list[str]]]:
-    """返回可尝试的本地 SILK 解码器命令。"""
+def _resource_roots() -> list[Path]:
+    """项目源码/打包运行时可能存放内置解码器的根目录。"""
+    roots: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        roots.append(Path(meipass))
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
+    here = Path(__file__).resolve().parent
+    roots.extend([here, here.parent, Path.cwd()])
+
+    uniq: list[Path] = []
+    seen = set()
+    for root in roots:
+        try:
+            key = str(root.resolve())
+        except OSError:
+            key = str(root)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(root)
+    return uniq
+
+
+def _bundled_decoder_candidates() -> list[tuple[str, list[str]]]:
+    """查找随项目源码或 PyInstaller 产物一起携带的 SILK 解码器。"""
+    exe_names = ["silk_v3_decoder", "silk-decoder", "silk_decoder", "decoder"]
+    if os.name == "nt":
+        exe_names = [name + ".exe" for name in exe_names] + exe_names
+    subdirs = (
+        Path("vendor") / "silk-decoder" / "windows",
+        Path("vendor") / "silk-decoder" / "win32",
+        Path("vendor") / "silk-decoder" / "bin",
+        Path("vendor") / "silk-decoder",
+        Path("vendor"),
+        Path("bin"),
+        Path("."),
+    )
     out: list[tuple[str, list[str]]] = []
+    seen = set()
+    for root in _resource_roots():
+        for sub in subdirs:
+            base = root / sub
+            for name in exe_names:
+                p = base / name
+                if not p.is_file():
+                    continue
+                key = str(p.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append((f"bundled:{p.name}", [str(p)]))
+    return out
+
+
+def _decoder_candidates() -> list[tuple[str, list[str]]]:
+    """返回可尝试的 SILK 解码器命令；项目内置优先，其次用户环境。"""
+    out: list[tuple[str, list[str]]] = []
+    out.extend(_bundled_decoder_candidates())
     env = os.environ.get("SIWX_SILK_DECODER")
     if env:
         parts = _split_command(env)
@@ -212,7 +269,7 @@ def transcode_voice(data: bytes, target: str = "wav",
 
     当前无新增依赖地支持：
       1. 已是 WAV 时直接返回；
-      2. SILK 通过本机可选 decoder → PCM → 标准库 WAV；
+      2. SILK 通过项目内置/本机可选 decoder → PCM → 标准库 WAV；
       3. target=silk/raw 时返回清理后的原始数据。
     """
     body, _offset = _clean_voice_data(data)
@@ -229,11 +286,11 @@ def transcode_voice(data: bytes, target: str = "wav",
     if ext != "silk":
         return None, f"当前只能将 SILK 转为 WAV，实际格式为 {ext}"
 
-    pcm, err, engine = _decode_silk_to_pcm_with_pilk(body)
+    pcm, err, engine = _decode_silk_to_pcm_with_command(body, sample_rate)
     if not pcm:
-        pcm, err, engine = _decode_silk_to_pcm_with_command(body, sample_rate)
+        pcm, err, engine = _decode_silk_to_pcm_with_pilk(body)
     if not pcm:
-        return None, err
+        return None, err or "未找到可用的 SILK 解码器"
     if len(pcm) % DEFAULT_SAMPLE_WIDTH:
         pcm = pcm[:-1]
     if not pcm:
