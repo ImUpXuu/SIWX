@@ -9,10 +9,10 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
-from siwx import extract, keystore
+from siwx import extract, keystore, logger as log
 from siwx import paths as _paths
 from siwx.discover import find_wechat_data_dirs, find_wechat_pids, wxid_of
 from siwx.sqlcipher import collect_db_files
@@ -459,26 +459,61 @@ def _tail_mcp_log(limit: int = 500) -> list:
         return []
 
 
+def _log_item_text(item) -> str:
+    return str(item[3] if len(item) >= 4 else item[1])
+
+
 @app.get("/api/logs")
 def api_logs():
     """返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）。"""
+    limit = min(int(request.args.get("limit", "2000") or 2000), 5000)
     with _lock:
         ring_logs = list(_LOG_RING)
     app_logs = _tail_app_log(800)
     mcp_logs = _tail_mcp_log(500)
+    structured_logs = log.get_logs(limit=limit)
 
     # 去重：同一条任务日志会同时进入 _LOG_RING 和 siwx.log。
     seen = set()
     merged = []
-    for item in sorted(app_logs + ring_logs + mcp_logs, key=lambda x: x[0]):
-        if "404 Not Found" in item[1]:
+    for item in sorted(app_logs + ring_logs + mcp_logs + structured_logs, key=lambda x: x[0]):
+        text = _log_item_text(item)
+        if "404 Not Found" in text:
             continue
-        key = (item[0], item[1])
+        key = (item[0], text)
         if key in seen:
             continue
         seen.add(key)
         merged.append(item)
-    return jsonify({"logs": merged[-1200:]})
+    return jsonify({"logs": merged[-limit:], "level": log.get_level().value})
+
+
+@app.get("/api/logs/settings")
+def api_log_settings():
+    """获取日志设置。"""
+    return jsonify({"level": log.get_level().value})
+
+
+@app.post("/api/logs/settings")
+def api_log_settings_save():
+    """设置日志模式。"""
+    data = request.get_json(silent=True) or {}
+    level = data.get("level", "rough")
+    log.set_level(log.LogLevel.DETAILED if level == "detailed" else log.LogLevel.ROUGH)
+    return jsonify({"level": log.get_level().value})
+
+
+@app.get("/api/logs/export")
+def api_log_export():
+    """导出脱敏日志。"""
+    start_ts = request.args.get("start")
+    end_ts = request.args.get("end")
+    desensitize = request.args.get("desensitize", "1") == "1"
+    start = int(start_ts) if start_ts else None
+    end = int(end_ts) if end_ts else None
+    text = log.export_logs(start_ts=start, end_ts=end, desensitize=desensitize)
+    return Response(text, mimetype="text/plain",
+                    headers={"Content-Disposition": "attachment; filename=siwx_log.txt"})
 
 
 @app.get("/api/job")

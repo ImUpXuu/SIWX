@@ -148,8 +148,9 @@ function poll() {
       renderLogs(job.logs || []);
       // 进度条：解析最后一条 [export] N%
       let pct = 0;
-      for (const [, m] of (job.logs || [])) {
-        const mt = /\[export\] (\d+)%/.exec(m);
+      for (const entry of (job.logs || [])) {
+        const msg = entry.length >= 4 ? entry[3] : entry[1];
+        const mt = /\[export\] (\d+)%/.exec(msg);
         if (mt) pct = +mt[1];
       }
       el('e-bar').style.width = pct + '%';
@@ -168,8 +169,10 @@ function poll() {
 
 function renderLogs(logs) {
   const box = el('e-log');
-  box.innerHTML = logs.map(([, m]) => `<div class="log-line">${esc(m)}</div>`)
-    .join('') || '<div class="log-line dim">…</div>';
+  box.innerHTML = logs.map(entry => {
+    const msg = entry.length >= 4 ? entry[3] : entry[1];
+    return `<div class="log-line">${esc(msg)}</div>`;
+  }).join('') || '<div class="log-line dim">…</div>';
   box.scrollTop = box.scrollHeight;
 }
 
@@ -180,7 +183,10 @@ function renderResult(job) {
     lines.push(`<div class="res-row res-err">❌ 导出失败：${esc(job.error)}</div>`);
     const logs = job.logs || [];
     lines.push(`<details class="res-logs-detail" open><summary>📋 运行日志 (${logs.length} 条)</summary>`);
-    for (const [, m] of logs) lines.push(`<div class="log-line dim">${esc(m)}</div>`);
+    for (const entry of logs) {
+      const msg = entry.length >= 4 ? entry[3] : entry[1];
+      lines.push(`<div class="log-line dim">${esc(msg)}</div>`);
+    }
     lines.push('</details>');
     box.innerHTML = lines.join('');
     return;
@@ -217,7 +223,10 @@ function renderResult(job) {
   lines.push('</details>');
   const logs = job.logs || [];
   lines.push(`<details class="res-logs-detail"><summary>📋 运行日志 (${logs.length} 条)</summary>`);
-  for (const [, m] of logs) lines.push(`<div class="log-line dim">${esc(m)}</div>`);
+  for (const entry of logs) {
+    const msg = entry.length >= 4 ? entry[3] : entry[1];
+    lines.push(`<div class="log-line dim">${esc(msg)}</div>`);
+  }
   lines.push('</details>');
   box.innerHTML = lines.join('');
 }

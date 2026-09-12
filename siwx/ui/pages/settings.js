@@ -155,6 +155,41 @@ export async function init() {
     resetSetup();
     go('#/guide');
   });
+
+  // ── 日志模式 ──────────────────────────────────────────
+  async function loadLogSettings() {
+    try {
+      const s = await fetchJSON('/api/logs/settings');
+      el('s-log-level').value = s.level || 'rough';
+    } catch (e) { /* ignore */ }
+  }
+
+  el('s-log-level').addEventListener('change', async (e) => {
+    await fetchJSON('/api/logs/settings', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ level: e.target.value }),
+    });
+    window.alert(`日志模式已切换为: ${e.target.value === 'detailed' ? '详细' : '粗略'}`);
+  });
+
+  // ── 脱敏日志导出 ──────────────────────────────────────
+  el('s-export-log').addEventListener('click', async () => {
+    const desensitize = el('s-log-desensitize').checked;
+    const url = `/api/logs/export?desensitize=${desensitize ? '1' : '0'}`;
+    try {
+      const r = await fetch(url);
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `siwx_log_${Date.now()}.txt`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) {
+      window.alert('导出失败: ' + e.message);
+    }
+  });
+
+  await loadLogSettings();
 }
 
-export function destroy() { /* 无常驻定时器 */ }
+export function destroy() { /* no timers */ }

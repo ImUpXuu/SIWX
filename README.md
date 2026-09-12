@@ -1,5 +1,5 @@
 # stories-in-wx
-
+本站部分逻辑已开源至我的博客[[https://upxuu.com/](https://upxuu.com/posts/wechat-dat-image-decrypt/)](https://upxuu.com/posts/wechat-dat-image-decrypt/) 媒体解密思路 后续会进一步发送文章解析
 微信 4.x 数据库密钥提取、解密、聊天查看、媒体解密、多格式导出、MCP 接管。
 
 > **跨平台**: Windows（完整支持）+ macOS（4.1.80+，需 LLDB 密钥提取）
@@ -145,3 +145,13 @@ AGPL-3.0（不可商用）。详见 [LICENSE](./LICENSE)。
 ## 免责声明
 
 本项目仅供个人数据备份与研究使用。使用者应遵守所在法律法规，严禁用于未经授权访问他人数据。使用本项目产生的任何法律责任由使用者自行承担。
+
+---
+
+<div align="center">
+
+**开发者**: [UPXUU](https://upxuu.com) · **博客**: [upxuu.com](https://upxuu.com)
+
+**License**: AGPL-3.0（不可商用）· **Copyright**: © 2026 UPXUU
+
+</div>
