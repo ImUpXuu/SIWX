@@ -541,6 +541,23 @@ class TestDecryptAtomic(unittest.TestCase):
 
 # ── 9. CLI --json ───────────────────────────────────────────────
 
+class TestLogsApi(unittest.TestCase):
+
+    def test_api_logs_includes_file_logger_messages(self):
+        """日志页不能只看内存 ring；普通 logger 写入的文件日志也要显示。"""
+        from siwx import server
+        marker = f"unit-log-marker-{int(time.time() * 1000)}"
+        server._siwx_logger.info(marker)
+        for h in server._siwx_logger.handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+        data = server.app.test_client().get("/api/logs").get_json()
+        lines = [m for _ts, m in data.get("logs", [])]
+        self.assertTrue(any(marker in m for m in lines), "文件日志没有出现在 /api/logs")
+
+
 class TestCliJson(unittest.TestCase):
 
     def test_json_flag_emits_parseable_json(self):
