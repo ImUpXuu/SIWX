@@ -95,17 +95,32 @@ async function loadSessions() {
   if (el('c-sub') && !currentChat) el('c-sub').textContent = `${ss.length} 个会话 · ${ms}ms`;
 }
 
+function isOfficial(s) {
+  return !!(s && (s.is_official || s.kind === 'official' || /^gh_/.test(s.username || '')));
+}
+
+function ownerUsername() {
+  return /^wxid_.+_\d+$/.test(account || '') ? account.replace(/_\d+$/, '') : account;
+}
+
+function avatarImg(username) {
+  const src = `/api/chat/avatar?account=${encodeURIComponent(account)}` +
+              `&username=${encodeURIComponent(username)}`;
+  return `<img loading="lazy" src="${src}" onerror="this.remove()">`;
+}
+
 function sessionRow(s, extra = '') {
   const initials = (s.display || s.username || '?').slice(0, 2).toUpperCase();
   const isGrp = s.is_group;
+  const off = isOfficial(s);
   const selected = currentChat && currentChat.username === s.username;
   return `
     <div class="sess ${extra} ${selected ? 'sel' : ''}" data-u="${esc(s.username)}">
-      <div class="ava">${esc(initials)}</div>
+      <div class="ava"><span>${esc(initials)}</span>${avatarImg(s.username)}</div>
       <span class="name">${esc(s.display)}</span>
       <span class="prev">${esc(s.preview || '点击查看详情')}</span>
       <span class="tm">${fmtTs(s.last_time)}</span>
-      <span class="tag">${s.is_official ? '公众号' : (isGrp ? '群聊' : '')}</span>
+      <span class="tag">${off ? '公众号' : (isGrp ? '群聊' : '')}</span>
     </div>`;
 }
 
@@ -113,15 +128,16 @@ function renderSessions(kw) {
   const kwL = (kw || '').toLowerCase();
   const visible = sessions.filter(s =>
     !kwL || s.display.toLowerCase().includes(kwL) || s.username.toLowerCase().includes(kwL));
-  const normal = visible.filter(s => !s.is_official);
-  const official = visible.filter(s => s.is_official);
-  const lines = normal.map(s => sessionRow(s));
+  const normal = visible.filter(s => !isOfficial(s));
+  const official = visible.filter(s => isOfficial(s));
+  const lines = [];
   if (official.length) {
     const open = officialOpen || !!kwL;
     const latest = Math.max(...official.map(s => s.last_time || 0));
+    // 放在顶部，避免用户需要滚动到底部才看到公众号分组。
     lines.push(`
       <div class="sess sess-group ${open ? 'open' : ''}" data-group="official">
-        <div class="ava">公</div>
+        <div class="ava"><span>公</span></div>
         <span class="name">公众号</span>
         <span class="prev">${official.length} 个公众号会话 · 点击${open ? '收起' : '展开'}</span>
         <span class="tm">${fmtTs(latest)}</span>
@@ -129,6 +145,7 @@ function renderSessions(kw) {
       </div>`);
     if (open) lines.push(...official.map(s => sessionRow(s, 'sess-official')));
   }
+  lines.push(...normal.map(s => sessionRow(s)));
   el('c-sessions').innerHTML = lines.length ? lines.join('')
     : '<div class="c-empty">没有匹配的会话</div>';
   el('c-sessions').querySelectorAll('.sess').forEach(n => {
@@ -183,10 +200,7 @@ async function loadMessages(fresh) {
 }
 
 function avaHtml(username, letters) {
-  const src = `/api/chat/avatar?account=${encodeURIComponent(account)}` +
-              `&username=${encodeURIComponent(username)}`;
-  return `<div class="m-ava"><span>${esc(letters)}</span>` +
-         `<img loading="lazy" src="${src}" onerror="this.remove()"></div>`;
+  return `<div class="m-ava"><span>${esc(letters)}</span>` + avatarImg(username) + `</div>`;
 }
 
 function bubble(m) {
@@ -194,7 +208,7 @@ function bubble(m) {
     return `<div class="m-row sys"><div class="m-bubble">${esc(m.text)}</div></div>`;
   }
   const who = m.is_me ? 'me' : '';
-  const avaUser = m.is_me ? account : (m.sender_wxid || currentChat.username);
+  const avaUser = m.is_me ? ownerUsername() : (m.sender_wxid || currentChat.username);
   const ava = `<div class="cell-ava">${avaHtml(avaUser, (m.sender_name || '?').slice(0, 2).toUpperCase())}</div>`;
   const name = (!m.is_me && currentChat && currentChat.is_group && m.sender_name)
     ? `<div class="m-name">${esc(m.sender_name)}</div>` : '';

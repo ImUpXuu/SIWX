@@ -174,7 +174,7 @@ def _contact_names(acc_dir: Path) -> dict:
     sig = _file_signature(p)
     if sig is None:
         return names
-    key = str(p)
+    key = (str(p), "all")
     with _CACHE_LOCK:
         hit = _CONTACT_CACHE.get(key)
         if hit is not None and hit[0] == sig:
@@ -209,6 +209,58 @@ def _contact_names(acc_dir: Path) -> dict:
         pass
     with _CACHE_LOCK:
         _CONTACT_CACHE[key] = (sig, names)
+    return names
+
+
+def _contact_names_for(acc_dir: Path, usernames) -> dict:
+    """只读取指定 username 的联系人名，避免会话列表首次加载全表扫描 contact.db。"""
+    wanted = sorted({(u or "").strip() for u in usernames if (u or "").strip()})
+    if not wanted:
+        return {}
+    p = acc_dir / "contact" / "contact.db"
+    sig = _file_signature(p)
+    if sig is None:
+        return {}
+    # 若全量缓存已存在，直接从中取子集。
+    with _CACHE_LOCK:
+        full = _CONTACT_CACHE.get((str(p), "all"))
+        if full is not None and full[0] == sig:
+            all_names = full[1]
+            return {u: all_names.get(u, u) for u in wanted}
+        key = (str(p), tuple(wanted))
+        hit = _CONTACT_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+
+    names = {u: u for u in wanted}
+    try:
+        conn = sqlite3.connect(p)
+        try:
+            for i in range(0, len(wanted), 400):
+                chunk = wanted[i:i + 400]
+                marks = ",".join("?" for _ in chunk)
+                sql = ("SELECT username, remark, nick_name, alias FROM contact "
+                       f"WHERE username IN ({marks})")
+                for un, remark, nick, alias in conn.execute(sql, chunk):
+                    un = (un or "").strip()
+                    best = un
+                    for v in (remark, nick, alias):
+                        v = (v or "").strip()
+                        if v and v != un and "\ufffd" not in v:
+                            best = v
+                            break
+                    if un:
+                        names[un] = best
+        except sqlite3.Error:
+            # schema 不匹配时退回全量函数，保持兼容性。
+            all_names = _contact_names(acc_dir)
+            names = {u: all_names.get(u, u) for u in wanted}
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    with _CACHE_LOCK:
+        _CONTACT_CACHE[(str(p), tuple(wanted))] = (sig, names)
     return names
 
 
@@ -289,13 +341,6 @@ def sessions():
         if hit is not None and hit[0] == cache_sig:
             return jsonify({"account": account, "sessions": hit[1]})
 
-    try:
-        names = _contact_names(acc)
-    except Exception as e:
-        # 联系人读取失败不应阻塞会话列表
-        _log(f"[sessions] _contact_names 失败: {e}")
-        names = {}
-
     items = {}
 
     if sdb.is_file():
@@ -331,6 +376,13 @@ def sessions():
                 pass
             finally:
                 conn.close()
+
+    try:
+        # 会话列表只需要当前 items 的显示名，按需查询比全表读取 contact.db 快得多。
+        names = _contact_names_for(acc, items.keys())
+    except Exception as e:
+        _log(f"[sessions] _contact_names_for 失败: {e}")
+        names = {}
 
     out = []
     for it in items.values():
@@ -642,9 +694,24 @@ def avatar():
         return jsonify({"error": "无头像"}), 404
     try:
         conn = sqlite3.connect(db)
-        row = conn.execute(
-            "SELECT image_buffer FROM head_image WHERE username=?",
-            (username,)).fetchone()
+        candidates = [username]
+        # 输出目录名通常是 wxid_xxx_6409 这类带后缀的账号目录，而头像库里的
+        # 本人 username 是原始 wxid_xxx。给“自己的头像”做一次兼容回退。
+        if username == account:
+            clean = media.clean_wxid(account)
+            if clean not in candidates:
+                candidates.append(clean)
+            if "_" in account:
+                short = account.rsplit("_", 1)[0]
+                if short not in candidates:
+                    candidates.append(short)
+        row = None
+        for u in candidates:
+            row = conn.execute(
+                "SELECT image_buffer FROM head_image WHERE username=?",
+                (u,)).fetchone()
+            if row and row[0]:
+                break
         conn.close()
     except sqlite3.Error:
         return jsonify({"error": "无头像"}), 404
