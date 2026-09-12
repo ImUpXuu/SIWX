@@ -83,7 +83,12 @@ def _handle_exception(e):
     tb = traceback.format_exc()
     _siwx_logger.error(f"未捕获异常: {e}\n{tb}")
     with _lock:
-        _job["logs"].append([int(time.time() * 1000), f"[错误] {type(e).__name__}: {e}"])
+        ts = int(time.time() * 1000)
+        msg = f"[错误] {type(e).__name__}: {e}"
+        _job["logs"].append([ts, msg])
+        _LOG_RING.append([ts, msg])
+        if len(_LOG_RING) > _LOG_RING_MAX:
+            del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
     return jsonify({"error": f"{type(e).__name__}: {e}", "traceback": tb}), 500
 
 
@@ -318,6 +323,47 @@ def run():
     return jsonify({"started": True})
 
 
+def _tail_app_log(limit: int = 800) -> list:
+    """读取 siwx.log 文件末尾，转换为 [ts_ms, message] 格式。
+
+    日志页此前只读进程内 _LOG_RING；但大量日志（如 api_chat 的列表/消息查询）
+    是直接写入 logging.getLogger("siwx") 的文件日志，不会进入 _LOG_RING，导致
+    用户打开“运行日志”时经常看到空白。这里把文件日志也纳入 /api/logs。
+    """
+    paths = []
+    for h in logging.getLogger("siwx").handlers:
+        p = getattr(h, "baseFilename", None)
+        if p:
+            paths.append(Path(p))
+    if not paths:
+        paths.append(_paths.app_root() / "logs" / "siwx.log")
+    p = paths[0]
+    if not p.is_file():
+        return []
+    try:
+        with open(p, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            block = min(size, 256 * 1024)
+            f.seek(-block, 2)
+            tail = f.read(block).decode("utf-8", errors="replace")
+        lines = [ln for ln in tail.splitlines() if ln.strip()][-limit:]
+        out = []
+        for ln in lines:
+            ts_ms = 0
+            for fmt, n in (("%Y-%m-%d %H:%M:%S", 19),
+                           ("%Y-%m-%d %H:%M:%S,%f", 23)):
+                try:
+                    ts_ms = int(datetime.strptime(ln[:n], fmt).timestamp() * 1000)
+                    break
+                except (ValueError, IndexError):
+                    pass
+            out.append([ts_ms, ln])
+        return out
+    except Exception:
+        return []
+
+
 def _tail_mcp_log(limit: int = 500) -> list:
     """读取 MCP 日志文件末尾，转换为 [ts_ms, message] 格式。"""
     from siwx.mcp_server import _mcp_log_path
@@ -348,12 +394,22 @@ def _tail_mcp_log(limit: int = 500) -> list:
 
 @app.get("/api/logs")
 def api_logs():
-    """返回环形日志缓冲 + MCP 调用日志（合并按时间排序）。"""
+    """返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）。"""
     with _lock:
-        web_logs = list(_LOG_RING)
+        ring_logs = list(_LOG_RING)
+    app_logs = _tail_app_log(800)
     mcp_logs = _tail_mcp_log(500)
-    merged = sorted(web_logs + mcp_logs, key=lambda x: x[0])
-    return jsonify({"logs": merged})
+
+    # 去重：同一条任务日志会同时进入 _LOG_RING 和 siwx.log。
+    seen = set()
+    merged = []
+    for item in sorted(app_logs + ring_logs + mcp_logs, key=lambda x: x[0]):
+        key = (item[0], item[1])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return jsonify({"logs": merged[-1200:]})
 
 
 @app.get("/api/job")

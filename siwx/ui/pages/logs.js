@@ -3,7 +3,8 @@ const { esc, fetchJSON } = window.SX;
 
 let paused = false;
 let autoScroll = true;
-let lastLen = 0;
+let lastSig = "";
+let pollTimer = null;
 
 function el(id) { return document.getElementById(id); }
 
@@ -16,18 +17,16 @@ function levelClass(m) {
 
 function renderLogs(logs) {
   const box = el("log-box");
-  if (logs.length === lastLen) return;
-  // 只追加新增条目（避免全量重绘）
-  for (let i = lastLen; i < logs.length; i++) {
-    const [, m] = logs[i];
+  const shown = logs.slice(-1000);
+  const sig = shown.length ? `${shown.length}:${shown[shown.length - 1][0]}:${shown[shown.length - 1][1]}` : "0";
+  if (sig === lastSig) return;
+  lastSig = sig;
+  box.innerHTML = shown.map(([, m]) => {
     const div = document.createElement("div");
     div.className = levelClass(m);
     div.textContent = m;
-    box.appendChild(div);
-  }
-  // 限制 DOM 节点数
-  while (box.children.length > 1000) box.removeChild(box.firstChild);
-  lastLen = logs.length;
+    return div.outerHTML;
+  }).join("") || '<div class="log-line dim">暂无日志…</div>';
   el("log-count").textContent = `${logs.length} 条`;
   if (autoScroll) box.scrollTop = box.scrollHeight;
 }
@@ -47,14 +46,17 @@ export async function init() {
   });
   el("log-clear").addEventListener("click", () => {
     el("log-box").innerHTML = "";
-    lastLen = 0;
+    lastSig = "";
   });
   el("log-auto").addEventListener("change", (e) => {
     autoScroll = e.target.checked;
     if (autoScroll) el("log-box").scrollTop = el("log-box").scrollHeight;
   });
   await poll();
-  setInterval(poll, 1000);
+  pollTimer = setInterval(poll, 1000);
 }
 
-export function destroy() { /* 由 router 清理 */}
+export function destroy() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+}
