@@ -557,6 +557,28 @@ class TestLogsApi(unittest.TestCase):
         lines = [m for _ts, m in data.get("logs", [])]
         self.assertTrue(any(marker in m for m in lines), "文件日志没有出现在 /api/logs")
 
+    def test_404_is_not_logged_as_uncaught_error(self):
+        from siwx import server
+        before = len(server.app.test_client().get("/api/logs").get_json().get("logs", []))
+        r = server.app.test_client().get("/__definitely_missing__")
+        self.assertEqual(r.status_code, 404)
+        data = server.app.test_client().get("/api/logs").get_json()
+        lines = [m for _ts, m in data.get("logs", [])]
+        self.assertFalse(any("__definitely_missing__" in m or "404 Not Found" in m for m in lines[-20:]))
+        self.assertGreaterEqual(len(lines), before)
+
+    def test_task_exception_is_persisted_to_file_logs(self):
+        from siwx import server
+        marker = "unit-task-failure-marker"
+        try:
+            raise RuntimeError(marker)
+        except Exception as e:
+            server._siwx_logger.exception("任务执行失败: %s", e)
+            server._flush_logs()
+        data = server.app.test_client().get("/api/logs").get_json()
+        lines = [m for _ts, m in data.get("logs", [])]
+        self.assertTrue(any(marker in m for m in lines), "任务异常没有落盘到 /api/logs")
+
 
 class TestCliJson(unittest.TestCase):
 
