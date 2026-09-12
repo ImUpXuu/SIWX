@@ -48,16 +48,15 @@ issue #3 的 Sequoia 15.1 环境。计划发布后先请 @LatteCoconut 在其环
 
 ## macOS 使用教程
 
-### 1. 安装
+### 1. 启动本地最新 SIWX
 
-- **方式一（推荐）**：前往 [Releases](https://github.com/ImUpXuu/SIWX/releases) 下载
-  `stories-in-wx-v*-macos.dmg`，双击运行，浏览器会自动打开 Web 控制台；
-- **方式二（源码）**：
-  ```bash
-  git clone https://github.com/ImUpXuu/SIWX.git && cd SIWX
-  pip install -r requirements.txt
-  python run.py serve        # Web 控制台，默认 http://127.0.0.1:8787
-  ```
+拉取本 PR 所在分支后，在 macOS 上启动最新代码即可（无需再另行下载 Release）：
+
+```bash
+git clone https://github.com/ImUpXuu/SIWX.git && cd SIWX
+pip install -r requirements.txt
+python run.py serve        # Web 控制台，默认 http://127.0.0.1:8787
+```
 
 ### 2. 提取前准备
 
