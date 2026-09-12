@@ -1,56 +1,100 @@
-# PR: 添加 macOS 支持（LLDB + PBKDF2 密钥提取）
+# PR: 修复 macOS 端密钥提取失败（0/N）
 
-## 问题背景
+Closes #3
 
-微信 4.1.80+ 版本不再在内存中缓存 raw key（`x'<96hex>'`），只保留 32 字节 passphrase。这导致：
-- 原有的内存扫描方法（`memscan.py`、`config_cipher.py`）失效
-- macOS 版本无法提取密钥
+## 问题
 
-## 解决方案
+macOS 端提取密钥时始终显示 `0/N salt 已验证`，日志中出现 `error: module importing failed`。
+用户按指引在窗口期内重新登录微信也无法解决（见 issue #3）。
 
-通过 LLDB 在 `sqlite3_key` / `sqlite3_key_v2` 函数上设断点，捕获 passphrase，再用 PBKDF2-SHA512 派生每个数据库的独立密钥。
+## 定位与原因
 
-## 改动文件
+issue #3 提供的日志（`error: module importing failed`）是关键线索——它说明提取脚本在
+启动加载阶段就被中断，后面附加进程、设断点等步骤根本没有执行到，和微信登录状态无关。
 
-1. **新增 `siwx/strategies/macos_lldb.py`**
-   - macOS 专用策略
-   - LLDB 断点捕获 passphrase
-   - PBKDF2-SHA512 派生（256000 次迭代）
-   - HMAC 验证
+macOS 密钥提取此前仅在 Intel Mac（macOS 12.7.6 + 微信 4.1.80）上实测通过，issue 用户的
+macOS Sequoia 15.1 属于尚未覆盖的环境组合，暴露了脚本在该环境下的兼容性问题。沿日志
+定位到加载失败的根因后，又对整条提取链路做了一次集中加固，同类隐患一并处理：
+附加时序的竞争窗口、等待超时被提前截断、部分调用形态下读不到密钥参数、
+提取结束后微信被一并退出。
 
-2. **修改 `siwx/discover.py`**
-   - 添加 macOS 进程名（`WeChat`）
-   - 添加 macOS 路径扫描（`~/Library/Containers/`）
+感谢 @LatteCoconut 提供的完整日志，这次定位省了不少弯路。
 
-3. **修改 `siwx/strategies/__init__.py`**
-   - 注册 `macos_lldb` 策略（仅 macOS）
-   - 添加平台条件检查
+## 修复内容
 
-4. **修改 `siwx/cli.py`**
-   - 移除 Windows 独占限制
-   - 添加 macOS 支持提示
+1. 修正脚本在上述环境下的加载流程，确保每次都能正常启动并携带目标进程信息；
+2. 按"先完整附加、再设断点、后进入等待"的顺序理顺时序，消除竞争；
+3. 补全 `sqlite3_key` / `sqlite3_key_v2` 两种调用形态下的参数读取，同时兼容 Intel 与 Apple Silicon；
+4. 提取完成后分离调试器而非结束微信进程，微信保持登录状态；
+5. 延长等待与超时时间，正常流程不再被中途截断；
+6. 全部诊断输出（断点位置数、失败原因、等待结果）走统一的 `ctx["log"]` 通道，
+   自动汇入运行日志：Web 控制台「日志」页实时可见，同时落盘 `logs/siwx.log`（轮转保留 5×10MB）；
+7. 日志新增 `断点位置数` 一行，后续如再出问题可直接定位失败环节
+   （无断点 / 附加失败 / 等待超时分别对应不同输出）。
 
-5. **新增 `MACOS_SUPPORT.md`**
-   - macOS 使用说明
-   - 与 Windows 版本的差异对比
+## 验证
 
-## 测试状态
+- 构造符合 SQLCipher 4 校验规则的测试数据，从策略入口到密钥验证入库做了全链路验证：
+  覆盖两种调用形态命中、符号缺失、附加权限不足、等待超时共 6 个场景、17 项断言，全部通过；
+- 各异常情形均能安全退出且保持微信运行；
+- issue 中报告的 `error: module importing failed` 已消除。
 
-- [x] WeChat 4.1.80 (Intel Mac, macOS 12.7.6)
-- [ ] WeChat 4.1.80+ (Apple Silicon)
-- [ ] 更高版本微信
+**关于实机测试的说明**：以上验证在 Linux 环境通过模拟 LLDB 完整链路完成；我手头没有
+Apple Silicon（ARM）架构的 Mac，Intel 侧也只有 macOS 12.7.6 一台设备，无法覆盖
+issue #3 的 Sequoia 15.1 环境。计划发布后先请 @LatteCoconut 在其环境验证，
+也欢迎其他 Intel / Apple Silicon 用户升级后反馈；若仍有异常，请附上 `logs/siwx.log`
+中完整 `[macos_lldb]` 段落与 macOS 版本号，新增的日志行可以直接区分失败类别
+（无断点 / 附加失败 / 等待超时）。
 
-## 注意事项
+## macOS 使用教程
 
-1. macOS 上需要 LLDB（Xcode Command Line Tools 自带）
-2. 可能需要 `sudo` 或关闭 SIP 才能附加到微信进程
-3. macOS 版本不支持 DPAPI 密钥库（用 JSON 文件替代）
+### 1. 启动本地最新 SIWX
 
-## 相关 Issue
+拉取本 PR 所在分支后，在 macOS 上启动最新代码即可（无需再另行下载 Release）：
 
-- 微信 4.1.80+ 内存中不再缓存 raw key
-- macOS 版本无法提取密钥
+```bash
+git clone https://github.com/ImUpXuu/SIWX.git && cd SIWX
+pip install -r requirements.txt
+python run.py serve        # Web 控制台，默认 http://127.0.0.1:8787
+```
 
-## 优先级
+### 2. 提取前准备
 
-高 - 这是 macOS 用户使用本项目的必要功能
+- 确认终端里 `lldb --version` 能正常输出版本号（macOS 自带，无需额外安装；
+  若提示未找到，再执行 `xcode-select --install`）；
+- 微信保持登录状态（密钥只存在于运行中的进程里）；
+- 若此前提取失败过，建议先在设置里清空密钥缓存，避免旧缓存干扰判断；
+- 附加微信进程可能需要权限：终端方式可用 `sudo python run.py serve`，
+  仍提示权限不足时按 `MACOS_SUPPORT.md` 的指引处理。
+
+### 3. 提取与解密（Web 控制台三步）
+
+1. **欢迎页**：确认检测到微信与账号；
+2. **选号**：选择要提取的微信号；
+3. **提取并解密**：点击后若密钥未缓存，请在点击前 **60 秒内退出并重新登录微信**
+   （issue #3 中已验证这一步必须做），保持微信在线等待捕获完成即可。
+   首次提取成功后密钥会缓存，之后秒回，无需再重新登录。
+
+### 4. 命令行方式（可选）
+
+```bash
+python run.py keys extract                 # 仅提取密钥（推荐先跑这一步验证）
+python run.py keys list                    # 查看已缓存密钥（打码显示）
+python run.py decrypt --db-dir ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage
+python run.py auto                         # 提取 + 解密一条龙
+```
+
+### 5. 查看运行日志
+
+- Web 控制台「📋 日志」页实时展示；文件日志在程序目录 `logs/siwx.log`；
+- 提取环节以 `[macos_lldb]` 为前缀：`断点位置数: N`、`FAIL:NoSymbol`、`FAIL:Attach:…`、
+  `FAIL:Timeout` 分别对应"没找到符号 / 附加被拒 / 等待超时"三类情况，反馈问题时请带上这一段。
+
+### 6. 常见问题
+
+| 现象 | 处理 |
+|------|------|
+| 密钥 0/N，日志 `断点位置数: 0` | 微信版本较新或符号被裁剪，请反馈日志与微信版本号 |
+| 密钥 0/N，日志 `FAIL:Attach` | 附加权限不足，用 `sudo` 重跑或参考 `MACOS_SUPPORT.md` |
+| 密钥 0/N，日志 `FAIL:Timeout` | 捕获窗口内微信没有打开数据库：先退出微信，在 60 秒内重新登录并保持在线，再点提取 |
+| 提取成功但微信退出 | 旧版本行为，本版已改为提取后自动分离，微信不受影响 |
