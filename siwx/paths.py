@@ -58,8 +58,13 @@ def _writable_fallback(subdir: str, primary: Path) -> Path:
     if cached is not None:
         return cached
     try:
+        # 热路径优化：若目录已存在且系统判断可写，直接返回；避免每个新进程
+        # 首次请求都创建/删除 .siwx_probe（Windows 上可慢到数百 ms）。
+        if primary.is_dir() and os.access(primary, os.W_OK):
+            _PATH_CACHE[key] = primary
+            return primary
         primary.mkdir(parents=True, exist_ok=True)
-        # 真正试写一次（mkdir 成功不代表可写，如 Program Files）
+        # 新建目录或权限不明确时再真正试写一次。
         probe = primary / ".siwx_probe"
         probe.write_bytes(b"")
         probe.unlink(missing_ok=True)

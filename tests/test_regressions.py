@@ -442,6 +442,23 @@ class TestMediaExport(TempRootCase):
 
 # ── 7. messages 的 limit 下限 ───────────────────────────────────
 
+class TestAvatarApi(TempRootCase):
+
+    def test_owner_avatar_falls_back_to_clean_wxid(self):
+        """输出目录名可能带 _数字后缀，但头像库里本人是原始 wxid。"""
+        acc, account, _chat = make_account(self.tmp, account="wxid_owner_1234", n_texts=1)
+        (acc / "head_image").mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(acc / "head_image" / "head_image.db")
+        conn.execute("CREATE TABLE head_image (username TEXT PRIMARY KEY, md5 TEXT, image_buffer BLOB, update_time INTEGER)")
+        conn.execute("INSERT INTO head_image VALUES (?,?,?,?)",
+                     ("wxid_owner", "m", b"JPEGDATA", 1))
+        conn.commit(); conn.close()
+        from siwx.server import app
+        r = app.test_client().get("/api/chat/avatar?account=wxid_owner_1234&username=wxid_owner_1234")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data, b"JPEGDATA")
+
+
 class TestLimitGuard(TempRootCase):
 
     def test_negative_limit_is_clamped(self):
