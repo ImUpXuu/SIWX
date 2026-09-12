@@ -68,6 +68,15 @@
 .sess.sel .prev, .sess.sel .tm, .sess.sel .tag { color: var(--bg); opacity: .78; }
 .sess .tm { position: absolute; right: 12px; top: 12px; font-size: 11px; color: var(--muted); }
 .sess .tag { position: absolute; right: 12px; bottom: 12px; font-size: 11px; color: var(--muted); }
+.sess-group {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  background: var(--card-alt);
+}
+.sess-group .name::after { content: "  +"; font-weight: 700; }
+.sess-group.open .name::after { content: "  −"; }
+.sess-official { padding-left: 78px; }
+.sess-official .ava { left: 28px; width: 30px; height: 30px; line-height: 28px; top: 16px; font-size: 11px; }
 .c-empty, .c-loading { padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px; }
 .c-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--card); }
 .c-head {

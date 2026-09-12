@@ -13,6 +13,8 @@ import os
 import sys
 from pathlib import Path
 
+_PATH_CACHE = {}
+
 
 def app_root() -> Path:
     # 1. 显式环境变量覆盖
@@ -44,18 +46,30 @@ def app_root() -> Path:
 
 
 def _writable_fallback(subdir: str, primary: Path) -> Path:
-    """主路径不可创建/不可写时，回退到 %USERPROFILE%\\stories-in-wx\\<subdir>。"""
+    """主路径不可创建/不可写时，回退到 %USERPROFILE%\\stories-in-wx\\<subdir>。
+
+    这个函数在 Web API 热路径里会频繁调用。旧实现每次都创建并删除
+    `.siwx_probe` 做写探针；在 Windows/杀软环境下这个操作会明显拖慢
+    `/api/chat/sessions`。同一进程内路径可用性不会频繁变化，因此首
+    次探测后缓存结果即可。
+    """
+    key = (subdir, str(primary))
+    cached = _PATH_CACHE.get(key)
+    if cached is not None:
+        return cached
     try:
         primary.mkdir(parents=True, exist_ok=True)
         # 真正试写一次（mkdir 成功不代表可写，如 Program Files）
         probe = primary / ".siwx_probe"
         probe.write_bytes(b"")
         probe.unlink(missing_ok=True)
+        _PATH_CACHE[key] = primary
         return primary
     except OSError:
         pass
     fallback = Path(os.environ.get("USERPROFILE", ".")) / "stories-in-wx" / subdir
     fallback.mkdir(parents=True, exist_ok=True)
+    _PATH_CACHE[key] = fallback
     return fallback
 
 
