@@ -14,6 +14,7 @@
 - 名称: stories-in-wx
 - 图标: (可选)
 - 数据文件: siwx/ui/ → ui/
+- 可选二进制: siwx/vendor/silk-decoder/**/silk_v3_decoder(.exe) → vendor/silk-decoder/
 - 隐藏导入: siwx.strategies.*
 ```
 
@@ -25,6 +26,7 @@
 - 名称: stories-in-wx
 - 格式: .dmg
 - 数据文件: siwx/ui/ → ui/
+- 可选二进制: siwx/vendor/silk-decoder/**/silk_v3_decoder → vendor/silk-decoder/
 ```
 
 ---

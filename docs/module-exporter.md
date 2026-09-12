@@ -154,7 +154,8 @@ writer.close()
 
 读取 `message/media_*.db` 的 `VoiceInfo.voice_data`，先剥离 `#!SILK_V3` 前的控制字节；
 然后调用 `voice.transcode_voice(..., "wav")` 优先产出浏览器可播放的 WAV。项目不新增强制依赖：
-若当前环境已有 `pilk` 会直接复用；否则尝试 `SIWX_SILK_DECODER` 或 PATH 中的本机解码器。
+解码器查找顺序为：项目内置 `siwx/vendor/silk-decoder/...`（PyInstaller 会自动带入）→
+`SIWX_SILK_DECODER` → PATH 中的本机解码器 → 当前环境已有的 `pilk`。
 仍不可转码时自动回退写出 `.silk`，导出流程不中断。
 
 ---

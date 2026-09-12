@@ -437,6 +437,22 @@ class TestVoiceMedia(TempRootCase):
         self.assertIn(b"WAVE", wav[:16])
         self.assertGreater(len(wav), 44)
 
+    def test_bundled_decoder_path_is_preferred(self):
+        from siwx import voice
+        vendor = self.tmp / "siwx" / "vendor" / "silk-decoder" / "windows"
+        vendor.mkdir(parents=True, exist_ok=True)
+        exe = vendor / ("silk_v3_decoder.exe" if os.name == "nt" else "silk_v3_decoder")
+        exe.write_bytes(b"fake")
+        old_roots = voice._resource_roots
+        try:
+            voice._resource_roots = lambda: [self.tmp / "siwx"]
+            candidates = voice._decoder_candidates()
+        finally:
+            voice._resource_roots = old_roots
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0][1], [str(exe)])
+        self.assertTrue(candidates[0][0].startswith("bundled:"))
+
     def test_voice_api_transcodes_wav_when_decoder_available(self):
         acc, account, chat = make_account(self.tmp, n_texts=1)
         db = acc / "message" / "media_0.db"
