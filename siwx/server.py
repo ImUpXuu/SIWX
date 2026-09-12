@@ -10,6 +10,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 from siwx import extract, keystore
 from siwx import paths as _paths
@@ -41,6 +42,47 @@ def _setup_file_logger():
     return logger
 
 _siwx_logger = _setup_file_logger()
+_CRASH_FH = None
+
+
+def _flush_logs() -> None:
+    """尽量把日志落盘；logging 的 handler 通常会自动 flush，这里用于异常路径兜底。"""
+    for h in _siwx_logger.handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
+
+
+def _install_crash_hooks() -> None:
+    """记录非 Flask/任务线程里的未捕获异常和 Python fatal traceback。"""
+    global _CRASH_FH
+    log_dir = _paths.app_root() / "logs"
+    log_dir.mkdir(exist_ok=True)
+
+    def _sys_excepthook(exc_type, exc, tb):
+        _siwx_logger.critical("未捕获主线程异常", exc_info=(exc_type, exc, tb))
+        _flush_logs()
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = _sys_excepthook
+
+    if hasattr(threading, "excepthook"):
+        def _thread_excepthook(args):
+            _siwx_logger.critical("未捕获线程异常: %s", args.thread.name,
+                                  exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+            _flush_logs()
+        threading.excepthook = _thread_excepthook
+
+    try:
+        import faulthandler
+        _CRASH_FH = open(log_dir / "crash.log", "a", encoding="utf-8")
+        faulthandler.enable(_CRASH_FH, all_threads=True)
+    except Exception:
+        _CRASH_FH = None
+
+
+_install_crash_hooks()
 
 
 def _ui_dir() -> Path:
@@ -78,10 +120,22 @@ _LOG_RING_MAX = 2000
 # ── 全局错误处理：确保所有异常都有日志 + JSON 响应 ──────────────
 @app.errorhandler(Exception)
 def _handle_exception(e):
-    """未捕获异常 → 记录日志 + 返回 JSON（避免白屏 500）。"""
+    """未捕获异常 → 记录日志 + 返回 JSON（避免白屏 500）。
+
+    404/405 等 HTTPException 是正常路由结果，不应作为“未捕获异常”写进日志页；
+    否则浏览器探测 favicon、旧缓存资源或误输地址都会刷屏。
+    """
+    if isinstance(e, HTTPException):
+        code = e.code or 500
+        if code >= 500:
+            _siwx_logger.error("HTTP %s: %s", code, e)
+            _flush_logs()
+        return jsonify({"error": e.description, "code": code}), code
+
     import traceback
     tb = traceback.format_exc()
     _siwx_logger.error(f"未捕获异常: {e}\n{tb}")
+    _flush_logs()
     with _lock:
         ts = int(time.time() * 1000)
         msg = f"[错误] {type(e).__name__}: {e}"
@@ -95,6 +149,7 @@ def _handle_exception(e):
 def _log(msg: str) -> None:
     """写入任务日志 + 全局环形缓冲 + 文件日志。"""
     _siwx_logger.info(msg)
+    _flush_logs()
     with _lock:
         ts = int(time.time() * 1000)
         _job["logs"].append([ts, msg])
@@ -243,9 +298,16 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _job["ok"] = True
             _job["report"] = report
     except Exception as e:
+        _siwx_logger.exception("任务执行失败: %s", e)
+        _flush_logs()
         with _lock:
+            ts = _now_ms()
+            msg = f"[错误] {e}"
             _job["ok"] = False
-            _job["logs"].append([_now_ms(), f"[错误] {e}"])
+            _job["logs"].append([ts, msg])
+            _LOG_RING.append([ts, msg])
+            if len(_LOG_RING) > _LOG_RING_MAX:
+                del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
     finally:
         with _lock:
             _job["running"] = False
@@ -350,6 +412,9 @@ def _tail_app_log(limit: int = 800) -> list:
         lines = [ln for ln in tail.splitlines() if ln.strip()][-limit:]
         out = []
         for ln in lines:
+            # 历史版本曾把浏览器探测/旧资源 404 记录成 ERROR；日志页不展示这类噪音。
+            if "404 Not Found" in ln:
+                continue
             ts_ms = 0
             for fmt, n in (("%Y-%m-%d %H:%M:%S", 19),
                            ("%Y-%m-%d %H:%M:%S,%f", 23)):
@@ -404,6 +469,8 @@ def api_logs():
     seen = set()
     merged = []
     for item in sorted(app_logs + ring_logs + mcp_logs, key=lambda x: x[0]):
+        if "404 Not Found" in item[1]:
+            continue
         key = (item[0], item[1])
         if key in seen:
             continue
