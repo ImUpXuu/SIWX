@@ -27,10 +27,32 @@ GENERATOR = "stories-in-wx"
 EXPORT_VERSION = "1.0"
 
 
+# Windows 保留设备名，不能作为文件/目录名
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL",
+                 *(f"COM{i}" for i in range(1, 10)),
+                 *(f"LPT{i}" for i in range(1, 10))}
+
+
 def _safe_name(name: str) -> str:
+    """把任意文本清洗为安全的文件/目录名。
+
+    Bug 修复：原实现写作 `name = ch.replace(ch, "_")`，把 name 覆盖成了单个字符
+    替换的结果（`ch` 只含一个字符，`ch.replace(ch, "_")` 恒等于 `"_"`），于是
+    无论传入什么——包括联系人名称——都恒返回 `"_"`。这正是导出目录与文件名里
+    会话名/联系人名永远为空的原因。
+    """
+    name = str(name or "")
     for ch in '<>:"/\\|?*':
-        name = ch.replace(ch, "_")
-    return name[:48].strip() or "chat"
+        name = name.replace(ch, "_")
+    for ch in "\r\n\t":
+        name = name.replace(ch, " ")
+    # Windows 不允许名称以点或空格结尾
+    name = name[:48].strip().rstrip(".").strip()
+    if not name:
+        return "chat"
+    if name.split(".")[0].upper() in _WIN_RESERVED:
+        name = "_" + name
+    return name
 
 
 def collect_avatars(acc_out_dir: Path, usernames: list, dest: Path, progress=None):
@@ -55,13 +77,13 @@ def collect_avatars(acc_out_dir: Path, usernames: list, dest: Path, progress=Non
     return mapping
 
 
-def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account):
+def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
     """第一遍：轻量扫描，只采集计数/发送者/图片引用。内存 O(发送者数 + 图片数)。"""
     senders = set()
-    images = []       # (md5, bubble_md5, localId) 引用
+    images = []       # (md5, bubble_md5, localId, ts) 引用
     count = 0
     first_ts = last_ts = 0
-    for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account):
+    for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
         count += 1
         ts = msg["createTime"] or 0
         if count == 1:
@@ -69,28 +91,32 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account):
         last_ts = ts
         senders.add(msg["senderUsername"])
         if msg.get("md5") or msg.get("bubbleMd5"):
-            images.append((msg.get("md5"), msg.get("bubbleMd5"), msg["localId"]))
+            images.append((msg.get("md5"), msg.get("bubbleMd5"),
+                           msg["localId"], ts))
     return count, first_ts, last_ts, senders, images
 
 
-def _decrypt_media_parallel(acc_out_dir, account, images, dest, progress=None):
+def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=None):
     """并行解密媒体图片。CPU 密集型 AES → 多进程池。"""
     dest.mkdir(parents=True, exist_ok=True)
     if not images:
         return {}
 
-    # 准备任务：(abs_out_dir, account, md5, bubble_md5, chat, local_id, ts, dst_path)
+    # 任务元组：(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst)
+    # chat / ts 必须带上：media.get_image() 的 attach 原图目录、Bubble 气泡缓存、
+    # Thumb 缩略图三级来源都依赖它们，缺了就只剩 hardlink 一条路，大量图片解不出。
     tasks = []
-    for i, (md5, bubble_md5, local_id) in enumerate(images):
+    for i, (md5, bubble_md5, local_id, ts) in enumerate(images):
         fn = f"{i:04d}_{(md5 or 'img')[:12]}.jpg"
         dst = dest / fn
-        tasks.append((str(acc_out_dir), account, md5, bubble_md5, local_id, str(dst)))
+        tasks.append((str(acc_out_dir), account, chat, md5, bubble_md5,
+                      local_id, ts, str(dst)))
 
     # 多进程并行解密
     n = min(os.cpu_count() or 4, len(tasks), 8)
     if n <= 1:
         # 串行兜底
-        return _decrypt_media_serial(acc_out_dir, account, images, dest, progress)
+        return _decrypt_media_serial(acc_out_dir, account, chat, images, dest, progress)
 
     from multiprocessing import Pool
 
@@ -105,41 +131,50 @@ def _decrypt_media_parallel(acc_out_dir, account, images, dest, progress=None):
     return media_map
 
 
-def _decrypt_media_serial(acc_out_dir, account, images, dest, progress=None):
+def _decrypt_media_serial(acc_out_dir, account, chat, images, dest, progress=None):
     """串行解密（单核兜底）。"""
     media_map = {}
-    for i, (md5, bubble_md5, local_id) in enumerate(images):
+    for i, (md5, bubble_md5, local_id, ts) in enumerate(images):
         fn = f"{i:04d}_{(md5 or 'img')[:12]}.jpg"
         dst = dest / fn
-        ok = _try_decrypt(acc_out_dir, account, md5, bubble_md5, local_id, dst)
-        if ok:
-            media_map[local_id] = f"media/{fn}"
+        out = _try_decrypt(acc_out_dir, account, chat, md5, bubble_md5,
+                           local_id, ts, dst)
+        if out:
+            media_map[local_id] = f"media/{out.name}"
         if (i + 1) % 10 == 0 and progress:
             progress(0, f"媒体 {i + 1}/{len(images)}")
     return media_map
 
 
 def _decrypt_one(task):
-    """单张图片解密（子进程入口）。"""
-    acc_dir, account, md5, bubble_md5, local_id, dst = task
-    ok = _try_decrypt(acc_dir, account, md5, bubble_md5, local_id, Path(dst))
-    return (local_id, f"media/{Path(dst).name}", ok)
+    """单张图片解密（子进程入口）。返回实际落盘文件名。"""
+    acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst = task
+    out = _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts,
+                       Path(dst))
+    return (local_id, f"media/{out.name}" if out else "", out is not None)
 
 
-def _try_decrypt(acc_dir, account, md5, bubble_md5, local_id, dst):
-    """尝试解密单张图片。"""
+def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
+    """尝试解密单张图片。成功返回实际写出的 Path，失败返回 None。
+
+    Bug 修复：实际扩展名由图片内容决定（png/gif/jpg），必须把改写后的路径返回给
+    调用方。原实现只返回 True/False，调用方却拿传入的 `.jpg` 占位名去拼 media
+    引用，导致 PNG/GIF 图片在导出结果里指向不存在的文件。
+    """
     try:
         body, ctype = media.get_image(account, md5, Path(acc_dir),
+                                      chat=chat or None,
                                       local_id=local_id or None,
+                                      ts=ts or None,
                                       bubble_md5=bubble_md5 or None)
         if body:
             ext = "png" if "png" in ctype else ("gif" if "gif" in ctype else "jpg")
-            dst = dst.with_suffix(f".{ext}")
+            dst = Path(dst).with_suffix(f".{ext}")
             dst.write_bytes(body)
-            return True
+            return dst
     except Exception:
         pass
-    return False
+    return None
 
 
 def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
@@ -151,13 +186,15 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     t0 = time.time()
     progress(1, f"开始导出: 账号={account}, 会话={chat}, 格式={fmt}")
 
+    # 联系人缓存：全流程只加载一次，供两遍扫描共用（避免重复读 contact.db）
+    names = _contact_names(acc_out_dir)
+
     # ── 第一遍：轻量采集元数据 ─────────────────────────────
     progress(3, "扫描消息元数据…")
     count, first_ts, last_ts, senders, images = _collect_metadata(
-        acc_out_dir, chat, start_ts, end_ts, account)
+        acc_out_dir, chat, start_ts, end_ts, account, names)
     progress(10, f"共 {count} 条消息，{len(images)} 张图片")
 
-    names = _contact_names(acc_out_dir)
     display = display or names.get(chat, chat) or chat
     safe = _safe_name(display)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -183,7 +220,6 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         dest = export_dir / "avatars"
         dest.mkdir(exist_ok=True)
         avatar_map = collect_avatars(acc_out_dir, list(senders), dest, progress)
-        session["_avatar_map"] = avatar_map
         stats_ava = len(avatar_map)
         progress(30, f"头像 {stats_ava}/{len(senders)}")
 
@@ -192,7 +228,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     media_map = {}
     if want_media and images:
         progress(35, f"解密媒体（{len(images)} 张）…")
-        media_map = _decrypt_media_parallel(acc_out_dir, account, images,
+        media_map = _decrypt_media_parallel(acc_out_dir, account, chat, images,
                                             export_dir / "media", progress)
         stats_media = len(media_map)
         progress(70, f"媒体解密完成: {stats_media}/{len(images)}")
@@ -215,7 +251,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         written = stream_export_json(out_file, session, json_stream(), progress)
     elif fmt == "html":
         written = _write_html_streaming(out_file, acc_out_dir, chat, start_ts,
-                                        end_ts, account, names, media_map, avatar_map, progress)
+                                        end_ts, account, names, media_map,
+                                        avatar_map, progress, display)
     elif fmt == "txt":
         written = stream_export_txt(out_file, session,
                                     message_stream(acc_out_dir, chat, start_ts, end_ts, account, names), progress)
@@ -254,12 +291,19 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
 
 def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
-                          names, media_map, avatar_map, progress=None):
+                          names, media_map, avatar_map, progress=None,
+                          display=None):
     """HTML 流式导出：分批渲染，避免一次性构建巨型 JSON。"""
-    from siwx.html_template import render_html
+    from siwx.html_template import build_chat_data, render_html
     lines = []
     batch, count = [], 0
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account):
+    first_ts = last_ts = 0
+    # 修复：复用外部传入的联系人缓存（原实现漏传 names，导致重复读 contact.db）
+    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+        ts = msg["createTime"] or 0
+        if count == 0:
+            first_ts = ts
+        last_ts = ts
         msg["mediaFile"] = media_map.get(msg["localId"])
         batch.append(msg)
         count += 1
@@ -270,9 +314,18 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                 progress(0, f"已收集 {count} 条…")
     lines.extend(batch)
 
-    session = {"wxid": chat, "sessionName": names.get(chat, chat),
-               "isGroup": chat.endswith("@chatroom"), "messageCount": count}
-    from siwx.html_template import build_chat_data
+    # 修复：session 的键必须匹配 build_chat_data 的契约（需要 displayName /
+    # firstTimestamp / lastTimestamp）。原实现给的是 sessionName 且缺两个时间戳，
+    # 导致 HTML 导出抛 KeyError: 'displayName'，该格式完全不可用。
+    # displayName 必须用调用方最终解析出的 display（run_export 已把空值回退到
+    # 联系人名），否则会出现「文件名用 display、页面标题用联系人名」的不一致。
+    session = {"wxid": chat,
+               "displayName": display or names.get(chat, chat) or chat,
+               "isGroup": chat.endswith("@chatroom"),
+               "firstTimestamp": first_ts,
+               "lastTimestamp": last_ts,
+               "ownerId": account,
+               "messageCount": count}
     html = render_html(build_chat_data(session, lines, avatar_map))
     path.write_text(html, encoding="utf-8")
     return count

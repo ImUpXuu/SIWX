@@ -110,6 +110,7 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
     from Crypto.Cipher import AES
 
     tmp_copy = None
+    tmp_out = None
     try:
         fin = open(src, "rb", buffering=8 * 1024 * 1024)
     except OSError:
@@ -128,7 +129,15 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
         dst.parent.mkdir(parents=True, exist_ok=True)
         total_pages = (size + PAGE_SZ - 1) // PAGE_SZ
 
-        with open(dst, "wb", buffering=8 * 1024 * 1024) as fout:
+        # 先写同目录临时文件，整库成功后再原子替换。原实现直接写 dst，一旦解密
+        # 中途异常（磁盘满、源库被截断），会把原本有效的明文库覆盖成截断文件，
+        # 而 manifest 仍认为它是好的 —— 只能整库重解。
+        fd, _tmp_name = tempfile.mkstemp(prefix=dst.name + ".", suffix=".part",
+                                        dir=dst.parent)
+        os.close(fd)
+        tmp_out = Path(_tmp_name)
+
+        with open(tmp_out, "wb", buffering=8 * 1024 * 1024) as fout:
             aes = AES.new(enc_key, AES.MODE_ECB)
             body_len = PAGE_SZ - RESERVE_SZ  # 4016
             CT_LEN = body_len - SALT_SZ      # 4000
@@ -162,8 +171,12 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
                     progress(pgno, total_pages)
             if progress:
                 progress(total_pages, total_pages)
+        os.replace(tmp_out, dst)   # 原子替换，成功后才覆盖旧明文库
+        tmp_out = None
         return total_pages
     finally:
         fin.close()
         if tmp_copy:
             tmp_copy.unlink(missing_ok=True)
+        if tmp_out is not None:
+            tmp_out.unlink(missing_ok=True)   # 失败路径清理半成品

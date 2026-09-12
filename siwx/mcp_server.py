@@ -19,7 +19,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from siwx import paths
-from siwx.api_chat import _contact_names, _decode_content, build_messages
+from siwx.api_chat import (
+    _contact_names, _decode_content, build_messages, message_tables_by_shard,
+)
 
 SERVER_NAME = "stories-in-wx"
 SERVER_VERSION = "0.2.5"
@@ -200,23 +202,24 @@ def tool_search_messages(args) -> str:
     table_map = {"Msg_" + hashlib.md5(un.encode()).hexdigest(): un for un in cands}
 
     hits, scanned = [], 0
-    for db in sorted((acc_dir / "message").glob("message_*.db")):
+    # 分片索引：跳过不含 Msg_ 表的库（media_*/fts/resource/weclaw 等）。
+    # smap 是分片级的，原来写在表循环内部 —— biz_message_0.db 有 67 张表，
+    # 等于把 Name2Id 重查了 67 次。此处提到分片循环外。
+    for db, tables in message_tables_by_shard(acc_dir).items():
         if len(hits) >= limit or scanned >= SCAN_CAP:
             break
         conn = sqlite3.connect(db)
         try:
-            tables = [r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'") if r[0].startswith("Msg_")]
+            smap = {}
+            try:
+                smap = {rid: un for rid, un in
+                        conn.execute("SELECT rowid, user_name FROM Name2Id")}
+            except sqlite3.Error:
+                pass
             for t in tables:
                 if len(hits) >= limit or scanned >= SCAN_CAP:
                     break
                 chat_name = table_map.get(t, "")
-                smap = {}
-                try:
-                    smap = {rid: un for rid, un in
-                            conn.execute("SELECT rowid, user_name FROM Name2Id")}
-                except sqlite3.Error:
-                    pass
                 for _lid, _sid, ltype, ts, rsid, content in conn.execute(
                         f"SELECT local_id, server_id, local_type, create_time, "
                         f"real_sender_id, message_content FROM [{t}] "

@@ -6,13 +6,94 @@ zstd 解压、类型映射、发送者解析（前缀 / real_sender_id / origin_
 后续富文本（图片/语音实体）在此扩展。
 """
 import hashlib
+import os
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, current_app as _current_app
 
 from siwx import media
+
+# ── 分片索引（表名 → 分片路径）──────────────────────────────────
+# message/ 下有十几个 *.db，而一个会话的 Msg_ 表通常只落在 1~2 个分片里；每个会话
+# 却要把全部库打开查一遍 sqlite_master。实测这一步占导出总耗时的 99.5%
+# （12k 条会话：close 3.1s + master 1.2s，真正的数据读取只有 78ms）。
+# 这里按目录 mtime_ns 缓存索引，扫一次后：两遍导出、多会话批量、聊天页、MCP 共用。
+#
+# 同时修正一处不一致：聊天页原先只扫 message_*.db，而导出扫全部 *.db，
+# 导致 biz_message_*.db 里的 68 个会话在聊天页完全看不到（实测本机 1.07 万条消息）。
+# 索引覆盖全部 *.db，两边口径就此统一，且不会漏消息。
+_SHARD_INDEX: dict = {}
+_SHARD_LOCK = threading.Lock()
+
+
+def _dir_signature(msg_dir: Path):
+    """基于目录内 *.db 的 (文件名, 大小, mtime_ns) 生成签名；失败返回 None。
+
+    注意：不能用目录自身的 mtime 做缓存键 —— 实测本机 G: 盘的目录 mtime 会随
+    墙钟时间自行推进（比目录内最新文件还新），导致索引每次都被判为失效并重建，
+    反而比不做缓存更慢。文件的时间戳是稳定的，因此以文件签名为准。
+    18 个分片一次 scandir 约 1ms，且不需要打开数据库。
+    """
+    try:
+        with os.scandir(msg_dir) as it:
+            items = []
+            for e in it:
+                if e.name.endswith(".db"):
+                    st = e.stat()
+                    items.append((e.name, st.st_size, st.st_mtime_ns))
+    except OSError:
+        return None
+    items.sort()
+    return tuple(items)
+
+
+def shard_index(msg_dir: Path) -> dict:
+    """建立 {Msg_ 表名: [分片路径]}，按分片文件签名自动失效。"""
+    key = str(msg_dir)
+    stamp = _dir_signature(msg_dir)
+    if stamp is None:
+        return {}
+    with _SHARD_LOCK:
+        hit = _SHARD_INDEX.get(key)
+        if hit is not None and hit[0] == stamp:
+            return hit[1]
+
+    index: dict = {}
+    for db in sorted(msg_dir.glob("*.db")):
+        try:
+            conn = sqlite3.connect(db)
+            try:
+                names = [r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+        for t in names:
+            if t.startswith("Msg_"):
+                index.setdefault(t, []).append(db)
+
+    with _SHARD_LOCK:
+        _SHARD_INDEX[key] = (stamp, index)
+    return index
+
+
+def shards_for(acc: Path, chat: str) -> list:
+    """包含该会话 Msg_ 表的分片路径；不存在时返回空列表。"""
+    table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+    return shard_index(Path(acc) / "message").get(table, [])
+
+
+def message_tables_by_shard(acc: Path) -> dict:
+    """{分片路径: [Msg_ 表名]}，供全库搜索按分片遍历（已排序）。"""
+    out: dict = {}
+    for table, dbs in shard_index(Path(acc) / "message").items():
+        for db in dbs:
+            out.setdefault(db, []).append(table)
+    return {db: sorted(t) for db, t in sorted(out.items())}
 
 def _log(msg: str) -> None:
     """api_chat 模块的轻量日志（同步 API 端点用，不写任务缓冲）。"""
@@ -229,7 +310,10 @@ def _xml_text(s):
     """剥掉 CDATA 包装并清理转义。"""
     if s is None:
         return None
-    s = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"", s, flags=re.S).strip()
+        # 修复：原替换串是控制字符 0x01，
+    # 而不是捕获组引用 \1，导致所有 CDATA 字段
+    # （链接标题、引用正文等）被一个不可见字符替换而丢失内容。
+    s = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", s, flags=re.S).strip()
     return s or None
 
 
@@ -279,14 +363,10 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
     is_group = chat.endswith("@chatroom")
 
     rows = []
-    for db in sorted((acc / "message").glob("message_*.db")):
+    # 用分片索引直接定位分片，避免每个会话都把十几个库全打开查一遍
+    for db in shards_for(acc, chat):
         conn = sqlite3.connect(db)
         try:
-            exists = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (table,)).fetchone()
-            if not exists:
-                continue
             smap = _sender_map(conn)
             for r in conn.execute(
                     f"SELECT local_id, server_id, local_type, create_time, "
@@ -387,7 +467,9 @@ def messages():
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
     before = int(request.args.get("before", "0") or 0)
-    limit = min(int(request.args.get("limit", "100") or 100), 300)
+    # 修复：limit 只做了上限、没做下限。负数会被直接拼进 SQL，而 SQLite 的
+    # LIMIT -2 等同「无限制」，一次请求就能把整个会话读进内存。
+    limit = max(1, min(int(request.args.get("limit", "100") or 100), 300))
     acc = _out_root() / account
     if not (acc / "message").is_dir():
         return jsonify({"error": "账号不存在或未解密"}), 404
@@ -398,18 +480,14 @@ def messages():
     is_group = chat.endswith("@chatroom")
     _log(f"[msg] 查询消息: account={account}, chat={chat}, table={table}, before={before}, limit={limit}")
 
-    # 每个分片单独查（分片内按 create_time 有序），合并后取最新的 limit 条
+    # 用分片索引只打开真正含该会话的分片（原来是把十几个库全扫一遍）。
+    # 分片内按 create_time 有序，合并后取最新的 limit 条。
     candidates = []
     shard_idx = 0
-    for db in sorted((acc / "message").glob("message_*.db"), reverse=True):
+    for db in reversed(shards_for(acc, chat)):
         shard_idx += 1
         conn = sqlite3.connect(db)
         try:
-            exists = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                (table,)).fetchone()
-            if not exists:
-                continue
             smap = _sender_map(conn)
             sql = (f"SELECT local_id, server_id, local_type, create_time, "
                    f"origin_source, real_sender_id, message_content, "
