@@ -26,7 +26,11 @@ from siwx import media
 # 导致 biz_message_*.db 里的 68 个会话在聊天页完全看不到（实测本机 1.07 万条消息）。
 # 索引覆盖全部 *.db，两边口径就此统一，且不会漏消息。
 _SHARD_INDEX: dict = {}
+_CONTACT_CACHE: dict = {}
+_SESSION_CACHE: dict = {}
 _SHARD_LOCK = threading.Lock()
+_CACHE_LOCK = threading.Lock()
+_HOLDER_SESSIONS = {"brandsessionholder", "brandservicesessionholder", "@placeholder_foldgroup"}
 
 
 def _dir_signature(msg_dir: Path):
@@ -136,11 +140,45 @@ def _accounts() -> list:
     return out
 
 
+def _file_signature(p: Path):
+    """轻量缓存签名：文件不存在返回 None。"""
+    try:
+        st = p.stat()
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _is_official_account(username: str) -> bool:
+    """微信 4.x 公众号 username 通常以 gh_ 开头。"""
+    return (username or "").startswith("gh_")
+
+
+def _is_ghost_session(username: str, summary: str, ts: int) -> bool:
+    """过滤 SessionTable 中的折叠占位/空壳会话。
+
+    这些行通常来自微信自己的折叠入口或已注销/从未实际打开的公众号：
+    没有时间、没有摘要，点开后也没有可读消息，用户会感知为“幽灵会话”。
+    """
+    username = (username or "").strip()
+    if not username or username in _HOLDER_SESSIONS:
+        return True
+    if not int(ts or 0) and not (summary or "").strip():
+        return True
+    return False
+
+
 def _contact_names(acc_dir: Path) -> dict:
     p = acc_dir / "contact" / "contact.db"
     names = {}
-    if not p.is_file():
+    sig = _file_signature(p)
+    if sig is None:
         return names
+    key = str(p)
+    with _CACHE_LOCK:
+        hit = _CONTACT_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
     try:
         conn = sqlite3.connect(p)
         try:
@@ -169,6 +207,8 @@ def _contact_names(acc_dir: Path) -> dict:
     except Exception:
         # 数据库损坏 / 无法打开 → 返回空（不阻塞会话列表）
         pass
+    with _CACHE_LOCK:
+        _CONTACT_CACHE[key] = (sig, names)
     return names
 
 
@@ -234,11 +274,20 @@ def accounts():
 
 @bp.get("/sessions")
 def sessions():
-    """轻量会话列表：只读 session.db（最新预览+排序时间），秒出。"""
+    """轻量会话列表：只读 session.db（最新预览+排序时间），带进程内缓存。"""
     account = request.args.get("account", "")
     acc = _out_root() / account
     if not (acc / "message").is_dir():
         return jsonify({"error": "账号不存在或未解密"}), 404
+
+    sdb = acc / "session" / "session.db"
+    contact_db = acc / "contact" / "contact.db"
+    cache_key = str(acc)
+    cache_sig = (_file_signature(sdb), _file_signature(contact_db))
+    with _CACHE_LOCK:
+        hit = _SESSION_CACHE.get(cache_key)
+        if hit is not None and hit[0] == cache_sig:
+            return jsonify({"account": account, "sessions": hit[1]})
 
     try:
         names = _contact_names(acc)
@@ -249,18 +298,20 @@ def sessions():
 
     items = {}
 
-    sdb = acc / "session" / "session.db"
     if sdb.is_file():
         conn = sqlite3.connect(sdb)
         try:
             for un, summary, ts in conn.execute(
                     "SELECT username, summary, sort_timestamp FROM SessionTable"):
                 un = (un or "").strip()
-                if un:
-                    items[un] = {"username": un, "summary": (summary or "").strip(),
-                                 "last_time": ts or 0}
+                summary = (summary or "").strip()
+                ts = ts or 0
+                if un and not _is_ghost_session(un, summary, ts):
+                    items[un] = {"username": un, "summary": summary,
+                                 "last_time": ts}
         except sqlite3.Error:
-            # SessionTable 损坏 → 尝试 Name2Id
+            # SessionTable 损坏 → 尝试 Name2Id。这里没有摘要/时间，按幽灵会话规则不
+            # 做空会话过滤，否则损坏库下会完全没有列表。
             try:
                 for (un,) in conn.execute("SELECT user_name FROM Name2Id"):
                     if un and un not in items:
@@ -289,13 +340,18 @@ def sessions():
         display = (names.get(un) or un).strip()
         if not display:
             continue
+        is_official = _is_official_account(un)
         out.append({
             "username": un, "display": display,
             "is_group": un.endswith("@chatroom"),
+            "is_official": is_official,
+            "kind": "official" if is_official else ("group" if un.endswith("@chatroom") else "chat"),
             "preview": (it.get("summary") or "")[:60],
             "last_time": it.get("last_time", 0),
         })
     out.sort(key=lambda x: x["last_time"], reverse=True)
+    with _CACHE_LOCK:
+        _SESSION_CACHE[cache_key] = (cache_sig, out)
     _log(f"[sessions] 账号={account}, 返回 {len(out)} 个会话")
     return jsonify({"account": account, "sessions": out})
 

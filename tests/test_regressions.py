@@ -125,6 +125,9 @@ class TempRootCase(unittest.TestCase):
         self._old = os.environ.get("SIWX_ROOT")
         os.environ["SIWX_ROOT"] = str(self.tmp)
         api_chat._SHARD_INDEX.clear()
+        api_chat._CONTACT_CACHE.clear()
+        api_chat._SESSION_CACHE.clear()
+        paths._PATH_CACHE.clear()
 
     def tearDown(self):
         if self._old is None:
@@ -132,6 +135,9 @@ class TempRootCase(unittest.TestCase):
         else:
             os.environ["SIWX_ROOT"] = self._old
         api_chat._SHARD_INDEX.clear()
+        api_chat._CONTACT_CACHE.clear()
+        api_chat._SESSION_CACHE.clear()
+        paths._PATH_CACHE.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
@@ -211,6 +217,57 @@ class TestShardIndex(TempRootCase):
 
 
 # ── 4. message_stream / count_messages ──────────────────────────
+
+class TestSessionsApi(TempRootCase):
+
+    def test_filters_ghost_sessions_and_marks_official_accounts(self):
+        acc, account, chat = make_account(self.tmp, n_texts=3)
+        sdb = acc / "session" / "session.db"
+        conn = sqlite3.connect(sdb)
+        conn.executemany("INSERT INTO SessionTable VALUES (?,?,?)", [
+            ("gh_live", "公众号摘要", 1_700_000_100),
+            ("gh_empty", "", 0),
+            ("brandsessionholder", "聚合入口", 1_700_000_200),
+            ("@placeholder_foldgroup", "占位入口", 1_700_000_201),
+        ])
+        conn.commit(); conn.close()
+        cdb = acc / "contact" / "contact.db"
+        conn = sqlite3.connect(cdb)
+        conn.execute("INSERT INTO contact VALUES (?,?,?,?)",
+                     ("gh_live", "公众号A", "", ""))
+        conn.commit(); conn.close()
+
+        from siwx.server import app
+        data = app.test_client().get(f"/api/chat/sessions?account={account}").get_json()
+        usernames = {s["username"]: s for s in data["sessions"]}
+        self.assertIn(chat, usernames)
+        self.assertIn("gh_live", usernames)
+        self.assertTrue(usernames["gh_live"]["is_official"])
+        self.assertEqual(usernames["gh_live"]["kind"], "official")
+        self.assertEqual(usernames["gh_live"]["display"], "公众号A")
+        self.assertNotIn("gh_empty", usernames)
+        self.assertNotIn("brandsessionholder", usernames)
+        self.assertNotIn("@placeholder_foldgroup", usernames)
+
+    def test_sessions_api_uses_cache_after_first_call(self):
+        acc, account, _chat = make_account(self.tmp, n_texts=3)
+        from siwx.server import app
+        client = app.test_client()
+        self.assertEqual(client.get(f"/api/chat/sessions?account={account}").status_code, 200)
+
+        opened = []
+        real_connect = sqlite3.connect
+        def spy(path, *a, **k):
+            opened.append(Path(path).name)
+            return real_connect(path, *a, **k)
+        sqlite3.connect = spy
+        try:
+            r = client.get(f"/api/chat/sessions?account={account}")
+        finally:
+            sqlite3.connect = real_connect
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(opened, [], "会话列表缓存命中时不应再打开 contact/session 数据库")
+
 
 class TestMessageStream(TempRootCase):
 

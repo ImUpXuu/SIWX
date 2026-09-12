@@ -4,6 +4,7 @@ const { esc, fetchJSON, fmtTs } = window.SX;
 let account = null;
 let sessions = [];
 let currentChat = null;
+let officialOpen = false;
 let earliest = 0;
 let hasMore = false;
 let loading = false;
@@ -84,33 +85,61 @@ async function init() {
 
 async function loadSessions() {
   el('c-sessions').innerHTML = '<div class="c-loading">加载会话…</div>';
+  officialOpen = false;
+  const t0 = performance.now();
   const { sessions: ss } = await fetchJSON(
     `/api/chat/sessions?account=${encodeURIComponent(account)}`);
   sessions = ss;
   renderSessions('');
+  const ms = Math.round(performance.now() - t0);
+  if (el('c-sub') && !currentChat) el('c-sub').textContent = `${ss.length} 个会话 · ${ms}ms`;
 }
 
-function renderSessions(kw) {
-  const kwL = (kw || '').toLowerCase();
-  const list = sessions.filter(s =>
-    !kwL || s.display.toLowerCase().includes(kwL) || s.username.toLowerCase().includes(kwL));
-  el('c-sessions').innerHTML = list.length ? list.map(s => {
-    const initials = (s.display || s.username || '?').slice(0, 2).toUpperCase();
-    const isGrp = s.is_group;
-    return `
-    <div class="sess ${currentChat && currentChat.username === s.username ? 'sel' : ''}" data-u="${esc(s.username)}">
+function sessionRow(s, extra = '') {
+  const initials = (s.display || s.username || '?').slice(0, 2).toUpperCase();
+  const isGrp = s.is_group;
+  const selected = currentChat && currentChat.username === s.username;
+  return `
+    <div class="sess ${extra} ${selected ? 'sel' : ''}" data-u="${esc(s.username)}">
       <div class="ava">${esc(initials)}</div>
       <span class="name">${esc(s.display)}</span>
       <span class="prev">${esc(s.preview || '点击查看详情')}</span>
       <span class="tm">${fmtTs(s.last_time)}</span>
-      <span class="tag">${isGrp ? '群聊' : ''}</span>
+      <span class="tag">${s.is_official ? '公众号' : (isGrp ? '群聊' : '')}</span>
     </div>`;
-  }).join('')
+}
+
+function renderSessions(kw) {
+  const kwL = (kw || '').toLowerCase();
+  const visible = sessions.filter(s =>
+    !kwL || s.display.toLowerCase().includes(kwL) || s.username.toLowerCase().includes(kwL));
+  const normal = visible.filter(s => !s.is_official);
+  const official = visible.filter(s => s.is_official);
+  const lines = normal.map(s => sessionRow(s));
+  if (official.length) {
+    const open = officialOpen || !!kwL;
+    const latest = Math.max(...official.map(s => s.last_time || 0));
+    lines.push(`
+      <div class="sess sess-group ${open ? 'open' : ''}" data-group="official">
+        <div class="ava">公</div>
+        <span class="name">公众号</span>
+        <span class="prev">${official.length} 个公众号会话 · 点击${open ? '收起' : '展开'}</span>
+        <span class="tm">${fmtTs(latest)}</span>
+        <span class="tag">${open ? '收起' : '展开'}</span>
+      </div>`);
+    if (open) lines.push(...official.map(s => sessionRow(s, 'sess-official')));
+  }
+  el('c-sessions').innerHTML = lines.length ? lines.join('')
     : '<div class="c-empty">没有匹配的会话</div>';
   el('c-sessions').querySelectorAll('.sess').forEach(n => {
     n.addEventListener('click', () => {
+      if (n.dataset.group === 'official') {
+        officialOpen = !officialOpen;
+        renderSessions(el('c-search').value);
+        return;
+      }
       const s = sessions.find(x => x.username === n.dataset.u);
-      openChat(s);
+      if (s) openChat(s);
     });
   });
 }
