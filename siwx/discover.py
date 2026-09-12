@@ -48,16 +48,15 @@ def find_wechat_data_dirs():
         if up:
             roots.append(Path(up) / "Documents" / "xwechat_files")
             roots.append(Path(up) / "xwechat_files")
-        # 搜索所有盘符
+        # 搜索所有盘符与多用户目录
         for letter in string.ascii_uppercase:
             drive = Path(f"{letter}:\\")
             if drive.is_dir():
                 roots.append(drive / "xwechat_files")
-                # 也搜索 Documents 目录
-                docs = drive / "Users"
-                if docs.is_dir():
+                users_dir = drive / "Users"
+                if users_dir.is_dir():
                     try:
-                        for user_dir in docs.iterdir():
+                        for user_dir in users_dir.iterdir():
                             if user_dir.is_dir():
                                 roots.append(user_dir / "Documents" / "xwechat_files")
                                 roots.append(user_dir / "xwechat_files")
@@ -74,7 +73,7 @@ def find_wechat_data_dirs():
                         roots.append(wx_dir)
         roots.append(home / "Documents" / "xwechat_files")
         roots.append(home / "xwechat_files")
-        # 也搜索 /Users 下其他用户
+        # 搜索 /Users 下其他用户
         users_dir = Path("/Users")
         if users_dir.is_dir():
             try:
@@ -125,10 +124,8 @@ def validate_db_path(path_str: str) -> dict:
     return {"ok": False, "error": "未找到 db_storage 子目录或 .db 文件，请确认路径"}
 
 
-def find_wechat_storage_in_wechat() -> str:
-    """尝试从微信进程中获取存储路径（通过进程命令行或内存）。"""
-    # 微信 4.x 默认路径通常在注册表中
-    # Windows: HKEY_CURRENT_USER\Software\Tencent\WeChat
+def find_wechat_storage_in_registry() -> str:
+    """尝试从 Windows 注册表获取微信安装路径。"""
     system = platform.system()
     if system == "Windows":
         try:
@@ -142,3 +139,8 @@ def find_wechat_storage_in_wechat() -> str:
         except Exception:
             pass
     return ""
+
+
+# 向后兼容旧命名。
+def find_wechat_storage_in_wechat() -> str:
+    return find_wechat_storage_in_registry()

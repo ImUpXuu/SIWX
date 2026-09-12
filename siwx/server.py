@@ -530,6 +530,15 @@ def api_job():
         })
 
 
+@app.post("/api/discover/validate")
+def api_validate_path():
+    """验证手动输入的微信存储路径。"""
+    from siwx.discover import validate_db_path
+    data = request.get_json(silent=True) or {}
+    result = validate_db_path(data.get("path", ""))
+    return jsonify(result)
+
+
 _AUTO_SYNC_STARTED = False
 
 
