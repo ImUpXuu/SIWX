@@ -437,7 +437,23 @@ class TestVoiceMedia(TempRootCase):
         self.assertIn(b"WAVE", wav[:16])
         self.assertGreater(len(wav), 44)
 
-    def test_bundled_decoder_path_is_preferred(self):
+    def test_transcode_prefers_pilk_backend(self):
+        from siwx import voice
+        seen = []
+        old_pilk = voice._decode_silk_to_pcm_with_pilk
+        old_cmd = voice._decode_silk_to_pcm_with_command
+        try:
+            voice._decode_silk_to_pcm_with_pilk = lambda data: (seen.append("pilk") or b"\x00\x00", "", "pilk")
+            voice._decode_silk_to_pcm_with_command = lambda data, rate: (seen.append("cmd") or b"\x01\x00", "", "cmd")
+            body, meta = voice.transcode_voice(b"#!SILK_V3abc", "wav")
+        finally:
+            voice._decode_silk_to_pcm_with_pilk = old_pilk
+            voice._decode_silk_to_pcm_with_command = old_cmd
+        self.assertEqual(seen, ["pilk"])
+        self.assertTrue(body.startswith(b"RIFF"))
+        self.assertEqual(meta["engine"], "pilk")
+
+    def test_bundled_decoder_path_is_available_as_fallback(self):
         from siwx import voice
         vendor = self.tmp / "siwx" / "vendor" / "silk-decoder" / "windows"
         vendor.mkdir(parents=True, exist_ok=True)

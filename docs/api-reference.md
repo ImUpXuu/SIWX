@@ -185,13 +185,12 @@
 
 ```
 响应: audio/silk 或 audio/wav
-错误: {"error": "...", "fallback": "silk"}, 415  # 缺少本机 SILK 解码器时
+错误: {"error": "...", "fallback": "silk"}, 415  # pilk/兜底解码器不可用时
 ```
 
-说明：项目不新增强制外部依赖。`format=wav` 会优先查找项目内置解码器（如
-`siwx/vendor/silk-decoder/windows/silk_v3_decoder.exe`，打包时会随 PyInstaller 一起带入），
-其次使用 `SIWX_SILK_DECODER` 或 PATH 中的本机解码器，再尝试环境中已存在的 `pilk`；
-解出裸 PCM 后由 Python 标准库封装为 WAV。不可转码时仍可使用默认 `format=silk` 下载原始语音。
+说明：`format=wav` 默认使用项目依赖 `pilk` 直接把 SILK 解成裸 PCM，然后由 Python
+标准库封装为 WAV，不要求 ffmpeg。若 pilk 不可用，再依次尝试项目内置解码器、
+`SIWX_SILK_DECODER` 或 PATH 中的本机解码器。不可转码时仍可使用默认 `format=silk` 下载原始语音。
 
 ---
 

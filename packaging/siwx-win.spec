@@ -25,7 +25,7 @@ a = Analysis(
         (str(ROOT / "siwx" / "ui"), "ui"),
         (str(ROOT / "version.json"), "."),
     ],
-    hiddenimports=[],
+    hiddenimports=["pilk"],
     binaries=_silk_decoder_bins(),
     noarchive=False,
 )

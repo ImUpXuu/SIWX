@@ -4,3 +4,4 @@ psutil>=5.9
 openpyxl>=3.1
 rich>=13.0
 zstandard>=0.22
+pilk>=0.2.4
