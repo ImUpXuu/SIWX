@@ -215,7 +215,8 @@ def stream_export_txt(path: Path, session: dict, msg_iter, progress=None):
         for msg in msg_iter:
             who = "我" if msg["isSend"] else msg["senderDisplayName"]
             ts = datetime.fromtimestamp(msg['createTime']).strftime('%Y-%m-%d %H:%M:%S')
-            f.write(f"[{ts}] {who}: {msg['content']}\n")
+            media = f" [媒体: {msg['mediaFile']}]" if msg.get("mediaFile") else ""
+            f.write(f"[{ts}] {who}: {msg['content']}{media}\n")
             count += 1
             if count % 500 == 0 and progress:
                 progress(0, f"已写入 {count} 条…")
@@ -228,13 +229,14 @@ def stream_export_csv(path: Path, msg_iter, progress=None):
     from datetime import datetime
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["localId", "时间", "类型", "发送者", "是否自己", "内容"])
+        w.writerow(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
         count = 0
         for msg in msg_iter:
             w.writerow([msg["localId"],
                         datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                         msg["typeName"], msg["senderDisplayName"],
-                        msg["isSend"], msg["content"][:2000]])
+                        msg["isSend"], msg["content"][:2000],
+                        msg.get("mediaFile") or ""])
             count += 1
             if count % 500 == 0 and progress:
                 progress(0, f"已写入 {count} 条…")
@@ -255,6 +257,8 @@ def stream_export_md(path: Path, session: dict, msg_iter, progress=None):
                 last_day = day
             who = "我" if msg["isSend"] else msg["senderDisplayName"]
             body = msg["content"].replace("\n", "  \n")
+            if msg.get("mediaFile"):
+                body += f"  \n[媒体文件]({msg['mediaFile']})"
             f.write(f"**{who}** `{datetime.fromtimestamp(msg['createTime']):%H:%M:%S}`：{body}\n\n")
             count += 1
             if count % 500 == 0 and progress:

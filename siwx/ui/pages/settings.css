@@ -8,6 +8,9 @@
 }
 .s-item b { font-size: 13px; font-weight: 700; }
 .s-item span { font-size: 12px; line-height: 1.55; }
+.s-inline { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.s-inline input[type="number"] { width: 78px; }
+.s-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .ov-row {
   display: grid; grid-template-columns: minmax(140px, 1fr) minmax(0, 1.3fr) auto; gap: 12px; align-items: center;
   padding: 10px 0; border-top: 1px dashed var(--line); font-size: 13px;

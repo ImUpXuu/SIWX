@@ -253,6 +253,7 @@ def tool_export_chat(args) -> str:
     res = exporter.run_export(acc_dir, account, chat, "", fmt,
                               want_messages=True,
                               want_media=bool(args.get("media", False)),
+                              want_voice=bool(args.get("voice", False)),
                               want_avatars=bool(args.get("avatars", False)),
                               export_root=paths.exports_root(),
                               pack=args.get("pack", "single"))
@@ -295,6 +296,7 @@ TOOLS = [
                          "chat": {"type": "string"},
                          "format": {"type": "string", "description": "默认 json"},
                          "media": {"type": "boolean", "description": "是否解密图片，默认 false"},
+                         "voice": {"type": "boolean", "description": "是否导出语音，默认 false"},
                          "avatars": {"type": "boolean", "description": "是否提取头像，默认 false"}}}},
 ]
 

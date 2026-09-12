@@ -547,12 +547,11 @@ class TestMediaExport(TempRootCase):
         self.assertEqual(seen.get("local_id"), 42)
         self.assertEqual(seen.get("bubble_md5"), "c" * 32)
 
-    def test_export_includes_transcoded_voice_media(self):
-        from siwx import exporter as ex
+    def _add_voice_message(self, local_id=99, svr_id=123456789, ts=1_700_000_099):
         t = _msg_table(self.chat)
         conn = sqlite3.connect(self.acc / "message" / "message_0.db")
         conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
-                     (99, 123456789, 34, 1_700_000_099, 0, 1,
+                     (local_id, svr_id, 34, ts, 0, 1,
                       b'<msg><voicemsg voicelength="1000" length="12" /></msg>', None))
         conn.commit(); conn.close()
 
@@ -564,15 +563,19 @@ class TestMediaExport(TempRootCase):
         conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
                      "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
         conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
-                     (1, 1_700_000_099, 99, 123456789, b"\x02#!SILK_V3abc", "0"))
+                     (1, ts, local_id, svr_id, b"\x02#!SILK_V3abc", "0"))
         conn.commit(); conn.close()
 
+    def test_export_includes_transcoded_voice_media(self):
+        from siwx import exporter as ex
+        self._add_voice_message()
         old = ex.voice.transcode_voice
         try:
             ex.voice.transcode_voice = lambda data, target="wav": (
                 b"RIFFxxxxWAVEfmt ", {"format": "wav", "mimetype": "audio/wav", "ext": "wav", "engine": "fake"})
             res = ex.run_export(self.acc, self.account, self.chat, "测试好友",
-                                fmt="html", want_media=True, want_avatars=False,
+                                fmt="html", want_media=False, want_voice=True,
+                                want_avatars=False,
                                 export_root=self.tmp / "exports", pack="none")
         finally:
             ex.voice.transcode_voice = old
@@ -580,6 +583,38 @@ class TestMediaExport(TempRootCase):
         self.assertEqual(res["voice_count"], 1)
         self.assertTrue((Path(res["file"]).parent / "media" / "voice_0000_99.wav").is_file())
         self.assertIn("voice_0000_99.wav", html)
+
+    def test_all_formats_can_reference_exported_voice(self):
+        from siwx import exporter as ex
+        self._add_voice_message(local_id=77, svr_id=777, ts=1_700_000_077)
+        old = ex.voice.transcode_voice
+        try:
+            ex.voice.transcode_voice = lambda data, target="wav": (
+                b"RIFFxxxxWAVEfmt ", {"format": "wav", "mimetype": "audio/wav", "ext": "wav", "engine": "fake"})
+            for fmt in ("json", "html", "txt", "csv", "markdown", "toml", "sqlite", "xlsx"):
+                with self.subTest(fmt=fmt):
+                    res = ex.run_export(self.acc, self.account, self.chat, "测试好友",
+                                        fmt=fmt, want_media=False, want_voice=True,
+                                        want_avatars=False, export_root=self.tmp / "voice_formats",
+                                        folder_name=f"voice_{fmt}", pack="none")
+                    out_file = Path(res["file"])
+                    voice_file = out_file.parent / "media" / "voice_0000_77.wav"
+                    self.assertTrue(voice_file.is_file())
+                    self.assertEqual(res["voice_count"], 1)
+                    if fmt == "sqlite":
+                        conn = sqlite3.connect(out_file)
+                        vals = [r[0] for r in conn.execute("SELECT mediaFile FROM messages WHERE mediaFile IS NOT NULL")]
+                        conn.close()
+                        self.assertIn("media/voice_0000_77.wav", vals)
+                    elif fmt == "xlsx":
+                        from openpyxl import load_workbook
+                        wb = load_workbook(out_file, read_only=True)
+                        vals = [row[-1] for row in wb.active.iter_rows(values_only=True)]
+                        self.assertIn("media/voice_0000_77.wav", vals)
+                    else:
+                        self.assertIn("voice_0000_77.wav", out_file.read_text(encoding="utf-8"))
+        finally:
+            ex.voice.transcode_voice = old
 
 
 # ── 7. messages 的 limit 下限 ───────────────────────────────────
@@ -599,6 +634,26 @@ class TestAvatarApi(TempRootCase):
         r = app.test_client().get("/api/chat/avatar?account=wxid_owner_1234&username=wxid_owner_1234")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data, b"JPEGDATA")
+
+
+class TestSettingsAutoSync(TempRootCase):
+
+    def test_auto_sync_settings_roundtrip(self):
+        from siwx.server import app
+        c = app.test_client()
+        r = c.post("/api/settings/auto-sync", json={"enabled": True, "interval_minutes": 5})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["enabled"])
+        self.assertEqual(r.get_json()["interval_minutes"], 5)
+        r2 = c.get("/api/settings/auto-sync")
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual(r2.get_json()["interval_minutes"], 5)
+
+    def test_auto_sync_interval_is_clamped(self):
+        from siwx.server import app
+        r = app.test_client().post("/api/settings/auto-sync", json={"enabled": True, "interval_minutes": 99999})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["interval_minutes"], 1440)
 
 
 class TestLimitGuard(TempRootCase):
@@ -757,6 +812,15 @@ class TestCliJson(unittest.TestCase):
 
 
 # ── 10. 密码学原语未被破坏 ──────────────────────────────────────
+
+class TestVersionSource(unittest.TestCase):
+
+    def test_current_version_comes_from_package_init(self):
+        from siwx import __version__
+        from siwx.auto_update import current_version
+        self.assertEqual(current_version(), __version__)
+        self.assertEqual(__version__, "5.0.0")
+
 
 class TestCryptoIntact(unittest.TestCase):
 

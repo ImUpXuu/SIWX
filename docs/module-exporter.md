@@ -55,7 +55,7 @@
 流程:
 1. 第一遍：_collect_metadata() → 计数/发送者/图片引用/语音引用（轻量）
 2. 头像提取：collect_avatars()（仅需要的发送者）
-3. 媒体处理：图片走 _decrypt_parallel()（多进程池），语音优先 WAV 转码、失败保留 SILK
+3. 媒体处理：图片与语音分开勾选；图片走 _decrypt_parallel()（多进程池），语音优先 WAV 转码、失败保留 SILK
 4. 第二遍：流式写出到目标格式
 5. 打包（可选）
 ```
@@ -151,6 +151,8 @@ writer.close()
 子进程入口，调用 `media.get_image()` 尝试所有候选密钥，成功即按真实 MIME 写出到目标路径。
 
 ### 语音导出（`_export_voice_media`）
+
+所有导出格式共享 `mediaFile` 映射：JSON/HTML 会嵌入语音路径，TXT/CSV/Markdown/XLSX 会写出媒体文件列或链接，TOML/SQLite 会写入 `mediaFile` 字段。
 
 读取 `message/media_*.db` 的 `VoiceInfo.voice_data`，先剥离 `#!SILK_V3` 前的控制字节；
 然后调用 `voice.transcode_voice(..., "wav")` 产出浏览器可播放的 WAV。默认后端是项目依赖

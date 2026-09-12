@@ -98,7 +98,7 @@ app = Flask(__name__, static_folder=None)
 
 # 模块化 API 蓝图（聊天查看 / 设置 / 导出 / MCP）
 from siwx.api_chat import bp as chat_bp  # noqa: E402
-from siwx.api_settings import bp as settings_bp  # noqa: E402
+from siwx.api_settings import bp as settings_bp, load_auto_sync, mark_auto_sync_result  # noqa: E402
 from siwx.api_export import bp as export_bp  # noqa: E402
 from siwx.api_mcp import bp as mcp_bp  # noqa: E402
 from siwx.api_update import bp as update_bp  # noqa: E402
@@ -272,8 +272,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             end_ts = int(datetime.strptime(end, "%Y-%m-%d").replace(
                 hour=23, minute=59, second=59).timestamp()) if end else None
             _log(f"[export] 账号={data.get('account')} 会话数={len(chats)} 格式={data.get('format', 'json')}")
-            _log(f"[export] 消息={data.get('messages', True)} 媒体={data.get('media', False)} "
-                 f"头像={data.get('avatars', False)} 打包={data.get('pack', 'folder')}")
+            _log(f"[export] 消息={data.get('messages', True)} 图片={data.get('media', False)} "
+                 f"语音={data.get('voice', False)} 头像={data.get('avatars', False)} "
+                 f"打包={data.get('pack', 'folder')}")
             if start_ts:
                 _log(f"[export] 时间范围: {start} ~ {end or '现在'}")
             res = exporter.run_export_multi(
@@ -282,6 +283,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 start_ts=start_ts, end_ts=end_ts,
                 want_messages=data.get("messages", True),
                 want_media=data.get("media", False),
+                want_voice=data.get("voice", False),
                 want_avatars=data.get("avatars", False),
                 export_root=_paths.exports_root(),
                 pack=data.get("pack", "folder"),
@@ -493,6 +495,51 @@ def api_job():
         })
 
 
+_AUTO_SYNC_STARTED = False
+
+
+def _start_auto_sync_scheduler() -> None:
+    """设置页可开启的后台增量同步：微信在线且到达间隔时执行 sync。"""
+    global _AUTO_SYNC_STARTED
+    if _AUTO_SYNC_STARTED:
+        return
+    _AUTO_SYNC_STARTED = True
+
+    def _loop():
+        while True:
+            time.sleep(30)
+            try:
+                cfg = load_auto_sync()
+                if not cfg.get("enabled"):
+                    continue
+                last = int(cfg.get("last_run") or 0)
+                interval = max(1, int(cfg.get("interval_minutes") or 30)) * 60
+                if last and time.time() - last < interval:
+                    continue
+                if not find_wechat_pids():
+                    continue
+                with _lock:
+                    if _job["running"]:
+                        continue
+                    _job.update({"running": True, "mode": "sync", "done": False,
+                                 "ok": False, "logs": [], "report": None})
+                _log(f"[auto-sync] 微信在线，开始定时增量同步（间隔 {interval // 60} 分钟）")
+
+                def _worker():
+                    _run_job("sync")
+                    with _lock:
+                        ok = bool(_job.get("ok"))
+                    mark_auto_sync_result(ok, "增量同步完成" if ok else "增量同步失败")
+
+                threading.Thread(target=_worker, daemon=True).start()
+            except Exception as e:
+                mark_auto_sync_result(False, str(e))
+                _siwx_logger.exception("auto-sync 调度失败: %s", e)
+                _flush_logs()
+
+    threading.Thread(target=_loop, name="siwx-auto-sync", daemon=True).start()
+
+
 def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
     """serve 模式：rich TUI 状态栏 + 日志流，Flask 完全静默。"""
     import logging
@@ -510,6 +557,8 @@ def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
     logging.getLogger("werkzeug").handlers = []
     logging.getLogger("werkzeug").propagate = False
     logging.getLogger("werkzeug").disabled = True
+
+    _start_auto_sync_scheduler()
 
     # URL 打开
     url = f"http://{host}:{port}"
