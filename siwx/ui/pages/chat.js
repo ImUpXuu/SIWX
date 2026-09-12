@@ -203,6 +203,11 @@ function avaHtml(username, letters) {
   return `<div class="m-ava"><span>${esc(letters)}</span>` + avatarImg(username) + `</div>`;
 }
 
+function voiceDuration(v) {
+  const ms = Number(v && v.durationMs || 0);
+  return ms > 0 ? `${(ms / 1000).toFixed(1)} 秒` : '语音';
+}
+
 function bubble(m) {
   if (m.type === 10000 || m.type === 10002) {
     return `<div class="m-row sys"><div class="m-bubble">${esc(m.text)}</div></div>`;
@@ -223,6 +228,12 @@ function bubble(m) {
     try { host = new URL(full).hostname; } catch (e) {}
     inner = `<div class="m-link"><a href="${esc(full)}" target="_blank" rel="noreferrer">${esc(m.link.title)}</a>` +
             (host ? `<div class="m-link-host">${esc(host)}</div>` : '') + `</div>`;
+  } else if (m.kind === 'voice') {
+    const src = `/api/chat/media/voice?account=${encodeURIComponent(account)}` +
+                `&chat=${encodeURIComponent(currentChat.username)}` +
+                `&local_id=${m.id || 0}&svr_id=${encodeURIComponent(m.platformMessageId || '')}&ts=${m.ts || 0}`;
+    inner = `<div class="m-voice"><span>🎤 ${esc(voiceDuration(m.voice))}</span>` +
+            `<a href="${src}" download="voice_${m.id || 'msg'}.silk">下载 SILK</a></div>`;
   } else if (m.kind === 'image') {
     const src = `/api/chat/media/image?account=${encodeURIComponent(account)}` +
                 (m.md5 ? `&md5=${encodeURIComponent(m.md5)}` : '') +

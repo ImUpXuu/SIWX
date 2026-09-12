@@ -389,6 +389,48 @@ class TestExport(TempRootCase):
 
 # ── 6. 媒体：扩展名 + chat/ts 透传 ──────────────────────────────
 
+class TestVoiceMedia(TempRootCase):
+
+    def test_parse_voice_meta_and_read_silk_blob(self):
+        from siwx import voice
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        db = acc / "message" / "media_0.db"
+        conn = sqlite3.connect(db)
+        conn.execute("DROP TABLE unrelated")
+        conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+        conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (chat,))
+        conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
+                     "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
+        raw = b"\x02#!SILK_V3\x00\x01voice"
+        conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
+                     (1, 1700000000, 9, 123456789, raw, "0"))
+        conn.commit(); conn.close()
+        meta = voice.parse_voice_meta('<msg><voicemsg voicelength="2429" length="3990" voiceformat="4" /></msg>')
+        self.assertEqual(meta["durationMs"], 2429)
+        body, info = voice.get_voice(acc, chat=chat, local_id=9, svr_id=123456789, ts=1700000000)
+        self.assertEqual(body, b"#!SILK_V3\x00\x01voice")
+        self.assertEqual(info["silkOffset"], 1)
+
+    def test_voice_api_serves_silk(self):
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        db = acc / "message" / "media_0.db"
+        conn = sqlite3.connect(db)
+        conn.execute("DROP TABLE unrelated")
+        conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+        conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (chat,))
+        conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
+                     "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
+        conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
+                     (1, 1700000000, 9, 123456789, b"\x02#!SILK_V3abc", "0"))
+        conn.commit(); conn.close()
+        from siwx.server import app
+        r = app.test_client().get(
+            f"/api/chat/media/voice?account={account}&chat={chat}&local_id=9&svr_id=123456789&ts=1700000000")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data, b"#!SILK_V3abc")
+        self.assertEqual(r.headers.get("X-SIWX-Voice-Format"), "silk")
+
+
 class TestMediaExport(TempRootCase):
 
     def setUp(self):

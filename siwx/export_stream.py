@@ -14,7 +14,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from siwx import media
+from siwx import media, voice
 from siwx.api_chat import (
     KIND_MAP, SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
     _parse_appmsg, _parse_refer, _sender_map, _fmt, shards_for,
@@ -58,6 +58,7 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
 
     t = ltype & 0xFFFF
     md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
+    voice_meta = voice.parse_voice_meta(text) if t == 34 else None
     bubble_md5 = None
     if t in (3, 47) and packed:
         m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
@@ -85,6 +86,7 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
                               else (names.get(chat, chat) if not is_group else chat)),
         "md5": md5,
         "bubbleMd5": bubble_md5,
+        "voice": voice_meta,
         "quote": quote,
         "link": link,
     }

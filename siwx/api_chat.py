@@ -14,7 +14,7 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, current_app as _current_app
 
-from siwx import media
+from siwx import media, voice
 
 # ── 分片索引（表名 → 分片路径）──────────────────────────────────
 # message/ 下有十几个 *.db，而一个会话的 Msg_ 表通常只落在 1~2 个分片里；每个会话
@@ -418,9 +418,8 @@ def _xml_text(s):
     """剥掉 CDATA 包装并清理转义。"""
     if s is None:
         return None
-        # 修复：原替换串是控制字符 0x01，
-    # 而不是捕获组引用 \1，导致所有 CDATA 字段
-    # （链接标题、引用正文等）被一个不可见字符替换而丢失内容。
+    # 修复：原替换串是控制字符 0x01，而不是捕获组引用 \1，导致所有 CDATA
+    # 字段（链接标题、引用正文等）被一个不可见字符替换而丢失内容。
     s = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", s, flags=re.S).strip()
     return s or None
 
@@ -519,6 +518,7 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
 
         t = ltype & 0xFFFF
         md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
+        voice_meta = voice.parse_voice_meta(text) if t == 34 else None
         bubble_md5 = None
         if t in (3, 47) and packed:
             m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
@@ -550,6 +550,7 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
             "is_me": bool(is_me),
             "md5": md5,
             "bubble_md5": bubble_md5,
+            "voice": voice_meta,
             "quote": quote,
             "link": link,
             "text": _fmt(t, text) if t != 1 else text,
@@ -649,6 +650,7 @@ def messages():
 
         t = ltype & 0xFFFF
         md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
+        voice_meta = voice.parse_voice_meta(text) if t == 34 else None
         bubble_md5 = None
         if t in (3, 47) and packed:
             m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
@@ -669,11 +671,13 @@ def messages():
             kind = "link"
 
         msgs.append({
-            "id": local_id, "ts": ts or 0, "type": t, "kind": kind,
+            "id": local_id, "platformMessageId": str(server_id or ""),
+            "ts": ts or 0, "type": t, "kind": kind,
             "sender_wxid": sender_wxid,
             "sender_name": names.get(sender_wxid, sender_wxid) if sender_wxid
             else (names.get(chat, chat) if not is_group else ""),
             "is_me": bool(is_me), "md5": md5, "bubble_md5": bubble_md5,
+            "voice": voice_meta,
             "quote": quote, "link": link,
             "text": _fmt(t, text) if t != 1 else text,
         })
@@ -719,6 +723,32 @@ def avatar():
         return jsonify({"error": "无头像"}), 404
     return Response(row[0], mimetype="image/jpeg",
                     headers={"Cache-Control": "private, max-age=86400"})
+
+
+@bp.get("/media/voice")
+def media_voice():
+    """读取解密后的语音数据（VoiceInfo.voice_data，通常为 SILK）。"""
+    account = request.args.get("account", "")
+    chat = request.args.get("chat", "")
+    try:
+        local_id = int(request.args.get("local_id", "0") or 0)
+        ts = int(request.args.get("ts", "0") or 0)
+        svr_id = int(request.args.get("svr_id", "0") or request.args.get("server_id", "0") or 0)
+    except ValueError:
+        local_id = ts = svr_id = 0
+    if not account:
+        return jsonify({"error": "参数缺失"}), 400
+    body, info = voice.get_voice(_out_root() / account, chat=chat,
+                                 local_id=local_id, svr_id=svr_id, ts=ts)
+    if body is None:
+        return jsonify({"error": info}), 404
+    filename = f"voice_{local_id or info.get('localId') or 'msg'}.silk"
+    return Response(body, mimetype="audio/silk", headers={
+        "Cache-Control": "private, max-age=86400",
+        "Content-Disposition": f'inline; filename="{filename}"',
+        "X-SIWX-Voice-Format": str(info.get("format", "unknown")),
+        "X-SIWX-Voice-Source": str(info.get("db", "")),
+    })
 
 
 @bp.get("/media/image")
