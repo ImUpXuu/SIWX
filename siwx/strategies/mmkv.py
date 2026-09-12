@@ -74,6 +74,9 @@ def extract(ctx) -> int:
         paths = list(mmkv_dir.iterdir())
     except OSError:
         return 0
+    if not paths:
+        log("[mmkv] MMKV 目录为空")
+        return 0
     for path in paths:
         name = path.name
         if name.endswith(".crc"):
@@ -128,4 +131,6 @@ def extract(ctx) -> int:
                     break
     if found:
         log(f"[mmkv] MMKV 离线提取完成: +{found}")
+    else:
+        log("[mmkv] MMKV 文件存在但密钥未命中（可能未登录微信或密钥已过期）")
     return found

@@ -56,9 +56,16 @@
   }
 
   function renderLog(el, logs) {
-    el.innerHTML = logs.map(([t, m]) =>
-      `<div class="log-line"><span class="t">${timeStr(t)}</span>${esc(m)}</div>`
-    ).join('') || '<div class="log-line dim">…</div>';
+    el.innerHTML = logs.map(entry => {
+      // 兼容旧格式 [ts, msg] 和新格式 [ts, level, module, msg]
+      let t, msg;
+      if (entry.length >= 4) {
+        [, , , msg] = entry;  // 新格式: 取第4个元素
+      } else {
+        [t, msg] = entry;  // 旧格式
+      }
+      return `<div class="log-line"><span class="t">${timeStr(entry[0])}</span>${esc(msg)}</div>`;
+    }).join('') || '<div class="log-line dim">…</div>';
     el.scrollTop = el.scrollHeight;
   }
 
