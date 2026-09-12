@@ -9,8 +9,9 @@
 1. **流式消息读取**：`heapq.merge` K 路归并，内存 O(分片数) 而非 O(消息总数)
 2. **增量文件写入**：JSON/TXT/CSV/MD 直接写文件句柄，不构建巨型字符串
 3. **并行媒体解密**：`multiprocessing.Pool` 多进程 AES 解密图片
-4. **多格式**：JSON / HTML / TXT / CSV / Markdown / TOML / SQLite / XLSX
-5. **多选批量**：支持同时选择多个会话，每个会话独立子文件夹
+4. **语音处理**：读取 VoiceInfo，优先转 WAV；无本机解码器时保留 SILK
+5. **多格式**：JSON / HTML / TXT / CSV / Markdown / TOML / SQLite / XLSX
+6. **多选批量**：支持同时选择多个会话，每个会话独立子文件夹
 
 ---
 
@@ -52,9 +53,9 @@
 
 ```
 流程:
-1. 第一遍：_collect_metadata() → 计数/发送者/图片引用（轻量）
+1. 第一遍：_collect_metadata() → 计数/发送者/图片引用/语音引用（轻量）
 2. 头像提取：collect_avatars()（仅需要的发送者）
-3. 媒体解密：_decrypt_parallel()（多进程池）
+3. 媒体处理：图片走 _decrypt_parallel()（多进程池），语音优先 WAV 转码、失败保留 SILK
 4. 第二遍：流式写出到目标格式
 5. 打包（可选）
 ```
@@ -134,20 +135,27 @@ writer.close()
 
 ---
 
-## 媒体解密
+## 媒体处理
 
-### 并行解密流程
+### 图片并行解密流程
 
 ```
-1. 第一遍扫描收集图片引用: [(md5, bubble_md5, localId), ...]
-2. 构建任务列表: [(acc_dir, account, md5, bubble_md5, local_id, dst_path), ...]
+1. 第一遍扫描收集图片引用: [(md5, bubble_md5, localId, ts), ...]
+2. 构建任务列表: [(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst_path), ...]
 3. multiprocessing.Pool.imap_unordered(_decrypt_one, tasks)
-4. 返回 {localId: "media/xxx.jpg"} 映射
+4. 返回 {localId: "media/xxx.jpg|png|gif"} 映射
 ```
 
-### 单张解密（`_decrypt_one`）
+### 单张图片解密（`_decrypt_one`）
 
-子进程入口，调用 `media.get_image()` 尝试所有候选密钥，成功即写出到目标路径。
+子进程入口，调用 `media.get_image()` 尝试所有候选密钥，成功即按真实 MIME 写出到目标路径。
+
+### 语音导出（`_export_voice_media`）
+
+读取 `message/media_*.db` 的 `VoiceInfo.voice_data`，先剥离 `#!SILK_V3` 前的控制字节；
+然后调用 `voice.transcode_voice(..., "wav")` 优先产出浏览器可播放的 WAV。项目不新增强制依赖：
+若当前环境已有 `pilk` 会直接复用；否则尝试 `SIWX_SILK_DECODER` 或 PATH 中的本机解码器。
+仍不可转码时自动回退写出 `.silk`，导出流程不中断。
 
 ---
 

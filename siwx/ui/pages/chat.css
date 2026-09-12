@@ -147,8 +147,9 @@
 .m-link-host { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .m-img { max-width: min(220px, 62vw); max-height: 300px; border-radius: var(--radius-sm); display: block; cursor: zoom-in; border: 1px solid var(--line); }
 .m-retry { font-size: 12px; color: var(--text); cursor: pointer; text-decoration: underline; }
-.m-voice { display: flex; align-items: center; gap: 10px; min-width: 160px; }
+.m-voice { display: flex; align-items: center; gap: 10px; min-width: 220px; flex-wrap: wrap; }
 .m-voice span { font-weight: 700; }
+.m-voice audio { height: 30px; max-width: 210px; }
 .m-voice a { color: inherit; text-decoration: underline; font-size: 12px; }
 @media (max-width: 760px) {
   .chat-wrap { grid-template-columns: 1fr; height: calc(100vh - 92px); min-height: 460px; border-radius: var(--radius); }
