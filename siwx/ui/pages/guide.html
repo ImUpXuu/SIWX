@@ -15,7 +15,7 @@
     <div id="g-check" class="g-check">正在检测环境…</div>
     <div class="g-manual g-manual-first">
       <div class="g-manual-title">没有扫到目录？在这里直接指定微信数据目录</div>
-      <p class="dim" style="font-size:12px;margin:6px 0 8px">可填写微信数据目录或 db_storage 目录。微信内获取路径：微信设置 → 文件管理 → 打开文件夹 → 复制地址栏路径。</p>
+      <p class="dim" style="font-size:12px;margin:6px 0 8px">可填写 xwechat_files 根目录、账号目录、db_storage、其内部子目录或具体 .db 文件；根目录下有多个账号也会一起识别。微信内获取路径：微信设置 → 文件管理 → 打开文件夹 → 复制地址栏路径。</p>
       <div style="display:flex;gap:6px">
         <input id="g1-manual-path" type="text" placeholder="例如: D:\xwechat_files\wxid_xxx\db_storage"
                style="flex:1;font-size:12px;padding:7px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--card-alt);color:var(--text);outline:none">
@@ -37,7 +37,7 @@
     <div class="g-manual">
       <button class="btn btn-sm" id="g-manual-toggle">⚙ 手动指定路径</button>
       <div id="g-manual-box" class="hidden" style="margin-top:10px">
-        <p class="dim" style="font-size:12px;margin-bottom:6px">如果自动检测未找到，可手动指定微信数据目录（包含 db_storage 的目录）。<br>
+        <p class="dim" style="font-size:12px;margin-bottom:6px">支持 xwechat_files 根目录、账号目录、db_storage、其内部子目录或具体 .db 文件。<br>
         微信内获取路径：微信设置 → 文件管理 → 打开文件夹 → 复制地址栏路径。</p>
         <div style="display:flex;gap:6px">
           <input id="g-manual-path" type="text" placeholder="例如: D:\xwechat_files\wxid_xxx\db_storage"

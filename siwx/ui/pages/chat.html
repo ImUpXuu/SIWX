@@ -31,10 +31,12 @@
         <div class="c-tip">选择一个会话查看聊天记录</div>
       </div>
       <aside class="c-timeline" id="c-timeline">
-        <div class="tl-head">时间轴</div>
-        <input id="c-jump-date" type="date" disabled>
-        <div id="c-timeline-list" class="tl-list">
-          <div class="tl-empty">打开会话后可按日期跳转</div>
+        <button class="tl-trigger" id="c-timeline-trigger" type="button" title="按时间跳转">时间</button>
+        <div class="tl-panel">
+          <div class="tl-head"><b>聊天时间轴</b><span>悬停或点击月份展开</span></div>
+          <div id="c-timeline-list" class="tl-list">
+            <div class="tl-empty">打开会话后可按月份跳转</div>
+          </div>
         </div>
       </aside>
     </div>

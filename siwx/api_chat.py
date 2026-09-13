@@ -713,27 +713,37 @@ def messages():
 
 @bp.get("/timeline")
 def timeline():
-    """单个会话的日期时间轴：只做 SQL 聚合，不拉取正文。"""
+    """单个会话时间轴：默认只聚合月份，展开时才查询指定月的日期。"""
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
+    month = (request.args.get("month") or "").strip()
+    if month and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+        return jsonify({"error": "month 参数格式应为 YYYY-MM"}), 400
     acc = _out_root() / account
     if not (acc / "message").is_dir():
         return jsonify({"error": "账号不存在或未解密"}), 404
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
-    days = {}
+    key_name = "day" if month else "month"
+    fmt = "%Y-%m-%d" if month else "%Y-%m"
+    buckets = {}
     total = 0
     ts_min = ts_max = 0
     for db in shards_for(acc, chat):
         conn = sqlite3.connect(db)
         try:
-            sql = (f"SELECT strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime') AS day, "
+            where = "create_time > 0"
+            params = []
+            if month:
+                where += " AND strftime('%Y-%m', create_time, 'unixepoch', 'localtime') = ?"
+                params.append(month)
+            sql = (f"SELECT strftime('{fmt}', create_time, 'unixepoch', 'localtime') AS k, "
                    f"COUNT(*), MIN(create_time), MAX(create_time) FROM [{table}] "
-                   f"WHERE create_time > 0 GROUP BY day")
-            for day, cnt, mn, mx in conn.execute(sql):
-                if not day:
+                   f"WHERE {where} GROUP BY k")
+            for key, cnt, mn, mx in conn.execute(sql, params):
+                if not key:
                     continue
-                item = days.setdefault(day, {"day": day, "count": 0,
-                                             "first_ts": 0, "last_ts": 0})
+                item = buckets.setdefault(key, {key_name: key, "count": 0,
+                                                "first_ts": 0, "last_ts": 0})
                 item["count"] += int(cnt or 0)
                 if mn and (not item["first_ts"] or mn < item["first_ts"]):
                     item["first_ts"] = int(mn)
@@ -748,9 +758,12 @@ def timeline():
             pass
         finally:
             conn.close()
-    return jsonify({"account": account, "chat": chat, "total": total,
-                    "ts_min": ts_min, "ts_max": ts_max,
-                    "days": [days[k] for k in sorted(days)]})
+    result = {"account": account, "chat": chat, "total": total,
+              "ts_min": ts_min, "ts_max": ts_max}
+    result["days" if month else "months"] = [buckets[k] for k in sorted(buckets, reverse=True)]
+    if month:
+        result["month"] = month
+    return jsonify(result)
 
 
 @bp.get("/stats")

@@ -9,7 +9,8 @@ let earliest = 0;
 let hasMore = false;
 let loading = false;
 let loadedMessages = [];
-let timelineDays = [];
+let timelineMonths = [];
+let timelineDayCache = new Map();
 let selectionMode = false;
 let selectedKeys = new Set();
 let rangeAnchorKey = null;
@@ -77,9 +78,8 @@ async function init() {
   el('c-stats-modal').addEventListener('click', (ev) => {
     if (ev.target === el('c-stats-modal')) closeStatsModal();
   });
-  el('c-jump-date').addEventListener('change', () => {
-    if (!el('c-jump-date').value || !currentChat) return;
-    jumpToTime(Math.floor(new Date(el('c-jump-date').value + 'T00:00:00').getTime() / 1000));
+  el('c-timeline-trigger').addEventListener('click', () => {
+    el('c-timeline').classList.toggle('pinned');
   });
 
   // 跳转导出页并预选当前会话
@@ -124,15 +124,16 @@ async function init() {
 
 function resetChatView() {
   loadedMessages = [];
-  timelineDays = [];
+  timelineMonths = [];
+  timelineDayCache.clear();
   earliest = 0;
   hasMore = false;
   setSelectionMode(false);
   el('c-title').textContent = '微信';
   el('c-sub').textContent = '选择一个会话查看聊天记录';
   el('c-msgs').innerHTML = '<div class="c-tip">选择一个会话查看聊天记录</div>';
-  el('c-timeline-list').innerHTML = '<div class="tl-empty">打开会话后可按日期跳转</div>';
-  el('c-jump-date').disabled = true;
+  el('c-timeline-list').innerHTML = '<div class="tl-empty">打开会话后可按月份跳转</div>';
+  el('c-timeline').classList.remove('pinned');
   el('c-select').disabled = true;
   el('c-stats').disabled = true;
 }
@@ -368,37 +369,82 @@ function bubble(m) {
 async function loadTimeline() {
   if (!currentChat) return;
   const list = el('c-timeline-list');
-  list.innerHTML = '<div class="tl-empty">正在生成时间轴…</div>';
-  el('c-jump-date').disabled = true;
+  list.innerHTML = '<div class="tl-empty">正在生成月份索引…</div>';
+  timelineDayCache.clear();
   try {
     const data = await fetchJSON(`/api/chat/timeline?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(currentChat.username)}`);
-    timelineDays = data.days || [];
-    renderTimeline(data);
+    timelineMonths = data.months || [];
+    renderTimelineMonths();
   } catch (e) {
     list.innerHTML = `<div class="tl-empty">时间轴加载失败：${esc(e.message)}</div>`;
   }
 }
 
-function renderTimeline(data) {
+function renderTimelineMonths() {
   const list = el('c-timeline-list');
-  if (!timelineDays.length) {
+  if (!timelineMonths.length) {
     list.innerHTML = '<div class="tl-empty">这个会话暂无可跳转消息</div>';
     return;
   }
-  const max = Math.max(...timelineDays.map(d => d.count || 0), 1);
-  el('c-jump-date').disabled = false;
-  el('c-jump-date').min = localDateValue(data.ts_min || timelineDays[0].first_ts);
-  el('c-jump-date').max = localDateValue(data.ts_max || timelineDays[timelineDays.length - 1].last_ts);
-  list.innerHTML = timelineDays.map(d => {
-    const pct = Math.max(8, Math.round((d.count || 0) * 100 / max));
-    return `<button class="tl-item" data-ts="${d.first_ts || 0}" title="${esc(d.day)} · ${d.count} 条">
-      <span class="tl-dot"></span><span class="tl-date">${esc(d.day.slice(5))}</span>
-      <span class="tl-bar"><i style="width:${pct}%"></i></span><span class="tl-count">${d.count}</span>
-    </button>`;
-  }).join('');
-  list.querySelectorAll('.tl-item').forEach(btn => {
+  list.innerHTML = timelineMonths.map(m => `
+    <section class="tl-month" data-month="${esc(m.month)}">
+      <button class="tl-month-btn" type="button" title="展开 ${esc(m.month)}">
+        <span class="tl-dot"></span><span class="tl-month-label">${esc(monthLabel(m.month))}</span>
+        <span class="tl-count">${m.count}</span><span class="tl-chevron">›</span>
+      </button>
+      <div class="tl-days"><div class="tl-days-inner"></div></div>
+    </section>`).join('');
+
+  list.querySelectorAll('.tl-month').forEach(section => {
+    const open = () => expandTimelineMonth(section);
+    section.querySelector('.tl-month-btn').addEventListener('click', () => {
+      if (section.classList.contains('open')) section.classList.remove('open');
+      else open();
+    });
+    section.addEventListener('mouseenter', open, { once: false });
+  });
+}
+
+async function expandTimelineMonth(section) {
+  if (!currentChat || !section) return;
+  const month = section.dataset.month;
+  document.querySelectorAll('.tl-month.open').forEach(n => {
+    if (n !== section && !el('c-timeline').classList.contains('pinned')) n.classList.remove('open');
+  });
+  section.classList.add('open');
+  const inner = section.querySelector('.tl-days-inner');
+  if (timelineDayCache.has(month)) {
+    renderTimelineDays(inner, timelineDayCache.get(month));
+    return;
+  }
+  if (section.dataset.loading === '1') return;
+  section.dataset.loading = '1';
+  inner.innerHTML = '<div class="tl-empty">加载日期…</div>';
+  try {
+    const data = await fetchJSON(`/api/chat/timeline?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(currentChat.username)}&month=${encodeURIComponent(month)}`);
+    const days = data.days || [];
+    timelineDayCache.set(month, days);
+    renderTimelineDays(inner, days);
+  } catch (e) {
+    inner.innerHTML = `<div class="tl-empty">加载失败</div>`;
+  } finally {
+    section.dataset.loading = '0';
+  }
+}
+
+function renderTimelineDays(inner, days) {
+  inner.innerHTML = days.length ? days.map(d => `
+    <button class="tl-day" type="button" data-ts="${d.first_ts || 0}" title="${esc(d.day)} · ${d.count} 条">
+      <span>${esc(d.day.slice(8))}日</span><b>${d.count}</b>
+    </button>`).join('') : '<div class="tl-empty">该月没有消息</div>';
+  inner.querySelectorAll('.tl-day').forEach(btn => {
     btn.addEventListener('click', () => jumpToTime(Number(btn.dataset.ts || 0)));
   });
+}
+
+function monthLabel(month) {
+  const [year, mon] = String(month || '').split('-');
+  return `${year}年${Number(mon)}月`;
 }
 
 async function jumpToTime(ts) {
@@ -414,15 +460,6 @@ async function jumpToTime(ts) {
     target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setTimeout(() => target.classList.remove('jump-hit'), 1400);
   }
-}
-
-function localDateValue(ts) {
-  if (!ts) return '';
-  const d = new Date(ts * 1000);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
 }
 
 function setSelectionMode(on) {
