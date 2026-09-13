@@ -1,0 +1,38 @@
+<div class="st-wrap">
+  <div class="st-bar">
+    <div class="st-bar-main">
+      <div class="st-filter st-filter-account">
+        <label class="st-label" for="st-account">统计账号</label>
+        <select id="st-account"></select>
+      </div>
+      <div class="st-filter st-filter-range">
+        <label class="st-label" for="st-range">时间范围</label>
+        <div class="st-range-row">
+          <select id="st-range">
+            <option value="all">全部时间</option>
+            <option value="12">最近 12 个月</option>
+            <option value="6">最近 6 个月</option>
+            <option value="3">最近 3 个月</option>
+            <option value="1">最近 1 个月</option>
+            <option value="custom">自定义日期</option>
+          </select>
+          <span id="st-custom" class="st-custom hidden">
+            <input type="date" id="st-start" title="开始日期">
+            <span class="st-date-sep">至</span>
+            <input type="date" id="st-end" title="结束日期">
+          </span>
+        </div>
+      </div>
+    </div>
+    <div class="st-actions">
+      <span class="hint" id="st-meta"></span>
+      <button id="st-refresh" class="btn">⟳ 重新统计</button>
+    </div>
+  </div>
+
+  <!-- 占位提示与正文容器是兄弟节点。
+       注意：render() 会整体覆写 #st-body.innerHTML，若把占位符放在里面，
+       它会被销毁，后续 el('st-empty') 拿到 null 并抛错。 -->
+  <div class="st-empty" id="st-empty">选择账号后开始统计…</div>
+  <div id="st-body"></div>
+</div>

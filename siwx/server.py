@@ -103,12 +103,14 @@ from siwx.api_export import bp as export_bp  # noqa: E402
 from siwx.api_mcp import bp as mcp_bp  # noqa: E402
 from siwx.api_update import bp as update_bp  # noqa: E402
 from siwx.api_plugins import bp as plugins_bp  # noqa: E402
+from siwx.api_stats import bp as stats_bp  # noqa: E402
 app.register_blueprint(chat_bp)
 app.register_blueprint(settings_bp)
 app.register_blueprint(export_bp)
 app.register_blueprint(mcp_bp)
 app.register_blueprint(update_bp)
 app.register_blueprint(plugins_bp)
+app.register_blueprint(stats_bp)
 
 # 插件发现与加载（目录自动发现，逐插件隔离；失败不阻塞启动）
 from siwx.plugins import load_all as _load_plugins  # noqa: E402

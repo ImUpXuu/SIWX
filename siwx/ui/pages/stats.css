@@ -1,0 +1,224 @@
+/* 聊天统计页 —— 沿用全局黑白描边设计语言，图表全部手绘 SVG（无外部依赖） */
+
+.st-wrap { display: flex; flex-direction: column; gap: 18px; }
+
+/* ── 顶部工具条 ───────────────────────────────────────────── */
+.st-bar {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end; gap: 16px 22px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--card); padding: 16px 18px;
+}
+.st-bar-main {
+  display: grid; grid-template-columns: minmax(220px, 320px) minmax(340px, 1fr);
+  gap: 14px 18px; align-items: end; min-width: 0;
+}
+.st-filter { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.st-filter-range { min-width: 0; }
+.st-range-row { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
+.st-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
+.st-label { font-size: 12px; font-weight: 700; color: var(--muted); }
+.st-bar select { min-height: 36px; padding: 6px 10px; font-size: 13px; max-width: 100%; }
+.st-filter-account select { width: 100%; }
+.st-filter-range select { width: 150px; flex: none; }
+.st-bar .btn { min-height: 36px; padding: 6px 14px; font-size: 13px; white-space: nowrap; }
+@media (max-width: 980px) {
+  .st-bar { grid-template-columns: 1fr; align-items: stretch; }
+  .st-bar-main { grid-template-columns: 1fr; }
+  .st-actions { justify-content: space-between; }
+}
+.st-empty { color: var(--muted); text-align: center; padding: 60px 0; font-size: 14px; }
+/* 卡片内的空态用紧凑版，避免 60px 内边距把面板撑得过高 */
+.st-panel .st-empty { padding: 28px 0; font-size: 13px; }
+
+/* 自定义时间范围：两个日期框 + 中间的「至」 */
+.st-custom {
+  display: inline-grid; grid-template-columns: minmax(132px, 1fr) auto minmax(132px, 1fr);
+  align-items: center; gap: 8px; min-width: min(100%, 318px); flex: 1;
+}
+.st-date-sep { color: var(--muted); font-size: 12px; font-weight: 700; }
+.st-bar .st-custom input[type="date"] {
+  min-height: 36px; padding: 5px 9px; font-size: 12.5px;
+  font-family: inherit; color: var(--text); min-width: 0;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--card);
+}
+/* 日期框的日历图标 */
+.st-bar .st-custom input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer; opacity: .65;
+}
+.st-bar .st-custom input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+@media (max-width: 620px) {
+  .st-range-row { display: grid; grid-template-columns: 1fr; }
+  .st-filter-range select { width: 100%; }
+  .st-custom { grid-template-columns: 1fr auto 1fr; width: 100%; }
+}
+
+/* ── 统计卡片网格 ─────────────────────────────────────────── */
+.st-cards {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.st-card {
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--card); padding: 16px 18px;
+}
+.st-card .k { font-size: 12px; color: var(--muted); font-weight: 700; letter-spacing: .2px; }
+.st-card .v {
+  font-size: 27px; font-weight: 700; color: var(--text);
+  margin-top: 7px; line-height: 1.15; letter-spacing: -.5px;
+}
+.st-card .s { font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+
+/* ── 图表区 ───────────────────────────────────────────────── */
+.st-grid { display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+.st-grid .st-full { grid-column: 1 / -1; }
+@media (max-width: 1100px) { .st-grid { grid-template-columns: 1fr; } }
+
+.st-panel {
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--card); padding: 18px 20px;
+}
+.st-panel-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; gap: 12px; }
+.st-panel-head h2 { font-size: 15px; font-weight: 700; }
+.st-panel-head .hint { font-size: 11.5px; }
+
+/* SVG 图表通用 */
+.st-chart { width: 100%; display: block; overflow: visible; }
+.st-chart text { font-family: inherit; fill: var(--muted); }
+.st-chart .axis { stroke: var(--line-soft); stroke-width: 1; }
+.st-chart .grid { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 2 3; }
+.st-chart .bar { fill: var(--text); }
+.st-chart .bar-dim { fill: var(--line-soft); }
+.st-chart .lbl { fill: var(--text); font-weight: 700; }
+.st-chart .val { fill: var(--text); font-weight: 700; }
+
+/* 环形图 */
+.st-donut-wrap { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.st-donut { flex: none; }
+.st-legend { flex: 1; min-width: 170px; display: flex; flex-direction: column; gap: 7px; }
+.st-leg {
+  display: flex; align-items: center; gap: 9px; font-size: 12.5px;
+  padding: 3px 0; border-bottom: 1px dashed var(--line-soft);
+}
+.st-leg:last-child { border-bottom: none; }
+.st-leg .sw { width: 11px; height: 11px; flex: none; border: 1px solid var(--line); }
+.st-leg .nm { flex: 1; min-width: 0; color: var(--text); }
+.st-leg .ct { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.st-leg .pc { color: var(--muted); font-size: 11.5px; width: 48px; text-align: right; }
+
+/* ── 会话/发送者排行表 ─────────────────────────────────────── */
+.st-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.st-table th, .st-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line-soft); }
+.st-table th { font-size: 11.5px; color: var(--muted); font-weight: 700; white-space: nowrap; }
+.st-table tr:last-child td { border-bottom: none; }
+.st-table td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+.st-table td.idx { color: var(--muted); width: 30px; text-align: right; font-size: 12px; }
+.st-table .nm { word-break: break-all; }
+/* 行内占比条 */
+.st-mini { display: flex; align-items: center; gap: 9px; min-width: 150px; }
+.st-mini .track {
+  flex: 1; height: 7px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--card); overflow: hidden; min-width: 60px;
+}
+.st-mini .fill { height: 100%; background: var(--text); }
+
+.st-tip { font-size: 11.5px; color: var(--muted); margin-top: 10px; }
+.st-loading { color: var(--muted); text-align: center; padding: 50px 0; }
+.st-err { color: var(--text); border: 1px dashed var(--line); border-radius: var(--radius);
+          padding: 16px 18px; background: var(--card-alt); }
+
+/* 排行表里昵称下方的微信号（次要信息） */
+.st-wxid {
+  display: block; font-size: 10.5px; color: var(--muted);
+  margin-top: 2px; word-break: break-all;
+}
+
+/* ════════════════════════════════════════════════════════════
+   动画
+   ────────────────────────────────────────────────────────────
+   两条纪律：
+   1. 用 CSS 变量（--grow / --sy / --arc）承载目标值，属性本身写「起点」，
+      由 JS 在下一帧改成目标值，让 transition 真正跑起来。
+      直接在首帧写终值 = 动画被吃掉（浏览器不会对首次渲染做过渡）。
+   2. 尊重 prefers-reduced-motion，系统关掉动效时全部瞬时到位。
+   ════════════════════════════════════════════════════════════ */
+
+@keyframes stRise {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* 卡片依次浮起 */
+.st-card {
+  animation: stRise .45s cubic-bezier(.22, .8, .3, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 55ms);
+}
+
+/* 面板依次浮起 */
+.st-panel {
+  animation: stRise .5s cubic-bezier(.22, .8, .3, 1) backwards;
+  animation-delay: calc(var(--i, 0) * 70ms + 60ms);
+}
+
+/* 环形图图例逐行滑入 */
+.st-leg {
+  animation: stRise .4s ease backwards;
+  animation-delay: calc(var(--i, 0) * 45ms + 180ms);
+}
+
+/* 排行表逐行滑入 */
+.st-table tbody tr {
+  animation: stRise .38s ease backwards;
+  animation-delay: calc(var(--i, 0) * 35ms + 200ms);
+}
+
+/* 纵向柱：以底边为原点纵向展开。
+   SVG rect 用 `transform-box: fill-box` 把原点定位到自身包围盒，
+   再 `transform-origin: bottom` 就等于"从基线往上长"。 */
+.st-chart .bar-grow {
+  transform-box: fill-box;
+  transform-origin: bottom;
+  transform: scaleY(var(--sy, 1));
+  transition: transform .72s cubic-bezier(.22, .8, .3, 1);
+  will-change: transform;
+}
+
+/* 环形图分段：逐段扫出来 */
+.st-chart .st-arc {
+  stroke-dasharray: calc(var(--dash, 0) * var(--arc, 1)) 9999;
+  transition: stroke-dasharray .8s cubic-bezier(.35, .8, .3, 1);
+}
+
+/* 环形图中心数字 */
+.st-donut-val { transition: opacity .3s ease; }
+
+/* 横向占比条：宽度生长 */
+.st-mini .fill {
+  width: 0;
+  transition: width .68s cubic-bezier(.22, .8, .3, 1);
+}
+
+/* 工具条按钮 hover 的小反馈，让页面不那么"死" */
+.st-bar .btn { transition: transform .14s ease, opacity .14s ease; }
+.st-bar .btn:hover:not(:disabled) { transform: translateY(-1px); }
+.st-bar .btn:active:not(:disabled) { transform: translateY(0); }
+.st-bar .btn:disabled { opacity: .5; cursor: default; }
+
+/* 柱/条 hover 强调 */
+.st-chart .bar-grow { cursor: default; }
+.st-chart .bar-grow:hover { fill: var(--text); }
+
+/* 加载中的呼吸效果 */
+.st-loading { animation: stPulse 1.4s ease-in-out infinite; }
+@keyframes stPulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+
+/* 系统要求减少动效 → 全部瞬时完成。
+   注意：横条宽度由 JS 在下一帧写成内联 style（width），
+   这里只要关掉 transition，最终值照样会到位。 */
+@media (prefers-reduced-motion: reduce) {
+  .st-card, .st-panel, .st-leg, .st-table tbody tr, .st-loading { animation: none; }
+  .st-chart .bar-grow, .st-chart .st-arc, .st-mini .fill { transition: none; }
+  .st-chart .bar-grow { transform: none; }
+  .st-chart .st-arc { stroke-dasharray: var(--dash, 0) 9999; }
+}

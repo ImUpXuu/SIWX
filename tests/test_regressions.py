@@ -684,6 +684,219 @@ class TestSettingsAutoSync(TempRootCase):
         self.assertEqual(r.get_json()["interval_minutes"], 1440)
 
 
+class TestStatsApi(TempRootCase):
+    """聊天统计：跨分片聚合、类型分布、时间维度、缓存与过滤。"""
+
+    @staticmethod
+    def _make_stats_account(root: Path, account="wxid_stats"):
+        """构造含多分片、多类型、多发送者的统计样本。"""
+        acc = root / "output" / account
+        msg_dir = acc / "message"
+        msg_dir.mkdir(parents=True, exist_ok=True)
+        # 固定基准时间，便于断言小时/月份（本地时区，用正午避开跨日边界）
+        base = 1_700_000_000
+
+        def shard(name, chat, rows):
+            conn = sqlite3.connect(msg_dir / name)
+            t = _msg_table(chat)
+            conn.execute(f"""CREATE TABLE [{t}] (
+                local_id INTEGER PRIMARY KEY, server_id INTEGER, local_type INTEGER,
+                create_time INTEGER, origin_source INTEGER, real_sender_id INTEGER,
+                message_content BLOB, packed_info_data BLOB)""")
+            for i, (ltype, ts, sid) in enumerate(rows):
+                conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
+                             (i + 1, 100 + i, ltype, ts, 0, sid, b"x", None))
+            conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+            conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (chat,))
+            conn.commit()
+            conn.close()
+
+        # 分片 0：文本 + 图片，发送者 1
+        shard("message_0.db", "wxid_a",
+              [(1, base, 1), (1, base + 3600, 1), (3, base + 7200, 1)])
+        # 分片 1：表情 + 语音，发送者 2
+        shard("message_1.db", "wxid_b",
+              [(47, base + 100, 2), (34, base + 200, 2)])
+        # 分片 2：系统消息 + 一年前的文本
+        shard("message_2.db", "wxid_c",
+              [(10000, base + 300, 0), (1, base - 400 * 86400, 1)])
+
+        # 三个不同会话 → chat_count 应为 3；联系人库用于验证排行显示昵称。
+        (acc / "contact").mkdir(parents=True, exist_ok=True)
+        c = sqlite3.connect(acc / "contact" / "contact.db")
+        c.execute("CREATE TABLE contact (username TEXT, remark TEXT, nick_name TEXT, "
+                  "alias TEXT, verify_flag INTEGER)")
+        c.executemany("INSERT INTO contact VALUES (?,?,?,?,?)", [
+            ("wxid_a", "好友A", "", "", 0),
+            ("wxid_b", "", "好友B", "", 0),
+            ("wxid_c", "", "好友C", "", 0),
+            ("gh_news", "", "公众号", "news_alias", 1053),
+            ("group@chatroom", "", "群聊", "", 0),
+        ])
+        c.commit()
+        c.close()
+        return acc, account
+
+    def test_overview_totals_and_types(self):
+        self._make_stats_account(self.tmp)
+        from siwx.server import app
+        r = app.test_client().get("/api/stats/overview?account=wxid_stats")
+        self.assertEqual(r.status_code, 200)
+        d = r.get_json()
+        self.assertEqual(d["total"], 7)
+        self.assertEqual(d["chat_count"], 3)
+        self.assertEqual(d["shards"], 3)
+        # 类型分组：文本 3、图片 1、表情 1、语音 1、系统 1（合计 7）
+        groups = {g["label"]: g["count"] for g in d["type_groups"]}
+        self.assertEqual(groups.get("文本"), 3)
+        self.assertEqual(groups.get("图片"), 1)
+        self.assertEqual(groups.get("表情"), 1)
+        self.assertEqual(groups.get("语音"), 1)
+        self.assertEqual(groups.get("系统"), 1)
+        # 分组之和必须等于总量，否则图表会缺数据
+        self.assertEqual(sum(groups.values()), d["total"])
+
+    def test_hour_and_weekday_histograms(self):
+        self._make_stats_account(self.tmp)
+        from siwx.server import app
+        d = app.test_client().get("/api/stats/overview?account=wxid_stats").get_json()
+        self.assertEqual(len(d["by_hour"]), 24)
+        self.assertEqual(len(d["by_weekday"]), 7)
+        # 直方图总量应等于消息总数（每条消息恰好落进一个小格）
+        self.assertEqual(sum(d["by_hour"]), d["total"])
+        self.assertEqual(sum(d["by_weekday"]), d["total"])
+
+    def test_month_series_spans_multiple_months(self):
+        self._make_stats_account(self.tmp)
+        from siwx.server import app
+        d = app.test_client().get("/api/stats/overview?account=wxid_stats").get_json()
+        # 样本含一年前的消息 → 至少两个不同月份
+        self.assertGreaterEqual(len(d["by_month"]), 2)
+        self.assertEqual(sum(m["count"] for m in d["by_month"]), d["total"])
+
+    def test_top_senders_only_private_and_resolves_nickname(self):
+        acc, _account = self._make_stats_account(self.tmp)
+        # 群聊与公众号给更多消息，若未过滤会排到第一。
+        msg_dir = acc / "message"
+        def add_shard(name, chat, n):
+            conn = sqlite3.connect(msg_dir / name)
+            t = _msg_table(chat)
+            conn.execute(f"""CREATE TABLE [{t}] (
+                local_id INTEGER PRIMARY KEY, server_id INTEGER, local_type INTEGER,
+                create_time INTEGER, origin_source INTEGER, real_sender_id INTEGER,
+                message_content BLOB, packed_info_data BLOB)""")
+            for i in range(n):
+                conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
+                             (i + 1, 200 + i, 1, 1_700_000_000 + i, 0, 1, b"x", None))
+            conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+            conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (chat,))
+            conn.commit()
+            conn.close()
+        add_shard("message_3.db", "group@chatroom", 20)
+        add_shard("message_4.db", "gh_news", 30)
+
+        from siwx import stats
+        stats.clear_cache()
+        from siwx.server import app
+        d = app.test_client().get("/api/stats/overview?account=wxid_stats&refresh=1").get_json()
+        top = {s["wxid"]: s for s in d["top_senders"]}
+        self.assertNotIn("group@chatroom", top)
+        self.assertNotIn("gh_news", top)
+        # 排行按私聊会话聚合，且展示联系人备注/昵称。
+        self.assertEqual(top["wxid_a"]["count"], 3)
+        self.assertEqual(top["wxid_a"]["name"], "好友A")
+        self.assertEqual(top["wxid_b"]["name"], "好友B")
+
+    def test_date_filter_narrows_all_statistics(self):
+        self._make_stats_account(self.tmp)
+        from siwx.server import app
+        c = app.test_client()
+        full = c.get("/api/stats/overview?account=wxid_stats").get_json()
+        filtered = c.get(
+            "/api/stats/overview?account=wxid_stats&start=2023-11-15&end=2023-11-15"
+        ).get_json()
+        # 样本里 6 条在 2023-11-15，1 条在 400 天前；过滤应影响整页指标。
+        self.assertEqual(full["total"], 7)
+        self.assertEqual(filtered["total"], 6)
+        self.assertEqual(sum(m["count"] for m in filtered["by_month"]), 6)
+        self.assertEqual(sum(filtered["by_hour"]), 6)
+        self.assertEqual(sum(filtered["by_weekday"]), 6)
+        groups = {g["label"]: g["count"] for g in filtered["type_groups"]}
+        self.assertEqual(groups.get("文本"), 2)
+        top = {s["wxid"]: s["count"] for s in filtered["top_senders"]}
+        # wxid_c 在当天只有 1 条系统消息；一年前那条文本不应混进范围内。
+        self.assertEqual(top.get("wxid_c"), 1)
+
+    def test_cache_hit_after_first_compute(self):
+        acc, account = self._make_stats_account(self.tmp)
+        from siwx import stats
+        stats.clear_cache()
+        stats.compute_stats(account)
+        self.assertTrue((acc / ".siwx_stats.json").is_file())
+        sig = stats.signature(account)
+        self.assertIsNotNone(sig)
+        # 磁盘缓存可被读取（内容与签名匹配）
+        cached = stats._load_disk_cache(account, sig)
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["total"], 7)
+
+    def test_cache_invalidated_when_shard_changes(self):
+        acc, account = self._make_stats_account(self.tmp)
+        from siwx import stats
+        stats.clear_cache()
+        stats.compute_stats(account)
+        old_sig = stats.signature(account)
+        # 追加一个分片 → 签名必须变化，否则统计会永久停在旧结果
+        conn = sqlite3.connect(acc / "message" / "message_9.db")
+        t = _msg_table("wxid_new")
+        conn.execute(f"""CREATE TABLE [{t}] (
+            local_id INTEGER PRIMARY KEY, server_id INTEGER, local_type INTEGER,
+            create_time INTEGER, origin_source INTEGER, real_sender_id INTEGER,
+            message_content BLOB, packed_info_data BLOB)""")
+        conn.execute(f"INSERT INTO [{t}] VALUES (1,1,1,1700000500,0,1,?,NULL)", (b"x",))
+        conn.commit()
+        conn.close()
+        new_sig = stats.signature(account)
+        self.assertNotEqual(old_sig, new_sig)
+        self.assertIsNone(stats._load_disk_cache(account, new_sig))
+        self.assertEqual(stats.compute_stats(account)["total"], 8)
+
+    def test_accounts_endpoint_lists_only_decrypted(self):
+        self._make_stats_account(self.tmp)
+        (self.tmp / "output" / "wxid_no_msg").mkdir(parents=True, exist_ok=True)
+        from siwx.server import app
+        d = app.test_client().get("/api/stats/accounts").get_json()
+        names = [a["wxid"] for a in d["accounts"]]
+        self.assertIn("wxid_stats", names)
+        self.assertNotIn("wxid_no_msg", names)
+
+    def test_overview_requires_account(self):
+        from siwx.server import app
+        self.assertEqual(app.test_client().get("/api/stats/overview").status_code, 400)
+
+    def test_overview_unknown_account_is_404(self):
+        from siwx.server import app
+        r = app.test_client().get("/api/stats/overview?account=wxid_missing")
+        self.assertEqual(r.status_code, 404)
+
+    def test_refresh_endpoint_recomputes(self):
+        self._make_stats_account(self.tmp)
+        from siwx.server import app
+        r = app.test_client().post("/api/stats/refresh", json={"account": "wxid_stats"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.get_json()["ok"])
+        self.assertEqual(r.get_json()["total"], 7)
+
+    def test_empty_account_returns_zeroes(self):
+        acc = self.tmp / "output" / "wxid_empty"
+        (acc / "message").mkdir(parents=True, exist_ok=True)
+        from siwx.server import app
+        d = app.test_client().get("/api/stats/overview?account=wxid_empty").get_json()
+        self.assertEqual(d["total"], 0)
+        self.assertEqual(d["chat_count"], 0)
+        self.assertEqual(d["type_groups"], [])
+
+
 class TestLimitGuard(TempRootCase):
 
     def test_negative_limit_is_clamped(self):

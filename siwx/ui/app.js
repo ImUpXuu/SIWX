@@ -6,8 +6,8 @@
  * 插件菜单项**追加在内置之后**，与内置项完全平级（同样式、同高亮逻辑）。
  */
 (function () {
-  const PAGES_BUILTIN = ['guide', 'chat', 'export', 'mcp', 'logs', 'settings'];
-  const UI_VERSION = '2026091301';
+  const PAGES_BUILTIN = ['guide', 'chat', 'stats', 'export', 'mcp', 'logs', 'settings'];
+  const UI_VERSION = '2026091302';
 
   let pluginPages = [];            // 服务端已按显示条件过滤
   let current = null;              // { name, mod }
