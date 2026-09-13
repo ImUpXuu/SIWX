@@ -12,9 +12,9 @@ bp = Blueprint("update_api", __name__, url_prefix="/api/update")
 
 @bp.get("/check")
 def check():
-    """检查是否有新版本。"""
+    """检查是否有新版本；响应禁止缓存，避免继续显示旧判断。"""
     has, remote, cur = has_update()
-    return jsonify({
+    response = jsonify({
         "has_update": has,
         "current": cur,
         "remote": remote,
@@ -22,6 +22,10 @@ def check():
         "platform": system_platform(),
         "update_available": has and is_frozen(),
     })
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 @bp.post("/do")

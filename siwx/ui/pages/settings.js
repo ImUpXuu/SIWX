@@ -61,7 +61,7 @@ async function loadVersion() {
   const meta = el('s-version-meta');
   try {
     const cur = await fetchJSON('/api/update/current');
-    const chk = await fetchJSON('/api/update/check');
+    const chk = await fetchJSON(`/api/update/check?_=${Date.now()}`);
     const lines = [];
     lines.push(`<div class="ov-row"><span>当前版本</span><span class="pill pill-green">v${esc(cur.version)}</span></div>`);
     lines.push(`<div class="ov-row"><span>运行模式</span><span class="dim">${cur.frozen ? '打包产物' : '源码运行'}</span></div>`);

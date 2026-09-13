@@ -47,18 +47,40 @@ def system_platform() -> str:
 
 
 def fetch_remote_version() -> dict | None:
-    """拉取远程 version.json。失败返回 None。"""
+    """拉取远程 version.json，返回所有可用源中的最高版本。
+
+    更新代理可能短时间缓存旧的 version.json，因此不能在第一个有效响应处
+    直接返回。每个请求同时带上防缓存参数和请求头，并在可用结果中选择最高
+    版本；这样代理仍为旧版时，也能采用 GitHub Raw 上已经发布的新版本。
+    """
+    import urllib.parse
     import urllib.request
-    for url in VERSION_URLS:
+
+    candidates = []
+    cache_key = str(time.time_ns())
+    for base_url in VERSION_URLS:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "stories-in-wx"})
+            parts = urllib.parse.urlsplit(base_url)
+            query = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+            query.append(("_siwx_update", cache_key))
+            url = urllib.parse.urlunsplit(parts._replace(
+                query=urllib.parse.urlencode(query),
+            ))
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "stories-in-wx",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            })
             with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 data = json.loads(r.read().decode("utf-8"))
                 if isinstance(data, dict) and data.get("version"):
-                    return data
+                    candidates.append(data)
         except Exception:
             continue
-    return None
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: _version_tuple(item.get("version", "")))
 
 
 def _version_tuple(v: str) -> tuple:

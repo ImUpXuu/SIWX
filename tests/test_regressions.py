@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -1146,6 +1147,42 @@ class TestVersionSource(unittest.TestCase):
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
         self.assertEqual(__version__, "5.0.1")
+
+    def test_remote_version_uses_newest_source_and_bypasses_cache(self):
+        from siwx import auto_update
+
+        seen = []
+
+        def fake_urlopen(req, timeout):
+            seen.append(req)
+            version = "5.0.0" if "gh.1s.fan" in req.full_url else "5.0.1"
+            return io.BytesIO(json.dumps({"version": version}).encode("utf-8"))
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            remote = auto_update.fetch_remote_version()
+
+        self.assertEqual(remote["version"], "5.0.1")
+        self.assertEqual(len(seen), len(auto_update.VERSION_URLS))
+        for req in seen:
+            self.assertIn("_siwx_update=", req.full_url)
+            self.assertEqual(req.get_header("Cache-control"), "no-cache")
+            self.assertEqual(req.get_header("Pragma"), "no-cache")
+
+    def test_update_check_response_is_not_cached(self):
+        from flask import Flask
+        from siwx import api_update
+
+        app = Flask(__name__)
+        app.register_blueprint(api_update.bp)
+        remote = {"version": "5.0.1", "notes": "update"}
+        with mock.patch.object(api_update, "has_update",
+                               return_value=(True, remote, "5.0.0")):
+            response = app.test_client().get("/api/update/check")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["has_update"])
+        self.assertIn("no-store", response.headers["Cache-Control"])
+        self.assertEqual(response.headers["Pragma"], "no-cache")
 
 
 class TestCryptoIntact(unittest.TestCase):
