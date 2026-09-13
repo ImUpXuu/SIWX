@@ -97,6 +97,14 @@ textarea:focus-visible, [tabindex]:focus-visible {
 .menu a:hover { background: var(--card-alt); border-color: var(--line); }
 .menu a.active { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
 .menu .ico { font-size: 15px; width: 18px; text-align: center; filter: grayscale(1); }
+/* 插件菜单项：与内置项样式完全一致，仅靠角标区分来源 */
+.nav-badge {
+  margin-left: auto; flex: none; font-size: 10px; font-weight: 700; line-height: 1;
+  padding: 3px 6px; border-radius: 999px;
+  background: var(--card-alt); color: var(--muted); border: 1px solid var(--line);
+}
+.menu a.active .nav-badge { background: transparent; color: var(--bg); border-color: var(--bg); }
+@media (max-width: 900px) { .menu .nav-badge { display: none; } }
 .side-foot { margin-top: auto; display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 14px; }
 .mini { font-size: 12px; color: var(--muted); flex: 1; min-width: 0; }
 .mini-btn {

@@ -1,0 +1,3 @@
+/* 插件页样式：只作用于本页元素，无需担心污染宿主 */
+#ds-accounts td, #ds-accounts th { padding: 8px 10px; }
+#ds-when { align-self: center; font-size: 12px; }

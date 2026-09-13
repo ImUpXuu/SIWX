@@ -386,6 +386,140 @@
 
 ---
 
+## 插件
+
+所有端点都遵循"零插件时返回空集合"的原则，前端据此静默跳过。
+
+### `GET /api/plugins`
+
+**插件加载状态与 hook 贡献统计**。
+
+```json
+// 响应
+{
+  "plugins": [
+    {
+      "name": "demo_stats", "version": "1.0.0",
+      "source": "dir:C:/Users/.../plugins/demo_stats/__init__.py",
+      "status": "ok",
+      "hooks": {"pages": 2, "settings": 3, "mcp_tools": 1},
+      "missing_requires": [], "error": ""
+    }
+  ],
+  "counts": {"ok": 1, "degraded": 0, "error": 0},
+  "hooks": {"pages": 2, "settings": 3, "mcp_tools": 1}
+}
+```
+
+`status` 三态：`ok` / `degraded`（依赖缺失或同名被跳过）/ `error`（加载失败）。
+
+---
+
+### `GET /api/plugins/pages`
+
+**左侧菜单的插件页数据**。默认只返回显示条件已满足的页面。
+
+| 参数 | 说明 |
+|---|---|
+| `all` | `1` 时返回全部页面，并附 `conditions` 原文与 `reason`（调试"为什么没显示"） |
+
+```json
+// 响应
+{
+  "pages": [
+    {
+      "id": "demo_stats:stats", "name": "stats", "plugin": "demo_stats",
+      "title": "统计面板", "icon": "📊", "badge": "DEMO", "tip": "",
+      "group": "", "entry": "index", "order": 10,
+      "base": "/plugin-pages/demo_stats", "conditions_met": true
+    }
+  ]
+}
+```
+
+插件页 id 全局化为 `<插件名>:<页面名>`，前端路由为 `#/demo_stats:stats`。
+
+---
+
+### `GET /api/plugins/settings`
+
+**全部插件的设置项**（含 schema 与当前值），供设置页自动渲染表单。
+
+```json
+// 响应
+{
+  "plugins": [
+    {
+      "plugin": "demo_stats", "version": "1.0.0", "description": "...",
+      "items": [
+        {"plugin": "demo_stats", "group": "统计面板",
+         "key": "refresh_seconds", "type": "int", "label": "自动刷新间隔（秒）",
+         "default": 30, "choices": [], "min": 5, "max": 600,
+         "help": "...", "value": 30}
+      ]
+    }
+  ]
+}
+```
+
+---
+
+### `POST /api/plugins/settings`
+
+**更新某插件的设置**，按 schema 校验后原子写入。
+
+```json
+// 请求
+{"plugin": "demo_stats", "values": {"refresh_seconds": 120, "theme": "warm"}}
+
+// 响应
+{"plugin": "demo_stats", "values": {"refresh_seconds": 120, "theme": "warm"}}
+```
+
+| 情况 | 结果 |
+|---|---|
+| 缺少 `plugin` | 400 |
+| 未声明过的字段 | 忽略 + 记 warn |
+| 类型/范围非法 | 回退该字段默认值 |
+| 未知插件或无设置项 | 404 |
+
+---
+
+### `GET /api/plugins/config?plugin=`
+
+**读取某插件的当前配置**（已按 schema 校验），供插件页 JS 便捷调用。
+
+```json
+// 响应
+{"plugin": "demo_stats",
+ "values": {"refresh_seconds": 30, "show_media": true, "theme": "auto"}}
+```
+
+---
+
+### `GET /api/plugins/themes`
+
+**插件声明的 CSS 主题**。
+
+```json
+// 响应
+{"themes": [
+  {"name": "demo-skin", "owner": "demo_stats", "priority": 0,
+   "url": "/plugin-pages/demo_stats/theme.css", "inline": null}
+]}
+```
+
+`url` 非空时注入 `<link>`；`inline` 非空时注入内联 `<style>`。
+
+---
+
+### `GET /plugin-pages/<plugin>/<path>`
+
+**插件页静态资源**（HTML / CSS / JS）。只读，带路径逃逸防护；
+插件未加载或路径越界返回 404。
+
+---
+
 ## 错误码
 
 | HTTP 码 | 含义 |

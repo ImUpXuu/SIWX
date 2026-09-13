@@ -5,9 +5,14 @@ import sys
 from flask import Blueprint, jsonify, request
 
 from siwx import paths
-from siwx.mcp_server import TOOLS, _mcp_log_path, config_path, load_config, save_config
+from siwx.mcp_server import (TOOLS, _all_tools, _mcp_log_path,
+                            config_path, load_config, save_config)
 
 bp = Blueprint("mcp_api", __name__, url_prefix="/api/mcp")
+
+
+def _builtin_names() -> set:
+    return {t["name"] for t in TOOLS}
 
 
 def _command() -> dict:
@@ -23,9 +28,11 @@ def info():
     cmd = _command()
     client_cfg = {"mcpServers": {"stories-in-wx": cmd}}
     cfg = load_config()
+    builtin = _builtin_names()
     tools = [{"name": t["name"], "description": t["description"],
+              "owner": "" if t["name"] in builtin else "plugin",
               "enabled": bool(cfg.get("tools", {}).get(t["name"], True))}
-             for t in TOOLS]
+             for t in _all_tools()]
     return jsonify({
         "command": cmd,
         "client_config": json.dumps(client_cfg, ensure_ascii=False, indent=2),

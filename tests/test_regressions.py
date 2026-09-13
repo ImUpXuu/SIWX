@@ -38,6 +38,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# 宿主回归测试必须与"用户装了什么插件"解耦：插件可以（合法地）改写会话列表、
+# 消息形状与导出产物，若参与本套件会让宿主行为断言变得不确定。
+# 故在导入 siwx 之前强制零插件模式；插件自身的测试见 tests/test_plugins.py。
+os.environ["SIWX_NO_PLUGINS"] = "1"
+
 from siwx import api_chat, exporter, paths
 from siwx.exporter import _safe_name
 
@@ -118,12 +123,19 @@ def make_account(root: Path, account="wxid_test", chat="wxid_friend",
 
 
 class TempRootCase(unittest.TestCase):
-    """把 SIWX_ROOT 指向临时目录，避免污染真实 output/exports。"""
+    """把 SIWX_ROOT 指向临时目录，避免污染真实 output/exports。
+
+    同时强制"零插件"状态：本套件断言的是宿主默认行为，若 `unittest discover`
+    先跑了 tests/test_plugins.py，模块级 registry 单例里会残留合成插件的 hook
+    （会话过滤器会剔掉公众号、渲染器会改写 kind），必须在此清空。
+    """
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_"))
         self._old = os.environ.get("SIWX_ROOT")
         os.environ["SIWX_ROOT"] = str(self.tmp)
+        os.environ["SIWX_NO_PLUGINS"] = "1"
+        self._clear_plugins()
         api_chat._SHARD_INDEX.clear()
         api_chat._CONTACT_CACHE.clear()
         api_chat._SESSION_CACHE.clear()
@@ -134,11 +146,27 @@ class TempRootCase(unittest.TestCase):
             os.environ.pop("SIWX_ROOT", None)
         else:
             os.environ["SIWX_ROOT"] = self._old
+        os.environ["SIWX_NO_PLUGINS"] = "1"
+        self._clear_plugins()
         api_chat._SHARD_INDEX.clear()
         api_chat._CONTACT_CACHE.clear()
         api_chat._SESSION_CACHE.clear()
         paths._PATH_CACHE.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    @staticmethod
+    def _clear_plugins() -> None:
+        """清空模块级 registry（插件测试可能留下合成 hook）。"""
+        try:
+            from siwx.plugins.registry import registry
+        except Exception:
+            return
+        for ns in vars(registry).values():
+            if hasattr(ns, "items") and isinstance(ns.items, list):
+                ns.items = []
+        registry.metas = {}
+        registry.report = None
+        registry._loaded = True       # 已加载但为空 == 零插件
 
 
 # ── 1. _safe_name ───────────────────────────────────────────────
@@ -739,6 +767,17 @@ class TestDecryptAtomic(unittest.TestCase):
 # ── 9. CLI --json ───────────────────────────────────────────────
 
 class TestLogsApi(unittest.TestCase):
+    """/api/logs 条目是**混合形状**的：
+
+    旧/文件日志 → [ts_ms, text]；结构化日志（siwx.logger）→ [ts_ms, level, module, text]。
+    因此断言必须走统一的取文本逻辑，不能假定固定长度（插件加载等会在启动期
+    就写入结构化日志，使结构化条目非空）。
+    """
+
+    @staticmethod
+    def _texts(data):
+        items = data.get("logs", []) if isinstance(data, dict) else (data or [])
+        return [str(it[3] if len(it) >= 4 else it[1]) for it in items]
 
     def test_api_logs_includes_file_logger_messages(self):
         """日志页不能只看内存 ring；普通 logger 写入的文件日志也要显示。"""
@@ -751,8 +790,8 @@ class TestLogsApi(unittest.TestCase):
             except Exception:
                 pass
         data = server.app.test_client().get("/api/logs").get_json()
-        lines = [m for _ts, m in data.get("logs", [])]
-        self.assertTrue(any(marker in m for m in lines), "文件日志没有出现在 /api/logs")
+        self.assertTrue(any(marker in m for m in self._texts(data)),
+                        "文件日志没有出现在 /api/logs")
 
     def test_404_is_not_logged_as_uncaught_error(self):
         from siwx import server
@@ -760,8 +799,9 @@ class TestLogsApi(unittest.TestCase):
         r = server.app.test_client().get("/__definitely_missing__")
         self.assertEqual(r.status_code, 404)
         data = server.app.test_client().get("/api/logs").get_json()
-        lines = [m for _ts, m in data.get("logs", [])]
-        self.assertFalse(any("__definitely_missing__" in m or "404 Not Found" in m for m in lines[-20:]))
+        lines = self._texts(data)
+        self.assertFalse(any("__definitely_missing__" in m or "404 Not Found" in m
+                             for m in lines[-20:]))
         self.assertGreaterEqual(len(lines), before)
 
     def test_task_exception_is_persisted_to_file_logs(self):
@@ -773,8 +813,19 @@ class TestLogsApi(unittest.TestCase):
             server._siwx_logger.exception("任务执行失败: %s", e)
             server._flush_logs()
         data = server.app.test_client().get("/api/logs").get_json()
-        lines = [m for _ts, m in data.get("logs", [])]
-        self.assertTrue(any(marker in m for m in lines), "任务异常没有落盘到 /api/logs")
+        self.assertTrue(any(marker in m for m in self._texts(data)),
+                        "任务异常没有落盘到 /api/logs")
+
+    def test_all_log_items_are_renderable(self):
+        """混合形状下的健壮性：每条日志都能取出文本，且前端可安全渲染。"""
+        from siwx import server, logger as _log
+        _log.info("plugin", "unit-mixed-shape-marker")
+        items = server.app.test_client().get("/api/logs").get_json()["logs"]
+        self.assertTrue(items, "日志不应为空")
+        texts = self._texts(items)
+        self.assertTrue(all(isinstance(t, str) and t for t in texts),
+                        "存在无法取文本的日志条目")
+        self.assertTrue(any("unit-mixed-shape-marker" in t for t in texts))
 
 
 class TestCliJson(unittest.TestCase):

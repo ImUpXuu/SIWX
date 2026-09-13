@@ -171,6 +171,9 @@ def main() -> int:
     p_mcp = sub.add_parser("mcp", parents=[common], help="MCP 服务器 (stdio, 供 AI 客户端接入)")
     p_mcp.set_defaults(fn=cmd_mcp)
 
+    # ── 插件子命令（插件贡献的 CLI 入口）─────────────────────
+    _register_plugin_commands(sub, common)
+
     args = ap.parse_args()
     if not getattr(args, "cmd", None):
         # 裸跑（双击 exe）→ 默认启动 Web 控制台
@@ -181,6 +184,82 @@ def main() -> int:
     except KeyboardInterrupt:
         tui.log("\n中断")
         return 130
+
+
+def _register_plugin_commands(sub, common) -> None:
+    """把插件声明的 cli 命令挂到子命令解析器上。
+
+    契约：`{"name": "foo", "handler": "run_foo", "help": "...",
+            "args": [{"name": "--limit", "type": "int", "default": 10,
+                      "help": "..."}]}`
+
+    可用的 type 关键字：str / int / float / flag（store_true）/ count。
+    插件命令名与内置冲突时跳过并 warn（内置优先）。
+    """
+    try:
+        from siwx.plugins import ensure_loaded, registry
+        ensure_loaded()
+    except Exception:
+        return
+    if not registry.cli_commands:
+        return
+
+    from siwx import logger as log
+    reserved = set(sub.choices.keys()) if hasattr(sub, "choices") else set()
+
+    for _i, c in registry.cli_commands.sorted_items():
+        plugin = c.meta.name if c.meta else "?"
+        name = (c.name or "").strip()
+        if not name:
+            continue
+        if name in reserved:
+            log.warn("plugin", f"{plugin} 的 CLI 命令 {name} 与内置冲突，已跳过")
+            continue
+        try:
+            p = sub.add_parser(name, parents=[common],
+                               help=c.help or f"[插件 {plugin}]")
+        except Exception as e:                      # 命令名非法（argparse 会抛）
+            log.warn("plugin", f"{plugin} 的 CLI 命令 {name} 注册失败: {e}")
+            continue
+
+        for spec in c.args or []:
+            if not isinstance(spec, dict):
+                continue
+            flag_name = spec.get("name")
+            if not flag_name:
+                continue
+            kind = str(spec.get("type") or "str").lower()
+            kw = {}
+            if spec.get("help"):
+                kw["help"] = str(spec["help"])
+            if spec.get("default") is not None:
+                kw["default"] = spec["default"]
+            if kind == "flag":
+                p.add_argument(flag_name, action="store_true", **kw)
+            elif kind == "count":
+                p.add_argument(flag_name, action="count",
+                               default=kw.get("default", 0), help=kw.get("help"))
+            else:
+                tmap = {"int": int, "float": float, "str": str}
+                p.add_argument(flag_name, type=tmap.get(kind, str), **kw)
+
+        p.set_defaults(fn=_make_plugin_handler(c.handler, plugin, name))
+
+
+def _make_plugin_handler(handler, plugin: str, name: str):
+    """包装插件 handler，保证异常不把 CLI 打崩、退出码统一。"""
+    def _run(args):
+        from siwx import logger as log
+        try:
+            rc = handler(args)
+            return int(rc) if isinstance(rc, (int, float)) else 0
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log.error("plugin", f"{plugin} 的 CLI 命令 {name} 执行失败: {e}")
+            tui.log(f"插件命令 {name} 失败: {e}")
+            return 1
+    return _run
 
 
 if __name__ == "__main__":

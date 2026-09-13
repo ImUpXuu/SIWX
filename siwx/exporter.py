@@ -286,9 +286,13 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     progress(75, "写入文件…")
     fname = f"{safe}_{stamp}"
     fmt = fmt.lower()
+    plugin_writer = _plugin_export_format(fmt)
     ext = {"json": "json", "html": "html", "txt": "txt", "csv": "csv",
            "markdown": "md", "toml": "toml", "sqlite": "db",
-           "xlsx": "xlsx"}.get(fmt, "json")
+           "xlsx": "xlsx"}.get(fmt)
+    if ext is None:
+        # 插件格式：用插件声明的 ext，兜底回退 fmt 本身
+        ext = (plugin_writer.ext if plugin_writer is not None else None) or fmt
     out_file = export_dir / f"{fname}.{ext}"
 
     def export_stream_with_media():
@@ -296,8 +300,12 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             msg["mediaFile"] = media_map.get(msg["localId"])
             yield msg
 
-    # 传入缓存的 names，避免重复加载
-    if fmt == "json":
+    # ── 传入缓存的 names，避免重复加载 ───────────────────
+    if plugin_writer is not None:
+        written = _run_plugin_writer(plugin_writer, out_file, session,
+                                     export_stream_with_media(), media_map, progress,
+                                     acc_out_dir, chat, start_ts, end_ts, account, names)
+    elif fmt == "json":
         written = stream_export_json(out_file, session, export_stream_with_media(), progress)
     elif fmt == "html":
         written = _write_html_streaming(out_file, acc_out_dir, chat, start_ts,
@@ -318,6 +326,21 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
     progress(88, f"写入完成: {written} 条")
 
+    # ── 插件：导出后处理（before_zip）─────────────────────
+    # 必须在打包 zip **之前**运行：zip 一旦生成会 rmtree 掉 export_dir，
+    # after_zip 阶段只剩 zip 文件本身可操作。
+    export_result = {
+        "export_dir": str(export_dir),
+        "file": str(out_file),
+        "format": fmt, "pack": pack,
+        "message_count": written,
+    }
+    _run_after_export("before_zip", {
+        **export_result, "account": account, "chat": chat,
+        "display": display, "names": names, "media_map": media_map,
+        "progress": progress,
+    })
+
     # ── 打包 ─────────────────────────────────────────────
     zip_path = None
     if pack == "zip":
@@ -325,6 +348,13 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         zip_path = shutil.make_archive(str(root / f"{fname}_{fmt}"), "zip",
                                        root_dir=export_dir)
         shutil.rmtree(export_dir, ignore_errors=True)
+        # ── 插件：导出后处理（after_zip）───────────────────
+        # 此时 export_dir 已被删除，只提供 zip 路径。
+        _run_after_export("after_zip", {
+            **export_result, "export_dir": None, "zip": zip_path,
+            "account": account, "chat": chat, "display": display,
+            "progress": progress,
+        })
 
     progress(100, "导出完成")
     return {
@@ -337,6 +367,73 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "avatar_count": stats_ava,
         "duration_ms": int((time.time() - t0) * 1000),
     }
+
+
+# ── 插件桥接（无插件时零开销）────────────────────────────────
+
+def _plugin_export_format(fmt: str):
+    """按 fmt 取插件声明的导出格式（内置格式优先，插件只补新格式）。"""
+    try:
+        from siwx.plugins import ensure_loaded, registry
+        ensure_loaded()
+        return registry.find_export_format(fmt)
+    except Exception:
+        return None
+
+
+def _run_plugin_writer(w, path, session, stream, media_map, progress,
+                       acc_out_dir, chat, start_ts, end_ts, account, names) -> int:
+    """调用插件导出写入器。
+
+    插件契约：`writer(path, ctx) -> int`（返回写入条数）。
+
+    ctx 关键字段
+    ------------
+    stream : 惰性消息生成器（**导出形状**，非前端形状），每项字段：
+             localId / platformMessageId / createTime / localType / typeName /
+             rawContent / content / isSend / senderUsername / senderDisplayName /
+             md5 / bubbleMd5 / voice / quote / link / mediaFile
+             ``content`` 已按类型格式化（图片为 "[图片]" 等）。
+    session / names / media_map / account / chat / start_ts / end_ts
+    out_dir / progress / fmt / ext
+
+    注意：stream 只能迭代一次；需要多次遍历请自行 list() 缓存。
+    """
+    from siwx import logger as log
+    plugin = w.meta.name if w.meta else "?"
+    ctx = {
+        "session": session, "stream": stream, "media_map": media_map,
+        "account": account, "chat": chat, "start_ts": start_ts,
+        "end_ts": end_ts, "names": names, "out_dir": str(acc_out_dir),
+        "progress": progress, "fmt": w.fmt, "ext": w.ext,
+    }
+    try:
+        n = w.writer(path, ctx)
+        return int(n) if isinstance(n, (int, float)) else 0
+    except Exception as e:
+        log.error("plugin", f"{plugin} 导出格式 {w.fmt} 写入失败: {e}")
+        raise
+
+
+def _run_after_export(when: str, ctx: dict) -> None:
+    """运行 when 阶段的插件后处理钩子（逐插件隔离，不阻塞导出）。"""
+    try:
+        from siwx.plugins import ensure_loaded, registry
+        ensure_loaded()
+        hooks = registry.after_export
+    except Exception:
+        return
+    if not hooks:
+        return
+    from siwx import logger as log
+    for _i, h in hooks.sorted_items():
+        if (h.when or "before_zip") != when:
+            continue
+        plugin = h.meta.name if h.meta else (h.name or "?")
+        try:
+            h.run(dict(ctx))
+        except Exception as e:
+            log.warn("plugin", f"{plugin}.after_export({when}) 失败: {e}")
 
 
 def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,

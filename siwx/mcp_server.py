@@ -311,24 +311,80 @@ _HANDLERS = {
 }
 
 
+# ── 插件工具（内置优先；同名插件的跳过）─────────────────────────
+
+def _plugin_tools() -> list:
+    """插件贡献的 MCP 工具声明（已过滤与内置重名者）。"""
+    try:
+        from siwx.plugins import ensure_loaded, registry
+        ensure_loaded()
+    except Exception:
+        return []
+    builtin = {t["name"] for t in TOOLS}
+    out = []
+    for _i, t in registry.mcp_tools.sorted_items():
+        if t.name in builtin:
+            continue
+        out.append({
+            "name": t.name,
+            "description": t.description or f"[插件 {t.meta.name if t.meta else '?'}]",
+            "inputSchema": t.input_schema or {"type": "object", "properties": {}},
+        })
+    return out
+
+
+def _plugin_tool_handler(name: str):
+    """按名字取插件 MCP 工具处理函数；不存在返回 None。"""
+    try:
+        from siwx.plugins import ensure_loaded, registry
+        ensure_loaded()
+    except Exception:
+        return None
+    for _i, t in registry.mcp_tools.sorted_items():
+        if t.name == name:
+            return t.handler
+    return None
+
+
+def _all_tools() -> list:
+    """内置 + 插件工具（插件追加在内置之后）。"""
+    return TOOLS + _plugin_tools()
+
+
 # ── JSON-RPC 主循环 ─────────────────────────────────────────────
 
 def _tool_call(name: str, args: dict) -> str:
     if not tool_enabled(name):
         raise ValueError(f"工具 {name} 已在 MCP 配置页禁用")
     h = _HANDLERS.get(name)
+    is_plugin = False
+    if not h:
+        h = _plugin_tool_handler(name)
+        is_plugin = h is not None
     if not h:
         raise ValueError(f"未知工具: {name}")
     mcp_log.info("调用 %s args=%s", name, json.dumps(args, ensure_ascii=False)[:500])
     t0 = time.time()
     try:
         result = h(args or {})
+        # 插件工具可以返回 dict（MCP content 结构）或 str，统一成字符串
+        if isinstance(result, dict):
+            content = result.get("content")
+            if isinstance(content, list):
+                parts = [c.get("text", "") for c in content
+                         if isinstance(c, dict) and c.get("type") == "text"]
+                result = "\n".join(parts) if parts else json.dumps(
+                    result, ensure_ascii=False)
+            else:
+                result = json.dumps(result, ensure_ascii=False)
+        result = str(result)
         dt = time.time() - t0
         mcp_log.info("完成 %s 耗时 %.2fs 返回 %d 字符", name, dt, len(result))
         return result
     except Exception as e:
         dt = time.time() - t0
-        mcp_log.error("失败 %s 耗时 %.2fs: %s", name, dt, e)
+        tag = "插件工具 " if is_plugin else ""
+        mcp_log.error("失败 %s%s 耗时 %.2fs: %s", tag, name, dt, e)
         raise
 
 
@@ -379,7 +435,7 @@ def run_mcp_server() -> None:
             elif method == "ping":
                 _reply(msg, result={})
             elif method == "tools/list":
-                _reply(msg, result={"tools": [t for t in TOOLS
+                _reply(msg, result={"tools": [t for t in _all_tools()
                                               if tool_enabled(t["name"])]})
             elif method == "tools/call":
                 params = msg.get("params") or {}

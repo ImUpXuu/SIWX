@@ -57,6 +57,13 @@ python run.py decrypt --out ./output
 | [module-exporter.md](./module-exporter.md) | `exporter.py` | 多格式导出引擎（8 种格式 + 多选会话批量导出） |
 | [module-mcp.md](./module-mcp.md) | `mcp_server.py` + `api_mcp.py` | MCP 服务器（stdio, JSON-RPC 2.0, 6 个工具） + 配置 API |
 
+### 扩展与插件
+
+| 文档 | 内容 |
+|---|---|
+| [plugin-development.md](./plugin-development.md) | **插件开发指南**：60 秒上手、PLUGIN 字典速查、17 类 hook 详解、节点树语法、隔离机制 |
+| [module-plugins.md](./module-plugins.md) | 插件系统内部架构：中央注册表、契约解析、目录加载、显示条件、配置存储 |
+
 ### 辅助模块
 
 | 文档 | 模块 | 职责 |
@@ -93,6 +100,9 @@ stories-in-wx-py/
 ├── packaging/              # PyInstaller spec（win / mac）
 │   ├── siwx-win.spec
 │   └── siwx-mac.spec
+├── examples/               # 示例插件（可直接拷进用户插件目录）
+│   └── plugins/demo_stats/
+├── tests/                  # 回归测试 + 插件测试
 ├── .github/workflows/      # CI/CD
 ├── docs/                   # 本文档中心
 ├── output/                 # 解密产物（运行后生成）
@@ -114,8 +124,19 @@ stories-in-wx-py/
     ├── api_chat.py         # 聊天 API 蓝图
     ├── api_export.py       # 导出 API 蓝图
     ├── api_settings.py     # 设置 API 蓝图
+    ├── api_mcp.py          # MCP 配置 API 蓝图
+    ├── api_plugins.py      # 插件 API 蓝图
     ├── exporter.py         # 导出引擎
     ├── html_template.py    # HTML 模板
+    │
+    ├── plugins/            # 插件系统（中央注册表 + 17 类 hook）
+    │   ├── registry.py     # PluginRegistry 单例 + 命名空间
+    │   ├── contract.py     # PLUGIN 字典校验 + 字符串函数名解析
+    │   ├── loader.py       # 用户级目录扫描 + importlib 装载
+    │   ├── conditions.py   # 声明式显示条件求值
+    │   ├── config.py       # 每插件配置存储
+    │   ├── report.py       # 加载报告
+    │   └── chat_bridge.py  # registry ↔ api_chat 桥接
     │
     ├── strategies/         # 策略插件
     │   ├── __init__.py     # STRATEGY_REGISTRY

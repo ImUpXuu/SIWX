@@ -9,7 +9,7 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 from siwx import extract, keystore, logger as log
@@ -102,11 +102,53 @@ from siwx.api_settings import bp as settings_bp, load_auto_sync, mark_auto_sync_
 from siwx.api_export import bp as export_bp  # noqa: E402
 from siwx.api_mcp import bp as mcp_bp  # noqa: E402
 from siwx.api_update import bp as update_bp  # noqa: E402
+from siwx.api_plugins import bp as plugins_bp  # noqa: E402
 app.register_blueprint(chat_bp)
 app.register_blueprint(settings_bp)
 app.register_blueprint(export_bp)
 app.register_blueprint(mcp_bp)
 app.register_blueprint(update_bp)
+app.register_blueprint(plugins_bp)
+
+# 插件发现与加载（目录自动发现，逐插件隔离；失败不阻塞启动）
+from siwx.plugins import load_all as _load_plugins  # noqa: E402
+PLUGIN_REPORT = _load_plugins()
+
+
+def _register_plugin_blueprints(flask_app) -> None:
+    """把插件声明的 api_blueprints 挂到 Flask 应用上。
+
+    契约：`"api_blueprints": [make_bp]` 或 `[{"bp": make_bp()}]`，
+    即直接给出（或调用后得到）flask.Blueprint 对象；url_prefix 由蓝图自带。
+    逐个 try/except，插件失败不影响宿主启动。
+    """
+    from siwx.plugins import registry
+    if not registry.api_blueprints:
+        return
+    existing = set(flask_app.blueprints.keys())
+    for _i, entry in registry.api_blueprints.sorted_items():
+        plugin = entry.meta.name if entry.meta else "?"
+        bp_obj = entry.bp
+        try:
+            # 允许工厂形式：调用后返回 Blueprint
+            if callable(bp_obj) and not hasattr(bp_obj, "register"):
+                bp_obj = bp_obj()
+            name = getattr(bp_obj, "name", None)
+            if not name:
+                log.warn("plugin", f"{plugin} 提供的对象不是 Blueprint，跳过")
+                continue
+            if name in existing:
+                log.warn("plugin", f"{plugin} 的蓝图 {name} 与已注册重名，跳过")
+                continue
+            flask_app.register_blueprint(bp_obj)
+            existing.add(name)
+            log.info("plugin", f"已挂载插件蓝图 {name}")
+        except Exception as e:
+            log.error("plugin", f"{plugin} 蓝图挂载失败: {e}")
+
+
+# 插件自带蓝图 / 路由（内置优先，插件失败逐个隔离）
+_register_plugin_blueprints(app)
 
 
 # ── 全局状态（必须在路由和错误处理之前定义）──────────────────────
@@ -169,6 +211,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
     """任务执行器。keys/decrypt 支持指定 db_dir（引导页单账号流程）。"""
     use_cache = not no_cache
     _log(f"[job] 模式={mode}, 指定目录={db_dir or '无'}, 缓存={use_cache}, 进程数={workers or '默认'}")
+    _emit_task_event("start", mode=mode, db_dir=db_dir, out_dir=out_dir,
+                     no_cache=no_cache, workers=workers)
+    _t0 = time.time()
     try:
         dirs = ([(wxid_of(db_dir), db_dir)] if db_dir else find_wechat_data_dirs())
         if not dirs:
@@ -299,6 +344,8 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         with _lock:
             _job["ok"] = True
             _job["report"] = report
+        _emit_task_event("done", mode=mode, ok=True, report=report,
+                         duration_ms=int((time.time() - _t0) * 1000))
     except Exception as e:
         _siwx_logger.exception("任务执行失败: %s", e)
         _flush_logs()
@@ -310,15 +357,63 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _LOG_RING.append([ts, msg])
             if len(_LOG_RING) > _LOG_RING_MAX:
                 del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
+        _emit_task_event("done", mode=mode, ok=False, error=str(e),
+                         duration_ms=int((time.time() - _t0) * 1000))
     finally:
         with _lock:
             _job["running"] = False
             _job["done"] = True
 
 
+def _emit_task_event(event: str, **ctx) -> None:
+    """广播任务生命周期事件给插件监听器（start / done）。
+
+    契约：`listener(event: str, ctx: dict) -> None`。
+    逐个隔离：插件异常只写日志，绝不影响任务本身。
+    """
+    try:
+        from siwx.plugins import registry
+    except Exception:
+        return
+    if not registry.task_listeners:
+        return
+    for _i, h in registry.task_listeners.sorted_items():
+        plugin = h.meta.name if h.meta else (h.name or "?")
+        try:
+            h.fn(event, dict(ctx))
+        except Exception as e:
+            log.warn("plugin", f"{plugin}.task_listener({event}) 失败: {e}")
+
+
 @app.get("/")
 def index():
-    return send_from_directory(UI_DIR, "index.html")
+    """首页壳：把插件声明的主题 CSS 注入 head（无插件时原样返回）。"""
+    page = (UI_DIR / "index.html").read_text(encoding="utf-8")
+    links = _plugin_theme_links()
+    if links:
+        page = page.replace("</head>", f"{links}\n</head>", 1)
+    return Response(page, mimetype="text/html")
+
+
+def _plugin_theme_links() -> str:
+    """插件主题 → <link> 标签串（按 priority 排序，内置主题之后加载）。"""
+    try:
+        from siwx.plugins import registry
+    except Exception:
+        return ""
+    if not registry.themes:
+        return ""
+    parts = []
+    for _i, t in registry.themes.sorted_items():
+        plugin = t.meta.name if t.meta else ""
+        if not plugin or not t.key:
+            continue
+        # 只允许页面资源目录内的相对 css 名（防路径穿越）
+        if "/" in t.key or "\\" in t.key or ".." in t.key:
+            continue
+        parts.append(f'<link rel="stylesheet" '
+                     f'href="/plugin-pages/{plugin}/{t.key}">')
+    return "\n".join(parts)
 
 
 @app.get("/app.css")
@@ -340,6 +435,23 @@ def common_js():
 def pages(filename: str):
     """模块化页面资源：pages/<name>.html / .js / .css"""
     return send_from_directory(UI_DIR / "pages", filename)
+
+
+@app.get("/plugin-pages/<plugin>/<path:filename>")
+def plugin_pages(plugin: str, filename: str):
+    """插件页面资源：plugins/<plugin>/ui/<filename>（只读，路径逃逸防护）。"""
+    from siwx.plugins.loader import plugin_ui_dir
+    root = plugin_ui_dir(plugin)
+    if root is None:
+        abort(404)
+    try:
+        target = (root / filename).resolve()
+        target.relative_to(root.resolve())
+    except (ValueError, OSError):
+        abort(404)
+    if not target.is_file():
+        abort(404)
+    return send_from_directory(root, filename)
 
 
 @app.get("/api/status")
