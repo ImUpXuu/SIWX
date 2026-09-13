@@ -110,16 +110,23 @@ hiddenimports=[
 
 ```json
 {
-  "version": "0.2.5",
-  "date": "2026-09-06 20:00:00",
-  "notes": "更新说明",
+  "version": "5.0.0",
+  "date": "2026-09-12 07:28:41",
+  "notes": "stories-in-wx v5.0.0",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/stories-in-wx-v0.2.5-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/stories-in-wx-v0.2.5-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.0/stories-in-wx-v5.0.0-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.0/stories-in-wx-v5.0.0-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v0.2.5/SHA256SUMS.txt"
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.0/SHA256SUMS.txt",
+  "update_scripts": {
+    "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
+    "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
+  }
 }
 ```
+
+> 说明：`version.json` 由 `scripts/generate_version_json.py` 从 `siwx.__version__`
+> 与 tag 注释自动生成，勿手工维护版本号。
 
 ---
 

@@ -1,6 +1,6 @@
 # stories-in-wx 文档中心
 
-> **版本**: v0.2.5 | **日期**: 2026-09-06 | **平台**: Windows (依赖 DPAPI / 微信进程读取)
+> **版本**: v5.0.0 | **日期**: 2026-09-13 | **平台**: Windows / macOS (依赖 DPAPI / 微信进程读取)
 
 ## 一句话定位
 
@@ -99,7 +99,7 @@ stories-in-wx-py/
 ├── exports/                # 导出产物（运行后生成）
 │
 └── siwx/                   # 核心包
-    ├── __init__.py         # __version__ = "0.2.0"
+    ├── __init__.py         # __version__ = "5.0.0"（版本唯一来源）
     ├── cli.py              # argparse 子命令 + 流程编排
     ├── extract.py          # 编排器（全局收割 + 两层缓存）
     ├── sqlcipher.py        # SQLCipher 4 原语 + 流式解密
