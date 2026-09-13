@@ -115,18 +115,21 @@ function setBusy(b) {
   if (b) document.getElementById('g-finish').classList.add('hidden');
 }
 
-function rememberManualAccount(d) {
+function rememberManualAccounts(d) {
   if (!state.manualAccounts) state.manualAccounts = [];
-  const acc = { wxid: d.wxid, db_dir: d.db_dir, db_count: d.db_count || 0,
-                keys_cached: 0, total_salts: 0, manual: true };
-  const exists = [...(state.accounts || []), ...state.manualAccounts]
-    .some(a => String(a.db_dir || '').toLowerCase() === String(acc.db_dir).toLowerCase());
-  if (!exists) state.manualAccounts.push(acc);
-  state.account = acc;
+  const items = (d.accounts?.length ? d.accounts : [{ wxid: d.wxid, db_dir: d.db_dir }])
+    .map(a => ({ wxid: a.wxid, db_dir: a.db_dir, db_count: a.db_count || 0,
+                 keys_cached: 0, total_salts: 0, manual: true }));
+  for (const acc of items) {
+    const exists = [...(state.accounts || []), ...state.manualAccounts]
+      .some(a => String(a.db_dir || '').toLowerCase() === String(acc.db_dir).toLowerCase());
+    if (!exists) state.manualAccounts.push(acc);
+  }
+  state.account = items[0];
   document.getElementById('g-start').disabled = false;
   document.getElementById('g-to3').disabled = false;
-  document.getElementById('g3-hint').textContent = `对 ${acc.wxid} 一键提取密钥并解密。`;
-  return acc;
+  document.getElementById('g3-hint').textContent = `对 ${state.account.wxid} 一键提取密钥并解密。`;
+  return items;
 }
 
 function bindManualPath(prefix, opts = {}) {
@@ -160,10 +163,11 @@ function bindManualPath(prefix, opts = {}) {
       });
       const d = await r.json();
       if (d.ok) {
-        const acc = rememberManualAccount(d);
+        const accounts = rememberManualAccounts(d);
+        const names = accounts.map(a => a.wxid).join('、');
         manualMsg.textContent = opts.firstStep
-          ? `✓ 已保存: ${acc.wxid}。现在可以点「开始配置」。`
-          : `✓ 已保存并添加: ${acc.wxid}`;
+          ? `✓ 已保存 ${accounts.length} 个账号: ${names}。现在可以点「开始配置」。`
+          : `✓ 已保存并添加 ${accounts.length} 个账号: ${names}`;
         manualMsg.style.color = 'var(--ok-fg)';
         manualPath.value = '';
         if (document.getElementById('g-accounts')) renderAccounts();

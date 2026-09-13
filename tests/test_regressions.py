@@ -919,7 +919,12 @@ class TestChatTimelineAndStats(TempRootCase):
         tl = c.get(f"/api/chat/timeline?account={account}&chat={chat}")
         self.assertEqual(tl.status_code, 200)
         self.assertEqual(tl.get_json()["total"], 6)
-        self.assertTrue(tl.get_json()["days"])
+        self.assertTrue(tl.get_json()["months"])
+        month = tl.get_json()["months"][0]["month"]
+        days = c.get(f"/api/chat/timeline?account={account}&chat={chat}&month={month}")
+        self.assertEqual(days.status_code, 200)
+        self.assertEqual(days.get_json()["total"], 6)
+        self.assertTrue(days.get_json()["days"])
 
         st = c.get(f"/api/chat/stats?account={account}&chat={chat}")
         self.assertEqual(st.status_code, 200)
@@ -943,6 +948,28 @@ class TestManualWechatPaths(TempRootCase):
         self.assertTrue(d["saved"])
         self.assertTrue(manual_paths_file().is_file())
         self.assertIn(("wxid_manual", str(db_dir.resolve())), load_manual_data_dirs())
+
+    def test_resolves_account_subdir_and_database_file(self):
+        from siwx.discover import resolve_db_paths
+        db_dir = self.tmp / "xwechat_files" / "wxid_one" / "db_storage"
+        message = db_dir / "message"
+        message.mkdir(parents=True)
+        db_file = message / "message_0.db"
+        db_file.write_bytes(b"")
+        expected = [{"wxid": "wxid_one", "db_dir": str(db_dir.resolve())}]
+        self.assertEqual(resolve_db_paths(str(db_dir.parent)), expected)
+        self.assertEqual(resolve_db_paths(str(message)), expected)
+        self.assertEqual(resolve_db_paths(str(db_file)), expected)
+
+    def test_xwechat_root_finds_multiple_accounts(self):
+        from siwx.discover import validate_db_path
+        root = self.tmp / "xwechat_files"
+        for wxid in ("wxid_a", "wxid_b"):
+            (root / wxid / "db_storage").mkdir(parents=True)
+        d = validate_db_path(str(root))
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["account_count"], 2)
+        self.assertEqual({a["wxid"] for a in d["accounts"]}, {"wxid_a", "wxid_b"})
 
 
 # ── 8. 解密原子写 ───────────────────────────────────────────────

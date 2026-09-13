@@ -62,12 +62,13 @@ def save_manual_data_dirs(db_dirs: list) -> None:
 
 
 def add_manual_data_dir(path_str: str) -> dict:
-    """验证并持久化一个手动微信目录。"""
+    """解析、验证并持久化手动路径；根目录可一次加入多个账号。"""
     r = validate_db_path(path_str)
     if not r.get("ok"):
         return r
+    accounts = r.get("accounts") or [{"wxid": r["wxid"], "db_dir": r["db_dir"]}]
     existing = [db for _wxid, db in load_manual_data_dirs()]
-    existing.append(r["db_dir"])
+    existing.extend(a["db_dir"] for a in accounts)
     save_manual_data_dirs(existing)
     r["saved"] = True
     return r
@@ -181,30 +182,96 @@ def find_wechat_data_dirs():
     return out
 
 
-def validate_db_path(path_str: str) -> dict:
-    """验证手动输入的路径是否有效。
+def _normalize_input_path(path_str: str) -> Path:
+    """清理复制来的引号、环境变量和数据库文件路径。"""
+    raw = str(path_str or "").strip().strip('"').strip("'").strip()
+    raw = os.path.expandvars(os.path.expanduser(raw))
+    p = Path(raw)
+    if p.is_file():
+        p = p.parent
+    try:
+        return p.resolve()
+    except OSError:
+        return p
 
-    返回 {"ok": bool, "wxid": str, "db_dir": str, "error": str}
+
+def _accounts_under(root: Path) -> list:
+    """识别 xwechat_files 根目录下的账号；只查一层，不做昂贵递归。"""
+    out = []
+    if not root.is_dir():
+        return out
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return out
+    for child in children:
+        db = child / "db_storage"
+        if child.is_dir() and db.is_dir():
+            try:
+                db = db.resolve()
+            except OSError:
+                pass
+            out.append({"wxid": child.name, "db_dir": str(db)})
+    return sorted(out, key=lambda x: (x["wxid"], x["db_dir"]))
+
+
+def resolve_db_paths(path_str: str) -> list:
+    """把常见微信路径形态统一解析成账号级 db_storage 目录。
+
+    支持：db_storage 本身、账号目录、db_storage 内任意子目录或 .db 文件、
+    xwechat_files 根目录，以及其上一级（直接包含 xwechat_files）。
     """
-    p = Path(path_str.strip().strip('"').strip("'"))
+    p = _normalize_input_path(path_str)
+    if not p.is_dir():
+        return []
+
+    # 输入位于 db_storage 内部（message 子目录、具体数据库文件等）。
+    for node in (p, *p.parents):
+        if node.name.casefold() == "db_storage" and node.is_dir():
+            return [{"wxid": node.parent.name, "db_dir": str(node)}]
+
+    # 输入账号目录，或账号目录内与 db_storage 同级的其他目录。
+    for node in (p, *list(p.parents)[:3]):
+        db = node / "db_storage"
+        if db.is_dir():
+            try:
+                db = db.resolve()
+            except OSError:
+                pass
+            return [{"wxid": node.name, "db_dir": str(db)}]
+
+    # 输入 xwechat_files 根目录，或它的上一级/常见容器目录。
+    candidates = [p, p / "xwechat_files", p / "Documents" / "xwechat_files",
+                  p / "Data" / "Documents" / "xwechat_files"]
+    seen = set()
+    accounts = []
+    for root in candidates:
+        try:
+            key = str(root.resolve()).casefold()
+        except OSError:
+            key = str(root).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        accounts.extend(_accounts_under(root))
+    unique = {}
+    for a in accounts:
+        unique[a["db_dir"].casefold()] = a
+    return list(unique.values())
+
+
+def validate_db_path(path_str: str) -> dict:
+    """验证并解析手动路径；根目录可返回多个账号。"""
+    p = _normalize_input_path(path_str)
     if not p.is_dir():
         return {"ok": False, "error": f"目录不存在: {p}"}
-    try:
-        p = p.resolve()
-    except OSError:
-        pass
-    # 检查是否是 db_storage 目录
-    if p.name == "db_storage":
-        return {"ok": True, "wxid": p.parent.name, "db_dir": str(p)}
-    # 检查目录下是否有 db_storage
-    db_storage = p / "db_storage"
-    if db_storage.is_dir():
-        return {"ok": True, "wxid": p.name, "db_dir": str(db_storage.resolve())}
-    # 检查目录下是否有 .db 文件（可能是 message 等子目录）
-    dbs = list(p.glob("*.db"))
-    if dbs:
-        return {"ok": True, "wxid": p.parent.name, "db_dir": str(p)}
-    return {"ok": False, "error": "未找到 db_storage 子目录或 .db 文件，请确认路径"}
+    accounts = resolve_db_paths(path_str)
+    if not accounts:
+        return {"ok": False, "error":
+                "未识别到微信数据目录。可填写 xwechat_files、账号目录、db_storage、其内部子目录或 .db 文件"}
+    first = accounts[0]
+    return {"ok": True, "wxid": first["wxid"], "db_dir": first["db_dir"],
+            "accounts": accounts, "account_count": len(accounts)}
 
 
 def find_wechat_storage_in_registry() -> str:
