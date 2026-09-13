@@ -71,6 +71,7 @@ TYPE_GROUPS = [
 _CACHE_LOCK = threading.Lock()
 # 进程内缓存：{account: (signature, stats_dict)}，避免同进程反复读 json
 _MEM_CACHE: dict = {}
+_CONTACT_NAME_CACHE: dict = {}   # {(path, mode, key): (file_sig, value)}
 
 _CACHE_VERSION = 3      # 统计口径变更时递增，使旧缓存自动失效
                         # v3: 增加 by_day，使自定义时间范围真正过滤全页指标
@@ -127,10 +128,9 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
     """单个分片的统计（供线程池并行调用）。
 
     关键优化：把该分片所有 `Msg_*` 表 UNION ALL 后物化到一张 TEMP 表，
-    随后 5 条聚合语句共享这次扫描结果 —— 否则每个维度都要重新扫一遍全表
-    （实测：逐维度扫描 8.8s，共享物化 4.4s，加 8 线程并行 3.5s）。
-    时间维度交给 SQLite 的 strftime 在 SQL 侧完成，不回传原始时间戳，
-    避免把几十万行拉进 Python 解释器。
+    并在物化时一次性算好日/月/小时/星期列。随后只用两趟 GROUP BY：
+    一趟产出总量、类型、月/日、小时、星期；一趟产出私聊排行。
+    这样既保留日级时间范围能力，又避免每个维度反复扫表、反复 strftime。
 
     会话归属的处理：`Msg_<md5(chat)>` 的表名反向 hash 不出 username，但
     Name2Id 里有 rowid→username，可以正向 hash 后与表名比对，得到
@@ -173,88 +173,58 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
         union = " UNION ALL ".join(parts)
         try:
             conn.execute("PRAGMA temp_store=MEMORY")
+            # 一次性算出日/月/小时/星期，后续 GROUP BY 直接用列，避免重复 strftime。
             conn.execute(
                 f"CREATE TEMP TABLE _siwx_s AS "
                 f"SELECT create_time, (local_type & {_TYPE_MASK}) AS k, "
-                f"real_sender_id AS sid, cid FROM ({union}) WHERE create_time > 0")
+                f"real_sender_id AS sid, cid, "
+                f"strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime') AS d, "
+                f"strftime('%Y-%m', create_time, 'unixepoch', 'localtime') AS m, "
+                f"CAST(strftime('%H', create_time, 'unixepoch', 'localtime') AS INTEGER) AS h, "
+                f"((CAST(strftime('%w', create_time, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7) AS w "
+                f"FROM ({union}) WHERE create_time > 0")
         except sqlite3.Error:
             return out
 
-        out["total"] = conn.execute("SELECT COUNT(*) FROM _siwx_s").fetchone()[0] or 0
+        # 主聚合：一趟 GROUP BY 同时喂给全局类型/月/小时/星期和日级桶。
+        for day, mon, hour, weekday, k, cnt, mn, mx in conn.execute(
+                "SELECT d, m, h, w, k, COUNT(*), MIN(create_time), MAX(create_time) "
+                "FROM _siwx_s GROUP BY d, m, h, w, k"):
+            if not day:
+                continue
+            out["total"] += cnt
+            out["type_counts"][k] = out["type_counts"].get(k, 0) + cnt
+            if mon:
+                out["by_month"][mon] = out["by_month"].get(mon, 0) + cnt
+            if hour is not None:
+                out["by_hour"][int(hour)] += cnt
+            if weekday is not None:
+                out["by_weekday"][int(weekday)] += cnt
+            if mn and (not out["ts_min"] or mn < out["ts_min"]):
+                out["ts_min"] = mn
+            if mx and mx > out["ts_max"]:
+                out["ts_max"] = mx
+
+            b = _day_bucket(out["by_day"], day)
+            b["total"] += cnt
+            b["type_counts"][k] = b["type_counts"].get(k, 0) + cnt
+            if hour is not None:
+                b["by_hour"][int(hour)] += cnt
+            if weekday is not None:
+                b["by_weekday"][int(weekday)] += cnt
+            if mn and (not b["ts_min"] or mn < b["ts_min"]):
+                b["ts_min"] = mn
+            if mx and mx > b["ts_max"]:
+                b["ts_max"] = mx
+
         if not out["total"]:
             return out
 
-        # 时间跨度
-        r = conn.execute("SELECT MIN(create_time), MAX(create_time) FROM _siwx_s").fetchone()
-        if r:
-            out["ts_min"], out["ts_max"] = r[0] or 0, r[1] or 0
-
-        # 类型分布
-        for k, cnt in conn.execute("SELECT k, COUNT(*) FROM _siwx_s GROUP BY k"):
-            out["type_counts"][k] = out["type_counts"].get(k, 0) + cnt
-
-        # 月度趋势（SQLite 侧 strftime，localtime 保证与用户时区一致）
-        for k, cnt in conn.execute(
-                "SELECT strftime('%Y-%m', create_time, 'unixepoch', 'localtime'), "
-                "COUNT(*) FROM _siwx_s GROUP BY 1"):
-            if k:
-                out["by_month"][k] = out["by_month"].get(k, 0) + cnt
-
-        # 小时活跃度
-        for k, cnt in conn.execute(
-                "SELECT strftime('%H', create_time, 'unixepoch', 'localtime'), "
-                "COUNT(*) FROM _siwx_s GROUP BY 1"):
-            if k:
-                out["by_hour"][int(k)] += cnt
-
-        # 星期分布（SQLite %w: 0=周日；转成 0=周一）
-        for k, cnt in conn.execute(
-                "SELECT strftime('%w', create_time, 'unixepoch', 'localtime'), "
-                "COUNT(*) FROM _siwx_s GROUP BY 1"):
-            if k:
-                out["by_weekday"][(int(k) + 6) % 7] += cnt
-
-        # 发送者（全局 real_sender_id，保留供扩展用）
-        for sid, cnt in conn.execute(
-                "SELECT sid, COUNT(*) FROM _siwx_s WHERE sid IS NOT NULL GROUP BY sid"):
-            out["by_sender"][sid] = out["by_sender"].get(sid, 0) + cnt
-
-        # 私聊会话消息量：cid 只在私聊表上非空（群聊/公众号写入空串）
-        for un, cnt in conn.execute(
-                "SELECT cid, COUNT(*) FROM _siwx_s WHERE cid <> '' GROUP BY cid"):
-            out["by_chat"][un] = out["by_chat"].get(un, 0) + cnt
-
-        # 日级缓存：用于前端自定义时间范围。这里仍然只做 SQL 聚合，不回传原始消息。
-        for day, cnt, mn, mx in conn.execute(
-                "SELECT strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime'), "
-                "COUNT(*), MIN(create_time), MAX(create_time) FROM _siwx_s GROUP BY 1"):
-            if day:
-                b = _day_bucket(out["by_day"], day)
-                b["total"] += cnt
-                b["ts_min"] = mn if (mn and (not b["ts_min"] or mn < b["ts_min"])) else b["ts_min"]
-                b["ts_max"] = mx if (mx and mx > b["ts_max"]) else b["ts_max"]
-        for day, k, cnt in conn.execute(
-                "SELECT strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime'), "
-                "k, COUNT(*) FROM _siwx_s GROUP BY 1, 2"):
-            if day:
-                b = _day_bucket(out["by_day"], day)
-                b["type_counts"][k] = b["type_counts"].get(k, 0) + cnt
-        for day, h, cnt in conn.execute(
-                "SELECT strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime'), "
-                "strftime('%H', create_time, 'unixepoch', 'localtime'), "
-                "COUNT(*) FROM _siwx_s GROUP BY 1, 2"):
-            if day and h:
-                _day_bucket(out["by_day"], day)["by_hour"][int(h)] += cnt
-        for day, w, cnt in conn.execute(
-                "SELECT strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime'), "
-                "strftime('%w', create_time, 'unixepoch', 'localtime'), "
-                "COUNT(*) FROM _siwx_s GROUP BY 1, 2"):
-            if day and w:
-                _day_bucket(out["by_day"], day)["by_weekday"][(int(w) + 6) % 7] += cnt
+        # 私聊排行：只需按 day + cid 聚合，一趟扫完全量和日级排行。
         for day, un, cnt in conn.execute(
-                "SELECT strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime'), "
-                "cid, COUNT(*) FROM _siwx_s WHERE cid <> '' GROUP BY 1, 2"):
+                "SELECT d, cid, COUNT(*) FROM _siwx_s WHERE cid <> '' GROUP BY d, cid"):
             if day and un:
+                out["by_chat"][un] = out["by_chat"].get(un, 0) + cnt
                 b = _day_bucket(out["by_day"], day)
                 b["by_chat"][un] = b["by_chat"].get(un, 0) + cnt
 
@@ -436,11 +406,27 @@ def _is_private_chat(username: str, verify_flag: int = 0, alias: str = "") -> bo
     return True
 
 
+def _file_sig(p: Path):
+    """单文件签名，用于联系人辅助缓存。"""
+    try:
+        st = p.stat()
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
 def _contact_flags(account: str) -> dict:
     """username → (verify_flag, alias)，用于识别没走 gh_ 前缀的公众号。"""
     p = _out_root() / account / "contact" / "contact.db"
-    if not p.is_file():
+    sig = _file_sig(p)
+    if sig is None:
         return {}
+    key = (str(p), "flags")
+    with _CACHE_LOCK:
+        hit = _CONTACT_NAME_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+
     out: dict = {}
     try:
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
@@ -453,9 +439,12 @@ def _contact_flags(account: str) -> dict:
             if un:
                 out[un] = (int(vf or 0), (al or "").strip())
     except sqlite3.Error:
+        # 老测试/旧库可能没有 verify_flag；没有认证信息时只靠 username 规则过滤。
         pass
     finally:
         conn.close()
+    with _CACHE_LOCK:
+        _CONTACT_NAME_CACHE[key] = (sig, out)
     return out
 
 
@@ -469,8 +458,15 @@ def _contact_names(account: str, usernames) -> dict:
     if not wanted:
         return {}
     p = _out_root() / account / "contact" / "contact.db"
-    if not p.is_file():
+    sig = _file_sig(p)
+    if sig is None:
         return {u: u for u in wanted}
+
+    key = (str(p), "names", tuple(wanted))
+    with _CACHE_LOCK:
+        hit = _CONTACT_NAME_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
 
     names = {u: u for u in wanted}
     try:
@@ -498,6 +494,8 @@ def _contact_names(account: str, usernames) -> dict:
         pass
     finally:
         conn.close()
+    with _CACHE_LOCK:
+        _CONTACT_NAME_CACHE[key] = (sig, names)
     return names
 
 
@@ -720,8 +718,13 @@ def clear_cache(account: str = None) -> None:
     with _CACHE_LOCK:
         if account:
             _MEM_CACHE.pop(account, None)
+            acc_contact = str(_out_root() / account / "contact" / "contact.db")
+            for k in list(_CONTACT_NAME_CACHE):
+                if k and k[0] == acc_contact:
+                    _CONTACT_NAME_CACHE.pop(k, None)
         else:
             _MEM_CACHE.clear()
+            _CONTACT_NAME_CACHE.clear()
     root = _out_root()
     if not root.is_dir():
         return
