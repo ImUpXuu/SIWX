@@ -448,55 +448,63 @@ def _contact_flags(account: str) -> dict:
     return out
 
 
-def _contact_names(account: str, usernames) -> dict:
-    """username → 显示名（备注 > 昵称 > 微信号）。
+def _best_contact_name(un, remark, nick, alias) -> str:
+    """按聊天页同款优先级取联系人显示名。"""
+    un = (un or "").strip()
+    best = un
+    for v in (remark, nick, alias):
+        v = (v or "").strip()
+        if v and v != un and "\ufffd" not in v:
+            best = v
+            break
+    return best
 
-    排序与 `api_chat._contact_names` 保持一致，保证统计页与聊天页显示同一个名字。
-    只查需要的 username（IN 分块），避免为了一个排行去扫 3800 行 contact 表。
+
+def _contact_name_map(account: str) -> dict:
+    """全量 username → 显示名缓存。
+
+    日期范围切换时 top 20 可能不断变化，如果每次都按 IN 查询 contact.db，
+    用户连续调范围会感觉卡。这里第一次读全表（真实样本约 3800 行，成本很低），
+    后续所有范围直接内存取子集。
     """
-    wanted = sorted({(u or "").strip() for u in usernames if (u or "").strip()})
-    if not wanted:
-        return {}
     p = _out_root() / account / "contact" / "contact.db"
     sig = _file_sig(p)
     if sig is None:
-        return {u: u for u in wanted}
-
-    key = (str(p), "names", tuple(wanted))
+        return {}
+    key = (str(p), "names_all")
     with _CACHE_LOCK:
         hit = _CONTACT_NAME_CACHE.get(key)
         if hit is not None and hit[0] == sig:
             return hit[1]
 
-    names = {u: u for u in wanted}
+    names: dict = {}
     try:
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
     except sqlite3.Error:
         return names
     try:
-        for i in range(0, len(wanted), 400):
-            chunk = wanted[i:i + 400]
-            marks = ",".join("?" for _ in chunk)
-            sql = ("SELECT username, remark, nick_name, alias FROM contact "
-                   f"WHERE username IN ({marks})")
-            for un, remark, nick, alias in conn.execute(sql, chunk):
-                un = (un or "").strip()
-                if not un:
-                    continue
-                best = un
-                for v in (remark, nick, alias):
-                    v = (v or "").strip()
-                    if v and v != un and "\ufffd" not in v:
-                        best = v
-                        break
-                names[un] = best
+        for un, remark, nick, alias in conn.execute(
+                "SELECT username, remark, nick_name, alias FROM contact"):
+            un = (un or "").strip()
+            if un:
+                names[un] = _best_contact_name(un, remark, nick, alias)
     except sqlite3.Error:
-        pass
+        # schema 不匹配时退化为无昵称，不影响统计主流程。
+        names = {}
     finally:
         conn.close()
     with _CACHE_LOCK:
         _CONTACT_NAME_CACHE[key] = (sig, names)
     return names
+
+
+def _contact_names(account: str, usernames) -> dict:
+    """username → 显示名（备注 > 昵称 > 微信号）。"""
+    wanted = sorted({(u or "").strip() for u in usernames if (u or "").strip()})
+    if not wanted:
+        return {}
+    all_names = _contact_name_map(account)
+    return {u: all_names.get(u, u) for u in wanted}
 
 
 def _private_sender_ranking(account: str, by_chat: dict, limit: int = 20) -> list:
