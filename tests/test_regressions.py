@@ -1145,7 +1145,7 @@ class TestVersionSource(unittest.TestCase):
         from siwx import __version__
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
-        self.assertEqual(__version__, "5.0.0")
+        self.assertEqual(__version__, "5.0.1")
 
 
 class TestCryptoIntact(unittest.TestCase):
