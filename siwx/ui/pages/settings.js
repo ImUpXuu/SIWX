@@ -113,6 +113,155 @@ async function loadVersion() {
   }
 }
 
+/* ── 插件设置：由 /api/plugins/settings 下发 schema，前端自动渲染 ────── */
+
+const PLUGIN_TYPE_LABEL = {
+  str: '文本', int: '整数', float: '小数', bool: '开关',
+  choice: '单选', text: '多行文本', list: '列表',
+};
+
+/** 单个设置项的输入控件（按 type 分派） */
+function pluginControl(plugin, it) {
+  const id = `s-plg-${plugin}-${it.key}`;
+  const val = it.value === undefined || it.value === null ? it.default : it.value;
+
+  if (it.type === 'bool') {
+    return `<label class="f-chk"><input type="checkbox" data-plg="${esc(plugin)}" data-key="${esc(it.key)}"
+              data-type="bool" id="${id}"${val ? ' checked' : ''}> ${val ? '已开启' : '已关闭'}</label>`;
+  }
+  if (it.type === 'choice') {
+    const opts = (it.choices || []).map(c =>
+      `<option value="${esc(c)}"${String(c) === String(val) ? ' selected' : ''}>${esc(c)}</option>`).join('');
+    return `<select class="f-input" id="${id}" data-plg="${esc(plugin)}" data-key="${esc(it.key)}"
+              data-type="choice">${opts}</select>`;
+  }
+  if (it.type === 'int' || it.type === 'float') {
+    const step = it.type === 'float' ? ' step="any"' : '';
+    const mn = it.min === null || it.min === undefined ? '' : ` min="${it.min}"`;
+    const mx = it.max === null || it.max === undefined ? '' : ` max="${it.max}"`;
+    return `<input class="f-input" type="number"${step}${mn}${mx} id="${id}"
+              data-plg="${esc(plugin)}" data-key="${esc(it.key)}" data-type="${it.type}"
+              value="${esc(val ?? '')}" style="width:auto;min-width:110px">`;
+  }
+  if (it.type === 'text') {
+    return `<textarea class="f-input" id="${id}" data-plg="${esc(plugin)}" data-key="${esc(it.key)}"
+              data-type="text" rows="3">${esc(val ?? '')}</textarea>`;
+  }
+  return `<input class="f-input" type="text" id="${id}" data-plg="${esc(plugin)}"
+            data-key="${esc(it.key)}" data-type="str" value="${esc(val ?? '')}">`;
+}
+
+/** 读取某插件表单当前值 */
+function readPluginValues(plugin) {
+  const out = {};
+  document.querySelectorAll(`[data-plg="${CSS.escape(plugin)}"]`).forEach(inp => {
+    const t = inp.dataset.type || 'str';
+    if (t === 'bool') out[inp.dataset.key] = inp.checked;
+    else if (t === 'int') out[inp.dataset.key] = parseInt(inp.value, 10);
+    else if (t === 'float') out[inp.dataset.key] = parseFloat(inp.value);
+    else out[inp.dataset.key] = inp.value;
+  });
+  return out;
+}
+
+async function loadPluginSettings() {
+  const card = el('s-plugins-card');
+  const box = el('s-plugins');
+  const hint = el('s-plugins-hint');
+  let data;
+  try {
+    data = await fetchJSON('/api/plugins/settings');
+  } catch (e) {
+    card.hidden = true;
+    return;                      // 插件系统不可用 → 整卡隐藏，不影响宿主
+  }
+  const plugins = (data && data.plugins) || [];
+  if (!plugins.length) { card.hidden = true; return; }
+
+  card.hidden = false;
+  const total = plugins.reduce((n, p) => n + p.items.length, 0);
+  hint.textContent = `${plugins.length} 个插件 · ${total} 项配置`;
+
+  box.innerHTML = `
+    <div id="s-plugins-list">
+      ${plugins.map(p => {
+        // 按 group 归组，保留声明顺序
+        const groups = [];
+        p.items.forEach(it => {
+          const g = it.group || '常规';
+          let bucket = groups.find(x => x.name === g);
+          if (!bucket) { bucket = { name: g, items: [] }; groups.push(bucket); }
+          bucket.items.push(it);
+        });
+        return `
+        <div class="plg-block">
+          <div class="plg-head">
+            <b>${esc(p.plugin)}</b>
+            <span class="pill pill-gray">v${esc(p.version || '?')}</span>
+            <span class="dim">${esc(p.description || '')}</span>
+          </div>
+          ${groups.map(g => `
+            ${groups.length > 1 ? `<div class="plg-group">${esc(g.name)}</div>` : ''}
+            <div class="s-actions">
+              ${g.items.map(it => `
+                <div class="s-item">
+                  <b>${esc(it.label || it.key)}
+                     <span class="dim" style="font-weight:400">· ${esc(PLUGIN_TYPE_LABEL[it.type] || it.type)}</span></b>
+                  ${it.help ? `<span class="dim">${esc(it.help)}</span>` : ''}
+                  ${pluginControl(p.plugin, it)}
+                </div>`).join('')}
+            </div>`).join('')}
+          <div class="s-inline" style="margin-top:10px">
+            <button class="btn btn-primary" data-plg-save="${esc(p.plugin)}">保存</button>
+            <span class="dim" data-plg-status="${esc(p.plugin)}"></span>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`;
+
+  // 绑定保存
+  box.querySelectorAll('[data-plg-save]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const plugin = btn.dataset.plgSave;
+      const status = box.querySelector(`[data-plg-status="${CSS.escape(plugin)}"]`);
+      btn.disabled = true;
+      try {
+        const r = await fetchJSON('/api/plugins/settings', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ plugin, values: readPluginValues(plugin) }),
+        });
+        status.textContent = '✓ 已保存';
+        status.style.color = 'var(--ok, #16a34a)';
+        // 回填：服务端可能对越界值做了夹紧
+        Object.entries(r.values || {}).forEach(([k, v]) => {
+          const inp = box.querySelector(`[data-plg="${CSS.escape(plugin)}"][data-key="${CSS.escape(k)}"]`);
+          if (!inp) return;
+          const t = inp.dataset.type;
+          if (t === 'bool') { inp.checked = !!v; }
+          else if (t === 'int' || t === 'float') { inp.value = v != null ? v : ''; }
+          else { inp.value = v != null ? v : ''; }
+        });
+      } catch (e) {
+        status.textContent = '✗ ' + e.message;
+        status.style.color = 'var(--danger, #dc2626)';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  // bool 开关的文案跟随状态；数字/文本改动后清除上次提示
+  box.querySelectorAll('[data-plg]').forEach(inp => {
+    inp.addEventListener('change', () => {
+      if (inp.dataset.type === 'bool') {
+        inp.parentElement.lastChild.textContent = inp.checked ? ' 已开启' : ' 已关闭';
+      }
+      const st = box.querySelector(`[data-plg-status="${CSS.escape(inp.dataset.plg)}"]`);
+      if (st) st.textContent = '';
+    });
+  });
+}
+
 function confirmThen(msg, fn) {
   if (window.confirm(msg)) fn();
 }
@@ -121,6 +270,7 @@ export async function init() {
   await loadVersion();
   await loadOverview();
   await loadAutoSync();
+  await loadPluginSettings();
 
   el('s-auto-sync-save').addEventListener('click', async () => {
     try {

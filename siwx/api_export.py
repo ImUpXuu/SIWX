@@ -8,6 +8,42 @@ from siwx import paths as _paths
 
 bp = Blueprint("export_api", __name__, url_prefix="/api/export")
 
+# 内置导出格式（顺序即前端下拉顺序）
+BUILTIN_FORMATS = [
+    {"fmt": "json", "label": "JSON（结构化全量）"},
+    {"fmt": "html", "label": "HTML（自包含网页）"},
+    {"fmt": "txt", "label": "TXT（纯文本）"},
+    {"fmt": "csv", "label": "CSV（表格）"},
+    {"fmt": "xlsx", "label": "XLSX（Excel）"},
+    {"fmt": "markdown", "label": "Markdown"},
+    {"fmt": "toml", "label": "TOML"},
+    {"fmt": "sqlite", "label": "SQLite 数据库"},
+]
+
+
+@bp.get("/formats")
+def formats():
+    """可用导出格式 = 内置 + 插件贡献（插件追加在内置之后）。
+
+    返回 owner 便于前端标注来源；内置格式 owner 为空串。
+    """
+    out = [{**f, "owner": "", "ext": f["fmt"]} for f in BUILTIN_FORMATS]
+    builtin = {f["fmt"] for f in BUILTIN_FORMATS}
+    try:
+        from siwx.plugins import ensure_loaded, registry
+        ensure_loaded()
+        for _i, w in registry.export_writers.sorted_items():
+            if w.fmt in builtin:
+                continue                       # 内置同名额优先
+            out.append({
+                "fmt": w.fmt, "label": w.label or w.fmt,
+                "ext": w.ext or w.fmt,
+                "owner": w.meta.name if w.meta else "",
+            })
+    except Exception:
+        pass
+    return jsonify({"formats": out})
+
 
 @bp.get("/download")
 def download():

@@ -15,7 +15,20 @@ function match(s, kw) {
   return !k || s.display.toLowerCase().includes(k) || s.username.toLowerCase().includes(k);
 }
 
+/** 导出格式下拉 = 内置 + 插件（插件追加在内置之后，并标注来源） */
+async function loadFormats() {
+  const sel = el('e-fmt');
+  try {
+    const { formats } = await fetchJSON('/api/export/formats');
+    if (!Array.isArray(formats) || !formats.length) return;   // 保留 HTML 里的内置项
+    sel.innerHTML = formats.map(f =>
+      `<option value="${esc(f.fmt)}">${esc(f.label)}${f.owner ? `（插件 ${esc(f.owner)}）` : ''}</option>`
+    ).join('');
+  } catch (e) { /* 保留 HTML 默认项 */ }
+}
+
 async function init() {
+  loadFormats();
   try { chatPreset = JSON.parse(sessionStorage.getItem('siwx-export-preset') || 'null'); }
   catch (e) { chatPreset = null; }
   try {

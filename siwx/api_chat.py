@@ -15,6 +15,7 @@ from pathlib import Path
 from flask import Blueprint, Response, jsonify, request, current_app as _current_app
 
 from siwx import media, voice
+from siwx.plugins import chat_bridge as _plugins
 
 # ── 分片索引（表名 → 分片路径）──────────────────────────────────
 # message/ 下有十几个 *.db，而一个会话的 Msg_ 表通常只落在 1~2 个分片里；每个会话
@@ -402,10 +403,21 @@ def sessions():
             "last_time": it.get("last_time", 0),
         })
     out.sort(key=lambda x: x["last_time"], reverse=True)
+    out = _apply_session_plugins(out, account)
     with _CACHE_LOCK:
         _SESSION_CACHE[cache_key] = (cache_sig, out)
     _log(f"[sessions] 账号={account}, 返回 {len(out)} 个会话")
     return jsonify({"account": account, "sessions": out})
+
+
+def _apply_session_plugins(sessions: list, account: str) -> list:
+    """把插件层应用到会话列表（装饰器 + 过滤器）。无插件时原样返回。"""
+    if not sessions or not _plugins.has_session_hooks():
+        return sessions
+    ctx = _plugins.chat_ctx(account, "", False)
+    for s in sessions:
+        _plugins.decorate_session(s, ctx, hot=False)
+    return _plugins.filter_sessions(sessions, ctx)
 
 
 TYPE_NAMES = {1: "文本消息", 3: "图片消息", 34: "语音消息", 42: "名片消息",
@@ -682,6 +694,17 @@ def messages():
             "text": _fmt(t, text) if t != 1 else text,
         })
 
+    # ── 插件层（无插件时零开销）──────────────────────────────
+    if msgs and _plugins.has_message_hooks():
+        pctx = _plugins.chat_ctx(account, chat, is_group, names=names)
+        for m in msgs:
+            # 装饰器默认不进热路径：仅 hot=True 的插件生效（带超时熔断）
+            _plugins.decorate_message(m, pctx, hot=False)
+            # 渲染器可替换 kind / 追加结构化 render 节点树
+            _plugins.apply_renderer(m, pctx)
+            if m.get("text"):
+                m["text"] = _plugins.transform_content(m["text"], m, pctx)
+
     display = names.get(chat, chat)
     _log(f"[msg] 返回 {len(msgs)} 条消息, has_more={has_more}")
     return jsonify({"account": account, "chat": chat, "display": display,
@@ -690,11 +713,27 @@ def messages():
 
 @bp.get("/avatar")
 def avatar():
-    """联系人头像：head_image.db 的 image_buffer 为明文 JPEG。"""
+    """联系人头像：head_image.db 的 image_buffer 为明文 JPEG。
+
+    内置实现优先；查不到时询问插件头像解析器（插件可按需给出缓存/远程头像）。
+    """
     account = request.args.get("account", "")
     username = request.args.get("username", "")
+
+    def _plugin_avatar():
+        if not username:
+            return None
+        return _plugins.resolve_avatar(username, account,
+                                       {"out_root": str(_out_root())})
+
     db = _out_root() / account / "head_image" / "head_image.db"
-    if not db.is_file() or not username:
+    if not username:
+        return jsonify({"error": "无头像"}), 404
+    if not db.is_file():
+        data = _plugin_avatar()
+        if data:
+            return Response(data, mimetype="image/jpeg",
+                            headers={"Cache-Control": "private, max-age=86400"})
         return jsonify({"error": "无头像"}), 404
     try:
         conn = sqlite3.connect(db)
@@ -718,8 +757,16 @@ def avatar():
                 break
         conn.close()
     except sqlite3.Error:
+        data = _plugin_avatar()
+        if data:
+            return Response(data, mimetype="image/jpeg",
+                            headers={"Cache-Control": "private, max-age=86400"})
         return jsonify({"error": "无头像"}), 404
     if not row or not row[0]:
+        data = _plugin_avatar()
+        if data:
+            return Response(data, mimetype="image/jpeg",
+                            headers={"Cache-Control": "private, max-age=86400"})
         return jsonify({"error": "无头像"}), 404
     return Response(row[0], mimetype="image/jpeg",
                     headers={"Cache-Control": "private, max-age=86400"})

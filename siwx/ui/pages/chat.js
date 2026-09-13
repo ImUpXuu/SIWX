@@ -218,7 +218,10 @@ function bubble(m) {
   const name = (!m.is_me && currentChat && currentChat.is_group && m.sender_name)
     ? `<div class="m-name">${esc(m.sender_name)}</div>` : '';
   let inner = '';
-  if (m.kind === 'quote' && m.quote) {
+  if (m.render) {
+    // 插件渲染器：返回结构化节点树，由 SX.renderNodes 安全渲染（不注入 HTML）
+    inner = SX.renderNodes(m.render);
+  } else if (m.kind === 'quote' && m.quote) {
     inner = `<div class="m-quote"><div class="m-quote-n">${esc(m.quote.displayname)}</div>` +
             `<div class="m-quote-t">${esc(m.quote.content)}</div></div>` + esc(m.text);
   } else if (m.kind === 'link' && m.link) {

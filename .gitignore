@@ -10,5 +10,9 @@ blobs.txt
 *.spec.bak
 .DS_Store
 
+# 运行时状态与本地产物
+auto_sync.json
+video/
+
 # 工作区助手元数据（本地记忆/分析，不入库）
 .workbuddy-ai/

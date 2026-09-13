@@ -100,6 +100,75 @@
     });
   }
 
+  /* ── 插件渲染器：结构化节点树 → HTML ─────────────────────────────
+   * 插件**不返回 HTML 字符串**，而是返回节点树，从根上杜绝 XSS：
+   *   { t: 'text',  v: '...' }                         纯文本（自动转义）
+   *   { t: 'el',    tag: 'div', cls: 'x', v: '文本',
+   *                 a: { href: '...' }, c: [子节点] }   元素
+   *   { t: 'img',   src: '...', alt: '...', cls: '...' } 图片（src 仅允许同源/相对）
+   *   { t: 'a',     href: '...', v: '文本' }            链接（仅 http/https/相对）
+   *   { t: 'raw',   v: '<b>x</b>' }                     显式 HTML —— 被忽略（安全）
+   * 数组即多个节点。非法节点被静默跳过，不会破坏整条消息。
+   */
+  const ALLOWED_TAGS = new Set(['span', 'div', 'b', 'i', 'em', 'strong', 'code',
+                                'pre', 'p', 'br', 'ul', 'ol', 'li', 'small',
+                                'table', 'thead', 'tbody', 'tr', 'th', 'td']);
+  const ALLOWED_ATTRS = new Set(['class', 'title', 'style', 'colspan', 'rowspan']);
+
+  function safeUrl(u) {
+    const s = String(u == null ? '' : u).trim();
+    if (!s) return '';
+    if (/^(https?:|\/|\.\/|\.\.\/|#)/i.test(s)) return s;
+    return '';                       // 拒绝 javascript: / data: 等
+  }
+
+  function safeStyle(v) {
+    // 只放行无 url()/expression 的简单声明，防 CSS 注入
+    const s = String(v == null ? '' : v);
+    if (/url\s*\(|expression|javascript:/i.test(s)) return '';
+    return s;
+  }
+
+  function renderNodes(node) {
+    if (node == null || node === false) return '';
+    if (Array.isArray(node)) return node.map(renderNodes).join('');
+    if (typeof node === 'string' || typeof node === 'number') return esc(node);
+    if (typeof node !== 'object') return '';
+    const t = node.t || (node.tag ? 'el' : 'text');
+    if (t === 'text') return esc(node.v);
+    if (t === 'raw') return '';                      // 显式拒绝 HTML 注入
+    if (t === 'img') {
+      const src = safeUrl(node.src);
+      if (!src) return '';
+      return `<img class="m-img ${esc(node.cls || '')}" loading="lazy" src="${esc(src)}" alt="${esc(node.alt || '')}">`;
+    }
+    if (t === 'a') {
+      const href = safeUrl(node.href);
+      const body = node.c != null ? renderNodes(node.c) : esc(node.v);
+      if (!href) return `<span>${body}</span>`;
+      return `<a href="${esc(href)}" target="_blank" rel="noreferrer">${body}</a>`;
+    }
+    // t === 'el'
+    let tag = String(node.tag || 'span').toLowerCase();
+    if (!ALLOWED_TAGS.has(tag)) tag = 'span';
+    let attrs = '';
+    const a = node.a || {};
+    let hasCls = false;
+    Object.keys(a).forEach(k => {
+      if (k === 'href' || k === 'src' || k.indexOf('on') === 0) return;   // 事件/URL 一律拒绝
+      if (!ALLOWED_ATTRS.has(k)) return;
+      let v = k === 'style' ? safeStyle(a[k]) : String(a[k]);
+      if (!v) return;
+      if (k === 'class') hasCls = true;
+      attrs += ` ${k}="${esc(v)}"`;
+    });
+    if (node.cls && !hasCls) attrs += ` class="${esc(node.cls)}"`;
+    if (tag === 'br') return '<br>';
+    const body = node.c != null ? renderNodes(node.c) : esc(node.v);
+    return `<${tag}${attrs}>${body}</${tag}>`;
+  }
+
   window.SX = { esc, timeStr, fmtTs, fetchJSON, startJob, renderLog, go,
-                setupDone, setSetupDone, resetSetup, imgFallback, openPath };
+                setupDone, setSetupDone, resetSetup, imgFallback, openPath,
+                renderNodes };
 })();

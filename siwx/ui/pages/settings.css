@@ -17,8 +17,32 @@
 }
 .ov-row:first-child { border-top: none; }
 .ov-row .dim { word-break: break-word; }
+
+/* ── 插件设置块 ───────────────────────────────── */
+.plg-block {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 14px 16px; background: var(--card);
+}
+.plg-block + .plg-block { margin-top: 14px; }
+.plg-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding-bottom: 10px; border-bottom: 1px dashed var(--line); margin-bottom: 12px;
+}
+.plg-head b { font-size: 14px; }
+.plg-head .dim { font-size: 12px; }
+.plg-group {
+  font-size: 12px; font-weight: 700; color: var(--muted);
+  margin: 12px 0 8px; letter-spacing: .3px;
+}
+.plg-block .s-item { grid-template-columns: 190px minmax(0, 1fr); }
+.plg-block .s-item .f-input { justify-self: start; max-width: 100%; }
+.plg-block .s-item > .f-chk { justify-self: start; }
+.plg-block textarea.f-input { width: 100%; resize: vertical; font-family: inherit; }
+.plg-block [data-plg-status] { font-size: 12px; }
+
 @media (max-width: 760px) {
   .s-item { grid-template-columns: 1fr; }
   .s-item .btn { width: 100%; }
+  .plg-block .s-item { grid-template-columns: 1fr; }
   .ov-row { grid-template-columns: 1fr; gap: 4px; }
 }
