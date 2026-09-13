@@ -64,6 +64,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -79,14 +81,20 @@ jobs:
           for f in *; do sha256sum "$f" >> SHA256SUMS.txt; done
           cat SHA256SUMS.txt
       - name: 提取 tag 更新内容
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          git tag -l "${{ github.ref_name }}" --format='%(contents)' > release/RELEASE_NOTES.md
+          git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"
+          git for-each-ref "refs/tags/$TAG" --format='%(contents)' > release/RELEASE_NOTES.md
           if [ ! -s release/RELEASE_NOTES.md ]; then
-            echo "stories-in-wx ${{ github.ref_name }}" > release/RELEASE_NOTES.md
+            echo "未能读取 $TAG 的 annotated tag 发布说明" >&2
+            exit 1
           fi
+          cat release/RELEASE_NOTES.md
       - name: 发布 Release
         uses: softprops/action-gh-release@v2
         with:
+          name: stories-in-wx ${{ github.ref_name }}
           files: |
             release/*.exe
             release/*.dmg
@@ -119,6 +127,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
+          git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"
           python3 scripts/generate_version_json.py --tag "$TAG" --repo "$REPO"
           cp version.json /tmp/siwx-version.json
       - name: 提交 version.json 到 main
