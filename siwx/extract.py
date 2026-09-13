@@ -39,12 +39,6 @@ def _discover(log_fn):
         for wxid, db_dir in dirs:
             log.detailed("discover", f"账号={wxid}, 路径={db_dir}")
     return dirs
-    dirs = find_wechat_data_dirs()
-    if not dirs:
-        log("✗ 未找到微信数据目录 (xwechat_files/*/db_storage)")
-    else:
-        log(f"自动扫描到 {len(dirs)} 个微信账号")
-    return dirs
 
 
 def _keystore_preset(entries_by_dir, log) -> dict:

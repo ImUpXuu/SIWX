@@ -18,13 +18,14 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from siwx import paths
+from siwx import __version__, paths
 from siwx.api_chat import (
     _contact_names, _decode_content, build_messages, message_tables_by_shard,
 )
 
 SERVER_NAME = "stories-in-wx"
-SERVER_VERSION = "0.2.5"
+# 版本唯一来源是 siwx.__version__，避免与发布版本脱节
+SERVER_VERSION = __version__
 PROTOCOL_VERSION = "2024-11-05"
 SCAN_CAP = 200_000          # 全库搜索最多扫描的行数
 JSON = "application/json"

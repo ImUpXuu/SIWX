@@ -6,6 +6,20 @@ from pathlib import Path
 ROOT = Path(SPECPATH).parent
 
 
+def _app_version():
+    """版本唯一来源：siwx/__init__.py 的 __version__（不 import，避免拉入依赖）。"""
+    try:
+        for line in (ROOT / "siwx" / "__init__.py").read_text(encoding="utf-8").splitlines():
+            if line.startswith("__version__"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+APP_VERSION = _app_version()
+
+
 def _silk_decoder_bins():
     root = ROOT / "siwx" / "vendor" / "silk-decoder"
     if not root.is_dir():
@@ -47,7 +61,7 @@ app = BUNDLE(
         "CFBundleName": "stories-in-wx",
         "CFBundleDisplayName": "stories-in-wx",
         "CFBundleIdentifier": "com.storiesinwx.app",
-        "CFBundleShortVersionString": "0.2.0",
+        "CFBundleShortVersionString": APP_VERSION,
         "NSHighResolutionCapable": True,
     },
 )
