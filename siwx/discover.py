@@ -1,4 +1,5 @@
 """全自动目录发现：跨平台扫描 xwechat_files/*/db_storage。"""
+import json
 import os
 import platform
 import string
@@ -6,8 +7,70 @@ from pathlib import Path
 
 import psutil
 
+from siwx import paths as _paths
+
 WECHAT_PROCESSES_WIN = ("weixin.exe", "wechat.exe")
 WECHAT_PROCESSES_MAC = ("WeChat",)
+
+
+def manual_paths_file() -> Path:
+    """手动指定的微信 db_storage 路径配置文件。"""
+    return _paths.app_root() / "wechat_paths.json"
+
+
+def load_manual_data_dirs() -> list:
+    """读取用户手动保存的微信数据目录，返回 [(wxid, db_storage 路径)]。"""
+    p = manual_paths_file()
+    if not p.is_file():
+        return []
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    paths = raw.get("paths", raw if isinstance(raw, list) else [])
+    out, seen = [], set()
+    for item in paths:
+        r = validate_db_path(str(item or ""))
+        if not r.get("ok"):
+            continue
+        key = str(Path(r["db_dir"]).resolve()).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((r["wxid"], r["db_dir"]))
+    return out
+
+
+def save_manual_data_dirs(db_dirs: list) -> None:
+    """保存已验证的手动目录，自动去重并保留可用项。"""
+    valid, seen = [], set()
+    for item in db_dirs or []:
+        r = validate_db_path(str(item or ""))
+        if not r.get("ok"):
+            continue
+        db = str(Path(r["db_dir"]).resolve())
+        key = db.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        valid.append(db)
+    p = manual_paths_file()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps({"paths": valid}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(p)
+
+
+def add_manual_data_dir(path_str: str) -> dict:
+    """验证并持久化一个手动微信目录。"""
+    r = validate_db_path(path_str)
+    if not r.get("ok"):
+        return r
+    existing = [db for _wxid, db in load_manual_data_dirs()]
+    existing.append(r["db_dir"])
+    save_manual_data_dirs(existing)
+    r["saved"] = True
+    return r
 
 
 def wxid_of(db_dir) -> str:
@@ -84,20 +147,36 @@ def find_wechat_data_dirs():
             except OSError:
                 pass
     else:
-        return []
+        roots = []
 
     out, seen = [], set()
+
+    def add(wxid, db):
+        try:
+            key = str(Path(db).resolve()).casefold()
+        except OSError:
+            key = str(db).casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((wxid, str(db)))
+
     for root in roots:
         if not root.is_dir():
             continue
         try:
             for entry in root.iterdir():
                 db = entry / "db_storage"
-                if db.is_dir() and db not in seen:
-                    seen.add(db)
-                    out.append((entry.name, str(db)))
+                if db.is_dir():
+                    add(entry.name, db)
         except OSError:
             continue
+
+    # 用户手动指定的目录必须参与后续状态页、解密任务与媒体查找；否则自动
+    # 扫描没命中时，引导页永远无法进入自定义路径流程。
+    for wxid, db in load_manual_data_dirs():
+        add(wxid, db)
+
     out.sort()
     return out
 
@@ -110,13 +189,17 @@ def validate_db_path(path_str: str) -> dict:
     p = Path(path_str.strip().strip('"').strip("'"))
     if not p.is_dir():
         return {"ok": False, "error": f"目录不存在: {p}"}
+    try:
+        p = p.resolve()
+    except OSError:
+        pass
     # 检查是否是 db_storage 目录
     if p.name == "db_storage":
         return {"ok": True, "wxid": p.parent.name, "db_dir": str(p)}
     # 检查目录下是否有 db_storage
     db_storage = p / "db_storage"
     if db_storage.is_dir():
-        return {"ok": True, "wxid": p.name, "db_dir": str(db_storage)}
+        return {"ok": True, "wxid": p.name, "db_dir": str(db_storage.resolve())}
     # 检查目录下是否有 .db 文件（可能是 message 等子目录）
     dbs = list(p.glob("*.db"))
     if dbs:

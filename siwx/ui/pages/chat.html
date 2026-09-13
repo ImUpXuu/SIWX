@@ -9,15 +9,44 @@
     </div>
     <div id="c-sessions"></div>
   </aside>
+
   <section class="c-main">
     <div class="c-head">
       <button id="c-back">←</button>
-      <b id="c-title">微信</b>
-      <span id="c-sub"></span>
-      <button id="c-export">📦 导出</button>
+      <div class="c-titlebox">
+        <b id="c-title">微信</b>
+        <span id="c-sub">选择一个会话查看聊天记录</span>
+      </div>
+      <div class="c-actions">
+        <button id="c-select" class="c-action" disabled>选择</button>
+        <button id="c-copy-selected" class="c-action hidden">复制所选</button>
+        <button id="c-cancel-select" class="c-action hidden">取消</button>
+        <button id="c-stats" class="c-action" disabled>统计</button>
+        <button id="c-export" class="c-action c-action-primary">导出</button>
+      </div>
     </div>
-    <div id="c-msgs">
-      <div class="c-tip">选择一个会话查看聊天记录</div>
+
+    <div class="c-body">
+      <div id="c-msgs">
+        <div class="c-tip">选择一个会话查看聊天记录</div>
+      </div>
+      <aside class="c-timeline" id="c-timeline">
+        <div class="tl-head">时间轴</div>
+        <input id="c-jump-date" type="date" disabled>
+        <div id="c-timeline-list" class="tl-list">
+          <div class="tl-empty">打开会话后可按日期跳转</div>
+        </div>
+      </aside>
     </div>
   </section>
+</div>
+
+<div class="c-modal hidden" id="c-stats-modal" role="dialog" aria-modal="true" aria-labelledby="c-stats-title">
+  <div class="c-modal-card">
+    <div class="c-modal-head">
+      <b id="c-stats-title">会话统计</b>
+      <button id="c-stats-close" class="c-icon-btn" aria-label="关闭">×</button>
+    </div>
+    <div id="c-stats-body" class="c-stats-body"></div>
+  </div>
 </div>

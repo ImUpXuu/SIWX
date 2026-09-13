@@ -14,7 +14,8 @@ from werkzeug.exceptions import HTTPException
 
 from siwx import extract, keystore, logger as log
 from siwx import paths as _paths
-from siwx.discover import find_wechat_data_dirs, find_wechat_pids, wxid_of
+from siwx.discover import (add_manual_data_dir, find_wechat_data_dirs,
+                           find_wechat_pids, load_manual_data_dirs, wxid_of)
 from siwx.sqlcipher import collect_db_files
 
 
@@ -460,6 +461,8 @@ def plugin_pages(plugin: str, filename: str):
 def status():
     pids = find_wechat_pids()
     accounts = []
+    manual_set = {str(Path(db).resolve()).casefold()
+                  for _wxid, db in load_manual_data_dirs()}
     store = keystore.load()
     from siwx.sqlcipher import parse_key, verify_enc_key
     for wxid, db in find_wechat_data_dirs():
@@ -476,8 +479,13 @@ def status():
                         pass
         except Exception:
             pass
+        try:
+            is_manual = str(Path(db).resolve()).casefold() in manual_set
+        except OSError:
+            is_manual = str(db).casefold() in manual_set
         accounts.append({"wxid": wxid, "db_dir": db, "db_count": total,
-                         "keys_cached": cached, "total_salts": total})
+                         "keys_cached": cached, "total_salts": total,
+                         "manual": is_manual})
     return jsonify({
         "wechat_running": bool(pids),
         "pids": pids,
@@ -646,10 +654,9 @@ def api_job():
 
 @app.post("/api/discover/validate")
 def api_validate_path():
-    """验证手动输入的微信存储路径。"""
-    from siwx.discover import validate_db_path
+    """验证并保存手动输入的微信存储路径。"""
     data = request.get_json(silent=True) or {}
-    result = validate_db_path(data.get("path", ""))
+    result = add_manual_data_dir(data.get("path", ""))
     return jsonify(result)
 
 

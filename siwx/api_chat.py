@@ -711,6 +711,110 @@ def messages():
                     "is_group": is_group, "messages": msgs, "has_more": has_more})
 
 
+@bp.get("/timeline")
+def timeline():
+    """单个会话的日期时间轴：只做 SQL 聚合，不拉取正文。"""
+    account = request.args.get("account", "")
+    chat = request.args.get("chat", "")
+    acc = _out_root() / account
+    if not (acc / "message").is_dir():
+        return jsonify({"error": "账号不存在或未解密"}), 404
+    table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+    days = {}
+    total = 0
+    ts_min = ts_max = 0
+    for db in shards_for(acc, chat):
+        conn = sqlite3.connect(db)
+        try:
+            sql = (f"SELECT strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime') AS day, "
+                   f"COUNT(*), MIN(create_time), MAX(create_time) FROM [{table}] "
+                   f"WHERE create_time > 0 GROUP BY day")
+            for day, cnt, mn, mx in conn.execute(sql):
+                if not day:
+                    continue
+                item = days.setdefault(day, {"day": day, "count": 0,
+                                             "first_ts": 0, "last_ts": 0})
+                item["count"] += int(cnt or 0)
+                if mn and (not item["first_ts"] or mn < item["first_ts"]):
+                    item["first_ts"] = int(mn)
+                if mx and mx > item["last_ts"]:
+                    item["last_ts"] = int(mx)
+                total += int(cnt or 0)
+                if mn and (not ts_min or mn < ts_min):
+                    ts_min = int(mn)
+                if mx and mx > ts_max:
+                    ts_max = int(mx)
+        except sqlite3.Error:
+            pass
+        finally:
+            conn.close()
+    return jsonify({"account": account, "chat": chat, "total": total,
+                    "ts_min": ts_min, "ts_max": ts_max,
+                    "days": [days[k] for k in sorted(days)]})
+
+
+@bp.get("/stats")
+def conversation_stats():
+    """单个会话统计：供聊天页右上角弹窗使用。"""
+    account = request.args.get("account", "")
+    chat = request.args.get("chat", "")
+    acc = _out_root() / account
+    if not (acc / "message").is_dir():
+        return jsonify({"error": "账号不存在或未解密"}), 404
+    table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+    names = _contact_names(acc)
+    type_counts = {}
+    by_day = {}
+    by_hour = [0] * 24
+    total = sent = 0
+    ts_min = ts_max = 0
+    for db in shards_for(acc, chat):
+        conn = sqlite3.connect(db)
+        try:
+            for cnt, mn, mx, sent_cnt in conn.execute(
+                    f"SELECT COUNT(*), MIN(create_time), MAX(create_time), "
+                    f"SUM(CASE WHEN origin_source = 1 THEN 1 ELSE 0 END) "
+                    f"FROM [{table}] WHERE create_time > 0"):
+                total += int(cnt or 0)
+                sent += int(sent_cnt or 0)
+                if mn and (not ts_min or mn < ts_min):
+                    ts_min = int(mn)
+                if mx and mx > ts_max:
+                    ts_max = int(mx)
+            for t, cnt in conn.execute(
+                    f"SELECT (local_type & 65535), COUNT(*) FROM [{table}] "
+                    f"WHERE create_time > 0 GROUP BY (local_type & 65535)"):
+                type_counts[int(t or 0)] = type_counts.get(int(t or 0), 0) + int(cnt or 0)
+            for day, cnt in conn.execute(
+                    f"SELECT strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime'), "
+                    f"COUNT(*) FROM [{table}] WHERE create_time > 0 GROUP BY 1"):
+                if day:
+                    by_day[day] = by_day.get(day, 0) + int(cnt or 0)
+            for hour, cnt in conn.execute(
+                    f"SELECT CAST(strftime('%H', create_time, 'unixepoch', 'localtime') AS INTEGER), "
+                    f"COUNT(*) FROM [{table}] WHERE create_time > 0 GROUP BY 1"):
+                if hour is not None:
+                    by_hour[int(hour)] += int(cnt or 0)
+        except sqlite3.Error:
+            pass
+        finally:
+            conn.close()
+    received = max(0, total - sent)
+    busiest_day = {"day": "", "count": 0}
+    if by_day:
+        day, cnt = max(by_day.items(), key=lambda x: x[1])
+        busiest_day = {"day": day, "count": cnt}
+    busiest_hour = max(range(24), key=lambda h: by_hour[h]) if any(by_hour) else None
+    types = [{"type": t, "label": TYPE_NAMES.get(t, f"类型{t}"), "count": c}
+             for t, c in sorted(type_counts.items(), key=lambda x: -x[1])]
+    return jsonify({"account": account, "chat": chat,
+                    "display": names.get(chat, chat), "total": total,
+                    "sent": sent, "received": received,
+                    "first_ts": ts_min, "last_ts": ts_max,
+                    "active_days": len(by_day), "busiest_day": busiest_day,
+                    "busiest_hour": busiest_hour, "types": types})
+
+
 @bp.get("/avatar")
 def avatar():
     """联系人头像：head_image.db 的 image_buffer 为明文 JPEG。

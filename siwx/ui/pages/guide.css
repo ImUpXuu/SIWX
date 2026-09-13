@@ -40,6 +40,13 @@
 .acc-main b { font-size: 13px; font-weight: 700; display: block; overflow: hidden; text-overflow: ellipsis;
               white-space: nowrap; max-width: 100%; }
 .acc-main span { font-size: 12px; color: var(--muted); }
+.g-manual {
+  margin-top: 14px; padding: 12px; border: 1px dashed var(--line);
+  border-radius: var(--radius); background: var(--card-alt);
+}
+.g-manual-first { margin-top: 14px; }
+.g-manual-title { font-size: 13px; font-weight: 800; color: var(--text); }
+#g-manual-msg, #g1-manual-msg { min-height: 18px; }
 .g3-res, #g4-result { margin-top: 14px; }
 @media (max-width: 520px) {
   .guide { gap: 14px; }
