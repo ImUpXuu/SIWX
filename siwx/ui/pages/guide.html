@@ -13,6 +13,16 @@
     <p class="dim g-desc">三步完成配置：选择微信号 → 一键提取密钥并解密 → 进入主界面。<br>
        全程只读扫描微信进程，无需管理员；密钥经 DPAPI 加密保存，结果全部缓存，只跑一次。</p>
     <div id="g-check" class="g-check">正在检测环境…</div>
+    <div class="g-manual g-manual-first">
+      <div class="g-manual-title">没有扫到目录？在这里直接指定微信数据目录</div>
+      <p class="dim" style="font-size:12px;margin:6px 0 8px">可填写微信数据目录或 db_storage 目录。微信内获取路径：微信设置 → 文件管理 → 打开文件夹 → 复制地址栏路径。</p>
+      <div style="display:flex;gap:6px">
+        <input id="g1-manual-path" type="text" placeholder="例如: D:\xwechat_files\wxid_xxx\db_storage"
+               style="flex:1;font-size:12px;padding:7px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--card-alt);color:var(--text);outline:none">
+        <button class="btn btn-primary" id="g1-manual-add">保存目录</button>
+      </div>
+      <div id="g1-manual-msg" style="font-size:12px;margin-top:4px"></div>
+    </div>
     <div class="g-nav">
       <button class="btn btn-primary" id="g-start" disabled>开始配置 →</button>
     </div>

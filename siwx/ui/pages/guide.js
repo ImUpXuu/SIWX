@@ -31,11 +31,11 @@ async function screen1() {
                                 : `⚠️ 微信未运行 —— 提取密钥需要微信在线，请先启动并登录`;
     const accs = s.accounts.length
       ? `✅ 发现 ${s.accounts.length} 个微信号数据目录`
-      : `❌ 未找到微信数据目录 —— 请确认本机登录过微信`;
+      : `⚠️ 未自动找到微信数据目录 —— 可以继续下一步手动指定路径`;
     const ks = s.stored_salts ? `✅ 密钥库已有 ${s.stored_salts} 条缓存`
                               : `ℹ️ 密钥库为空（首次运行）`;
     el.innerHTML = `<div>${wx}</div><div>${accs}</div><div>${ks}</div>`;
-    document.getElementById('g-start').disabled = !s.accounts.length;
+    document.getElementById('g-start').disabled = false;
   } catch (e) {
     el.innerHTML = `❌ 后端离线：${e.message}`;
   }
@@ -57,7 +57,13 @@ function renderAccounts() {
   const el = document.getElementById('g-accounts');
   const autoAccounts = state.accounts || [];
   const manualAccounts = state.manualAccounts || [];
-  const allAccounts = [...autoAccounts, ...manualAccounts];
+  const seen = new Set();
+  const allAccounts = [...autoAccounts, ...manualAccounts].filter(a => {
+    const key = String(a.db_dir || '').toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   el.innerHTML = allAccounts.map((a, i) => {
     const isManual = a.manual;
@@ -73,8 +79,7 @@ function renderAccounts() {
   el.querySelectorAll('.acc').forEach(card => {
     card.addEventListener('click', () => {
       const i = Number(card.dataset.i);
-      const isManual = card.dataset.manual === '1';
-      state.account = isManual ? state.manualAccounts[i - state.accounts.length] : state.accounts[i];
+      state.account = allAccounts[i];
       el.querySelectorAll('.acc').forEach(c => c.classList.remove('sel'));
       card.classList.add('sel');
       document.getElementById('g-to3').disabled = false;
@@ -110,6 +115,72 @@ function setBusy(b) {
   if (b) document.getElementById('g-finish').classList.add('hidden');
 }
 
+function rememberManualAccount(d) {
+  if (!state.manualAccounts) state.manualAccounts = [];
+  const acc = { wxid: d.wxid, db_dir: d.db_dir, db_count: d.db_count || 0,
+                keys_cached: 0, total_salts: 0, manual: true };
+  const exists = [...(state.accounts || []), ...state.manualAccounts]
+    .some(a => String(a.db_dir || '').toLowerCase() === String(acc.db_dir).toLowerCase());
+  if (!exists) state.manualAccounts.push(acc);
+  state.account = acc;
+  document.getElementById('g-start').disabled = false;
+  document.getElementById('g-to3').disabled = false;
+  document.getElementById('g3-hint').textContent = `对 ${acc.wxid} 一键提取密钥并解密。`;
+  return acc;
+}
+
+function bindManualPath(prefix, opts = {}) {
+  const manualToggle = document.getElementById(`${prefix}-manual-toggle`);
+  const manualBox = document.getElementById(`${prefix}-manual-box`);
+  const manualPath = document.getElementById(`${prefix}-manual-path`);
+  const manualAdd = document.getElementById(`${prefix}-manual-add`);
+  const manualMsg = document.getElementById(`${prefix}-manual-msg`);
+
+  if (manualToggle && manualBox) {
+    manualToggle.addEventListener('click', () => manualBox.classList.toggle('hidden'));
+  }
+  if (!manualAdd || !manualPath || !manualMsg) return;
+
+  manualAdd.addEventListener('click', async () => {
+    const path = manualPath.value.trim();
+    if (!path) {
+      manualMsg.textContent = '请输入路径';
+      manualMsg.style.color = 'var(--err-fg)';
+      return;
+    }
+    manualAdd.disabled = true;
+    const oldText = manualAdd.textContent;
+    manualAdd.textContent = '验证中...';
+    manualMsg.textContent = '';
+    try {
+      const r = await fetch('/api/discover/validate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        const acc = rememberManualAccount(d);
+        manualMsg.textContent = opts.firstStep
+          ? `✓ 已保存: ${acc.wxid}。现在可以点「开始配置」。`
+          : `✓ 已保存并添加: ${acc.wxid}`;
+        manualMsg.style.color = 'var(--ok-fg)';
+        manualPath.value = '';
+        if (document.getElementById('g-accounts')) renderAccounts();
+      } else {
+        manualMsg.textContent = `✗ ${d.error}`;
+        manualMsg.style.color = 'var(--err-fg)';
+      }
+    } catch (e) {
+      manualMsg.textContent = `✗ 验证失败: ${e.message}`;
+      manualMsg.style.color = 'var(--err-fg)';
+    } finally {
+      manualAdd.disabled = false;
+      manualAdd.textContent = oldText;
+    }
+  });
+}
+
 export async function init(view) {
   screen1();
 
@@ -122,57 +193,9 @@ export async function init(view) {
   });
   document.getElementById('g-to3').addEventListener('click', screen3);
 
-  // ── 手动路径 ──────────────────────────────────────────
-  const manualToggle = document.getElementById('g-manual-toggle');
-  const manualBox = document.getElementById('g-manual-box');
-  const manualPath = document.getElementById('g-manual-path');
-  const manualAdd = document.getElementById('g-manual-add');
-  const manualMsg = document.getElementById('g-manual-msg');
-
-  if (manualToggle) {
-    manualToggle.addEventListener('click', () => {
-      manualBox.classList.toggle('hidden');
-    });
-  }
-
-  if (manualAdd) {
-    manualAdd.addEventListener('click', async () => {
-      const path = manualPath.value.trim();
-      if (!path) {
-        manualMsg.textContent = '请输入路径';
-        manualMsg.style.color = 'var(--err-fg)';
-        return;
-      }
-      manualAdd.disabled = true;
-      manualAdd.textContent = '验证中...';
-      manualMsg.textContent = '';
-      try {
-        const r = await fetch('/api/discover/validate', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ path }),
-        });
-        const d = await r.json();
-        if (d.ok) {
-          if (!state.manualAccounts) state.manualAccounts = [];
-          state.manualAccounts.push({ wxid: d.wxid, db_dir: d.db_dir, manual: true });
-          manualMsg.textContent = `✓ 已添加: ${d.wxid}`;
-          manualMsg.style.color = 'var(--ok-fg)';
-          manualPath.value = '';
-          renderAccounts();
-        } else {
-          manualMsg.textContent = `✗ ${d.error}`;
-          manualMsg.style.color = 'var(--err-fg)';
-        }
-      } catch (e) {
-        manualMsg.textContent = `✗ 验证失败: ${e.message}`;
-        manualMsg.style.color = 'var(--err-fg)';
-      } finally {
-        manualAdd.disabled = false;
-        manualAdd.textContent = '添加';
-      }
-    });
-  }
+  // ── 手动路径：第 1 步可直接配置；第 2 步保留原入口 ───────────────
+  bindManualPath('g1', { firstStep: true });
+  bindManualPath('g');
 
   document.getElementById('g-run').addEventListener('click', () => {
     if (state.running || !state.account) return;

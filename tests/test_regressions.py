@@ -910,6 +910,41 @@ class TestLimitGuard(TempRootCase):
         self.assertGreater(n, 0)
 
 
+class TestChatTimelineAndStats(TempRootCase):
+
+    def test_timeline_and_conversation_stats(self):
+        _acc, account, chat = make_account(self.tmp, n_texts=6)
+        from siwx.server import app
+        c = app.test_client()
+        tl = c.get(f"/api/chat/timeline?account={account}&chat={chat}")
+        self.assertEqual(tl.status_code, 200)
+        self.assertEqual(tl.get_json()["total"], 6)
+        self.assertTrue(tl.get_json()["days"])
+
+        st = c.get(f"/api/chat/stats?account={account}&chat={chat}")
+        self.assertEqual(st.status_code, 200)
+        d = st.get_json()
+        self.assertEqual(d["total"], 6)
+        self.assertEqual(d["types"][0]["label"], "文本消息")
+        self.assertGreaterEqual(d["active_days"], 1)
+
+
+class TestManualWechatPaths(TempRootCase):
+
+    def test_validate_endpoint_persists_manual_path(self):
+        db_dir = self.tmp / "custom" / "wxid_manual" / "db_storage"
+        db_dir.mkdir(parents=True)
+        from siwx.server import app
+        from siwx.discover import load_manual_data_dirs, manual_paths_file
+        r = app.test_client().post("/api/discover/validate", json={"path": str(db_dir)})
+        self.assertEqual(r.status_code, 200)
+        d = r.get_json()
+        self.assertTrue(d["ok"])
+        self.assertTrue(d["saved"])
+        self.assertTrue(manual_paths_file().is_file())
+        self.assertIn(("wxid_manual", str(db_dir.resolve())), load_manual_data_dirs())
+
+
 # ── 8. 解密原子写 ───────────────────────────────────────────────
 
 class TestDecryptAtomic(unittest.TestCase):
