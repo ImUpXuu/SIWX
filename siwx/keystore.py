@@ -82,6 +82,22 @@ else:
 
 
 def store_path() -> Path:
+    """密钥库落盘位置：系统数据目录（与程序安装位置解耦）。
+
+    v5.0.1 及更早版本写在 LOCALAPPDATA/USERPROFILE，缺失时回退到
+    安装目录（app_root）——在 macOS 双击 .app 的场景下安装目录位于
+    bundle 内部且只读，会导致读取/保存异常（issue #11）。现在统一走
+    paths.data_dir()；旧位置仅作向后兼容读取（见 load）。
+    """
+    try:
+        from siwx.paths import data_dir
+        return data_dir() / "keystore.bin"
+    except Exception:
+        return _legacy_store_path()
+
+
+def _legacy_store_path() -> Path:
+    """v5.0.1 及更早版本的密钥库位置，仅用于兼容读取/迁移。"""
     base = (os.environ.get("LOCALAPPDATA")
             or os.environ.get("USERPROFILE")
             or str(_safe_root()))
@@ -98,10 +114,25 @@ def _safe_root() -> Path:
 
 
 def load() -> dict:
-    """读取密钥库 → {salt_hex: {"key": hex, "strategy": str, "updated": ts}}。"""
+    """读取密钥库 → {salt_hex: {"key": hex, "strategy": str, "updated": ts}}。
+
+    向后兼容：若新位置没有密钥库而旧位置（安装目录/stories-in-wx）存在，
+    读取旧数据并尽力迁移到新位置；迁移失败（如旧目录只读）不影响读取。
+    """
     p = store_path()
+    legacy = _legacy_store_path()
     if not p.is_file():
-        return {}
+        if not legacy.is_file() or legacy == p:
+            return {}
+        try:
+            store = json.loads(_unprotect(legacy.read_bytes()).decode("utf-8"))
+        except (OSError, ValueError):
+            return {}
+        try:
+            save(store)  # 尽力迁移到新位置，失败不阻塞
+        except OSError:
+            pass
+        return store
     try:
         return json.loads(_unprotect(p.read_bytes()).decode("utf-8"))
     except (OSError, ValueError):
