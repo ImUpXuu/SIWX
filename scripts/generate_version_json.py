@@ -36,7 +36,9 @@ def _tag_notes(tag: str) -> str:
     if not tag:
         return ""
     notes = _run_git(["tag", "-l", tag, "--format=%(contents)"])
-    return notes[:4000].strip()
+    # 上限需容纳双语（中/英）详细发布说明；settings 页只展示前 200 字符，
+    # 此处保留完整内容是为了让 version.json 与 Release 正文保持一致。
+    return notes[:20000].strip()
 
 
 def _default_repo() -> str:
