@@ -1,0 +1,85 @@
+name: ❓ 使用咨询
+description: 安装、密钥提取、解密、导出、MCP 接入等使用问题
+title: "[Question] "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提问前请先看一眼 [README 的「常见问题」](https://github.com/ImUpXuu/SIWX#%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98)，
+        很多问题（解密失败、HTML 离线打开、语音导出等）那里已经有答案。
+
+        > ⚠️ **请勿粘贴密钥、wxid 明文或未脱敏的聊天内容。**
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: 问题分类
+      options:
+        - 安装与启动
+        - 密钥提取
+        - 数据库解密
+        - 聊天查看与媒体显示
+        - 导出（格式 / 媒体 / 语音）
+        - MCP 与 AI 客户端接入
+        - 插件使用
+        - 自动刷新数据库
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 你的问题
+      description: 说清楚你想达成什么、现在卡在哪一步
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: 已经尝试过什么
+      description: 例如已重装、已升级版本、已看 README 某节等，能避免重复建议
+    validations:
+      required: false
+
+  - type: input
+    id: siwx_version
+    attributes:
+      label: siwx 版本号
+      placeholder: "例如 5.0.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: env_info
+    attributes:
+      label: 环境信息
+      description: |
+        点「设置 → 环境信息 → 📋 复制环境信息」粘贴到这里（已打码）。
+        源码运行也可以执行 `python run.py doctor`。
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 如果涉及报错，「设置 → 📥 导出日志」默认已脱敏，可直接分享
+      render: text
+    validations:
+      required: false

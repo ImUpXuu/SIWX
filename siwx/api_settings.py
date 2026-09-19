@@ -101,6 +101,19 @@ def overview():
     })
 
 
+@bp.get("/env")
+def env():
+    """环境信息 —— 供「复制环境信息」按钮与 bug 报告使用。
+
+    text 字段已对路径中的用户名打码，可直接粘贴到公开 issue。
+    """
+    from siwx import env_info
+    return jsonify({
+        "info": env_info.collect(),
+        "text": env_info.format_text(),
+    })
+
+
 @bp.get("/auto-sync")
 def auto_sync_get():
     return jsonify(load_auto_sync())

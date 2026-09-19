@@ -1,5 +1,5 @@
 /* 设置页 —— 版本与更新 / 缓存总览 / 清除 / 重新运行引导 */
-const { esc, fetchJSON, go, resetSetup } = window.SX;
+const { esc, fetchJSON, go, resetSetup, copyText } = window.SX;
 
 function el(id) { return id ? document.getElementById(id) : null; }
 
@@ -336,6 +336,19 @@ export async function init() {
       URL.revokeObjectURL(a.href);
     } catch (e) {
       window.alert('导出失败: ' + e.message);
+    }
+  });
+
+  // ── 复制环境信息（提 issue 用）────────────────────────
+  el('s-copy-env').addEventListener('click', async () => {
+    const status = el('s-copy-env-status');
+    status.textContent = '';
+    try {
+      const d = await fetchJSON('/api/settings/env');
+      const ok = await copyText(d.text || '');
+      status.textContent = ok ? '✓ 已复制，可直接粘贴到 issue' : '✗ 复制失败，请手动选择';
+    } catch (e) {
+      status.textContent = '✗ ' + e.message;
     }
   });
 
