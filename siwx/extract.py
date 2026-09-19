@@ -17,6 +17,12 @@ from siwx.pool import decrypt_parallel, load_manifest, save_manifest
 from siwx.sqlcipher import collect_db_files, decrypt_database, parse_key, verify_enc_key
 from siwx.strategies import run_strategies
 
+# manifest 中记录「产出该输出目录的 db_dir」的保留键。
+# 以 @ 开头，与业务键（rel 路径，均以目录名开头）不会冲突。
+# 注意：pool.load_manifest 只有 extract.py 一处读取，且只用 .get(rel) 查询，
+# 从不遍历，因此新增该键不会影响任何既有逻辑。
+SOURCE_FIELD = "@source"
+
 
 def mask_key(k: str) -> str:
     if len(k) <= 10:
@@ -206,7 +212,13 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
 
 def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
                 workers=None, use_cache=True) -> dict:
-    """并行解密 + 产物缓存：源库 (mtime,size) 未变直接命中，秒回。"""
+    """并行解密 + 产物缓存：源库 (mtime,size) 未变直接命中，秒回。
+
+    来源保护：manifest 记录产出该目录的 db_dir（`@source`）。当同名账号存在
+    多个副本目录时，它们共用同一个 output/<wxid>/；若当前 db_dir 与记录不符，
+    说明会覆盖另一副本的产物，此时跳过并计入 conflict，避免静默丢数据。
+    旧 manifest 无 `@source`（升级自 v5.0.x）视为放行，行为与旧版一致。
+    """
     t0 = time.time()
     wxid = wxid_of(db_dir)
     store = keystore.load()
@@ -218,8 +230,20 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     log(f"[decrypt] 密钥库: {len(store)} 条, 唯一密钥: {len(uniq)} 个")
 
     manifest = load_manifest(out_root) if use_cache else {}
+    # 本次来源标签 + 历史来源标签（用于覆盖保护）
+    try:
+        src_tag = str(Path(db_dir).resolve()).casefold()
+    except OSError:
+        src_tag = str(db_dir).casefold()
+    source_guard = (manifest.get(SOURCE_FIELD) or "").strip() or None
+    if source_guard and src_tag and source_guard != src_tag:
+        log(f"[decrypt] ⚠ 该输出目录上次由其他副本目录产出：")
+        log(f"[decrypt]     历史来源 {source_guard}")
+        log(f"[decrypt]     本次来源 {src_tag}")
+        log(f"[decrypt]     已存在的产物将跳过，不覆盖（如需切换请清空该账号输出目录）")
     files, tasks = [], []
     ok = failed = skipped = cached = 0
+    conflicts = []
 
     def _resolve_key(e):
         rec = store.get(e.salt_hex)
@@ -261,6 +285,16 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
                           "key_masked": mask_key(key_hex)})
             log(f"  [decrypt] 缓存命中 {e.rel} ({_round_mb(e.size)}MB, 未变)")
             continue
+        # 来源保护：同名账号的多个副本目录会共用 output/<wxid>/，若当前来源与
+        # 产出该目录的来源不同，直接覆盖会把另一副本（可能数据更全）的产物
+        # 冲掉。这里跳过并告警，由用户决定是否清理目录后重跑。
+        # 兼容：旧 manifest 无 @source（升级用户）视为放行，保持原有行为。
+        if source_guard and dst.is_file() and src_tag and src_tag != source_guard:
+            conflicts.append(e.rel)
+            files.append({"rel": e.rel, "size_mb": _round_mb(e.size), "pages": 0,
+                          "status": "conflict", "key_masked": ""})
+            log(f"  [decrypt] ⚠ 跳过 {e.rel}：已有产物来自其他副本目录")
+            continue
         tasks.append((e.rel, str(e.path), str(dst), key_hex))
 
     log(f"[decrypt] 待解密: {len(tasks)} 个, 缓存命中: {cached}, 缺密钥: {skipped}")
@@ -287,17 +321,25 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
                       "status": status, "key_masked": mask_key(key_hex)})
 
     if tasks:
+        # 记录来源：本次确实写出了产物，该目录即归属于本 db_dir。
+        # 无历史来源时才写入；来源不一致时产物已被跳过，不应改写标记。
+        if not source_guard:
+            manifest[SOURCE_FIELD] = src_tag
         save_manifest(out_root, manifest)
+    if conflicts:
+        log(f"[decrypt] ⚠ {len(conflicts)} 个库因来源不同被跳过（已有产物来自其他副本目录）")
 
     report = {
         "wxid": wxid, "out_dir": str(out_root),
         "ok": ok, "failed": failed, "skipped": skipped, "cached": cached,
+        "conflicts": len(conflicts),
         "duration_ms": int((time.time() - t0) * 1000),
         "files": files,
     }
     log(f"解密完成: {ok} 成功（缓存命中 {cached}）"
         + (f"，{failed} 失败" if failed else "")
         + (f"，{skipped} 缺密钥" if skipped else "")
+        + (f"，{len(conflicts)} 来源冲突跳过" if conflicts else "")
         + f" (耗时 {report['duration_ms']} ms)")
     return report
 
