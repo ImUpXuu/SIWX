@@ -11,6 +11,7 @@
 """
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 _PATH_CACHE = {}
@@ -43,6 +44,29 @@ def app_root() -> Path:
 
     # 4. 兜底：从 __file__ 推导（siwx/paths.py → 上一级 = 项目根）
     return Path(__file__).resolve().parent.parent
+
+
+def data_dir() -> Path:
+    """跨平台应用数据目录 —— 持久化配置 / 密钥库 / 缓存的规范位置。
+
+    与 app_root()（程序安装位置）刻意分离：macOS 的 .app bundle、
+    Program Files 等安装位置可能只读或随升级被整体替换，用户数据
+    必须落在系统数据目录，绝不能依赖启动时的工作目录。
+
+    Windows: %LOCALAPPDATA%/stories-in-wx        （与历史版本行为一致）
+    macOS:   ~/Library/Application Support/stories-in-wx
+    Linux:   $XDG_DATA_HOME/stories-in-wx（默认 ~/.local/share/stories-in-wx）
+    """
+    if os.name == "nt":
+        base = (os.environ.get("LOCALAPPDATA")
+                or os.environ.get("USERPROFILE")
+                or tempfile.gettempdir())
+        return Path(base) / "stories-in-wx"
+    home = Path.home()
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "stories-in-wx"
+    xdg = os.environ.get("XDG_DATA_HOME") or str(home / ".local" / "share")
+    return Path(xdg) / "stories-in-wx"
 
 
 def _writable_fallback(subdir: str, primary: Path) -> Path:

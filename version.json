@@ -1,7 +1,7 @@
 {
   "version": "5.0.1",
-  "date": "2026-09-13 03:11:33",
-  "notes": "chore(release): prepare v5.0.1",
+  "date": "2026-09-13 03:17:52",
+  "notes": "v5.0.1\n\n重点更新\n\n- 插件系统：新增页面、设置、消息渲染、导出格式、MCP 工具、CLI、主题、密钥策略等 17 类扩展点；插件页可平级进入左侧菜单，并具备异常隔离、超时熔断、配置校验与零插件兼容模式。\n\n- 聊天统计：新增总消息量、消息类型、月/日趋势、24 小时与星期分布、私聊排行、自定义日期范围；通过分片聚合和缓存优化显著降低重复统计开销。\n\n- 聊天查看：在保留原页面布局的基础上增加单条复制、多选、Shift 范围选择、批量复制和当前会话统计；本人消息使用微信绿色气泡。\n\n- 悬浮时间轴：默认展示月份，悬停或点击后平滑展开日期；月份索引和日期明细分级加载，日期跳转仅查询目标附近 80 条消息，避免界面拥挤和大批量查询。\n\n- 引导与目录识别：自动扫描失败时可在首屏直接指定微信目录；路径会持久化保存，并支持 xwechat_files 根目录、账号目录、db_storage、内部子目录和具体 .db 文件；根目录下多个账号可一次识别。\n\n- 文档与版本体系：重写项目主页及插件开发文档，统一 siwx.__version__、MCP 和打包版本来源；修复发布流水线，确保 GitHub Release 与 version.json 读取 annotated tag 的完整发布说明。\n\n验证\n\n- 系统 Python 完整回归：164 tests 全部通过。\n\n- chat.js 与 guide.js JavaScript 语法检查通过。",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.1/stories-in-wx-v5.0.1-windows-x64.exe",
     "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.1/stories-in-wx-v5.0.1-macos.dmg"

@@ -103,86 +103,120 @@ def extract(ctx) -> int:
 def _build_lldb_script(pid: int) -> str:
     """渲染 LLDB 内嵌 Python 脚本。
 
-    注意: pid 必须在此处插值注入到脚本顶部。此前版本脚本内直接引用了
-    未定义的 `pid` 变量，`command script import` 执行时立即抛出
-    NameError，LLDB 对外只显示 "error: module importing failed"，
-    导致密钥捕获永远失败 (issue #3)。
+    issue #3 反复出现 "error: module importing failed" 的根因：
+    lldb Python 绑定里 SBTarget.AttachToProcessWithID 的签名是
+    (SBListener listener, pid, SBError error)，第一参数必须是监听器。
+    旧代码误传 SBDebugger，脚本 import 阶段即抛 TypeError，而 lldb 对
+    外只显示一句 "module importing failed"，真实异常被吞掉，导致密钥
+    捕获永远 0/N（issue #3 在 PR #7 后仍复现）。
+
+    因此本脚本约定（均已对照 lldb Python 绑定实测）：
+    1. AttachToProcessWithID 传 debugger.GetListener()；
+    2. 寄存器读取用 SBFrame.FindRegister（SBValueList 没有 GetRegisterByName）；
+    3. 符号回退用 SBModule.FindSymbols（返回 SBSymbolContextList，
+       旧代码误用 FindSymbol 并按其返回列表方式遍历，回退分支从不生效）；
+    4. 断点命中后必须从 listener 手动泵事件：脚本在 lldb 驱动的命令
+       处理器里同步执行，驱动主循环不会并发泵事件，只轮询 GetState()
+       会永远停在 eStateRunning，表现为"断点命中但 0 次捕获"；
+    5. 顶层逻辑整体包 try/except，任何意外异常都会把完整 traceback
+       打到 stdout 并以 FAIL:ScriptError:... 收尾，保证外层一定能看到
+       真实错误，而不再是无从下手的 "module importing failed"。
     """
     script = f"""
-import lldb, time, sys
+import lldb, time, sys, traceback
 
 pid = {pid}
 
-debugger = lldb.SBDebugger.Create()
-# 同步 attach: 异步模式下 AttachToProcessWithID 不等 attach 完成就返回，
-# 随后建断点/Continue 都会在"半挂载"状态下执行而失败，必须先同步
-debugger.SetAsync(False)
-target = debugger.CreateTarget("")
-if not target:
-    print("FAIL:CreateTarget")
-    sys.exit(1)
-
-error = lldb.SBError()
-process = target.AttachToProcessWithID(debugger, pid, error)
-if error.Fail() or not process.IsValid():
-    print(f"FAIL:Attach:{{error}}")
-    sys.exit(1)
-
-# Attach 后按名字在所有模块上创建断点（兼容符号表/导出表两种形态）
-bp_key = target.BreakpointCreateByName("sqlite3_key")
-bp_v2 = target.BreakpointCreateByName("sqlite3_key_v2")
-n_loc = bp_key.GetNumLocations() + bp_v2.GetNumLocations()
-
-# Fallback: 扫描各模块符号表按地址建断点
-# (SBModule.FindSymbol 返回 SBSymbolContextList，需取 .symbol 才有 .addr)
-if n_loc == 0:
-    for mod in target.module_iter():
-        for fn in ["sqlite3_key", "sqlite3_key_v2"]:
-            try:
-                sc_list = mod.FindSymbol(fn)
-            except Exception:
-                continue
-            if not sc_list:
-                continue
-            for i in range(sc_list.GetSize()):
-                sym = sc_list.GetContextAtIndex(i).symbol
-                if not sym:
-                    continue
-                sa = sym.addr
-                if sa and sa.IsValid():
-                    la = sa.GetLoadAddress(target)
-                    if la != lldb.LLDB_INVALID_ADDRESS:
-                        target.BreakpointCreateByAddress(la)
-                        n_loc += 1
-
-print(f"BP:{{n_loc}}")
-if n_loc == 0:
-    try:
-        process.Detach()
-    except Exception:
-        pass
-    print("FAIL:NoSymbol")
-    sys.exit(1)
-
-# attach 与建断点完成后切异步: Continue() 立即返回，下方轮询循环的 30s deadline 才有效
-debugger.SetAsync(True)
-process.Continue()
-
-def _reg(regs, names):
+def _reg(frame, names):
     for n in names:
-        r = regs.GetRegisterByName(n)
+        r = frame.FindRegister(n)
         if r and r.IsValid():
             return r.GetValueAsUnsigned()
     return None
 
-deadline = time.time() + 30
-found = False
-hits = 0
-while time.time() < deadline:
-    if not process.IsValid():
-        print(f"PROCESS_DEAD:{{process.GetState()}}")
-        break
-    if process.GetState() == lldb.eStateStopped:
+def _main():
+    debugger = lldb.SBDebugger.Create()
+    # 同步 attach: 异步模式下 AttachToProcessWithID 不等 attach 完成就返回，
+    # 随后建断点/Continue 都会在"半挂载"状态下执行而失败，必须先同步
+    debugger.SetAsync(False)
+    target = debugger.CreateTarget("")
+    if not target:
+        print("FAIL:CreateTarget")
+        return
+
+    error = lldb.SBError()
+    # 绑定签名: AttachToProcessWithID(SBListener listener, pid, SBError error)
+    # 必须传 debugger.GetListener()；传 debugger 会在 import 期抛 TypeError
+    # （旧代码即为此，issue #3 一直 0/N 的直接原因）。
+    process = target.AttachToProcessWithID(debugger.GetListener(), pid, error)
+    if error.Fail() or not process.IsValid():
+        print(f"FAIL:Attach:{{error}}")
+        return
+
+    # Attach 后按名字在所有模块上创建断点（兼容符号表/导出表两种形态）
+    bp_key = target.BreakpointCreateByName("sqlite3_key")
+    bp_v2 = target.BreakpointCreateByName("sqlite3_key_v2")
+    n_loc = bp_key.GetNumLocations() + bp_v2.GetNumLocations()
+
+    # Fallback: 扫描各模块符号表按地址建断点
+    # (SBModule.FindSymbols 返回 SBSymbolContextList，取 .symbol 才有 .addr)
+    if n_loc == 0:
+        for mod in target.module_iter():
+            for fn in ["sqlite3_key", "sqlite3_key_v2"]:
+                try:
+                    sc_list = mod.FindSymbols(fn)
+                except Exception:
+                    continue
+                if not sc_list:
+                    continue
+                for i in range(sc_list.GetSize()):
+                    sym = sc_list.GetContextAtIndex(i).symbol
+                    if not sym:
+                        continue
+                    sa = sym.addr
+                    if sa and sa.IsValid():
+                        la = sa.GetLoadAddress(target)
+                        if la != lldb.LLDB_INVALID_ADDRESS:
+                            target.BreakpointCreateByAddress(la)
+                            n_loc += 1
+
+    print(f"BP:{{n_loc}}")
+    if n_loc == 0:
+        try:
+            process.Detach()
+        except Exception:
+            pass
+        print("FAIL:NoSymbol")
+        return
+
+    # attach 与建断点完成后切异步: Continue() 立即返回，随后必须自己从
+    # listener 泵事件，进程状态才会更新（见下方 while 循环注释）。
+    debugger.SetAsync(True)
+    listener = debugger.GetListener()
+    process.Continue()
+
+    deadline = time.time() + 30
+    found = False
+    dead = False
+    hits = 0
+    ev = lldb.SBEvent()
+    while time.time() < deadline and not found and not dead:
+        # 关键：脚本是在 lldb 驱动的命令处理器里同步执行的，驱动主循环
+        # 不会并发泵事件；若只轮询 GetState()，进程会永远停在 eStateRunning，
+        # 表现为"断点命中但 0 次捕获"。因此必须从 attach 时传入的 listener
+        # 上取事件并同步进程状态（async 模式下事件即状态变更的唯一来源）。
+        while listener.WaitForEvent(1, ev):
+            if lldb.SBProcess.EventIsProcessEvent(ev):
+                st = lldb.SBProcess.GetStateFromEvent(ev)
+                if st in (lldb.eStateExited, lldb.eStateCrashed,
+                          lldb.eStateDetached, lldb.eStateUnloaded):
+                    dead = True
+                    print(f"PROCESS_DEAD:{{st}}")
+                    break
+        if dead:
+            break
+        if process.GetState() != lldb.eStateStopped:
+            continue
         for thread in process:
             if thread.GetStopReason() != lldb.eStopReasonBreakpoint:
                 continue
@@ -192,14 +226,13 @@ while time.time() < deadline:
             # sqlite3_key_v2(db, zDb, pKey, nKey) -> pKey=arg3, nKey=arg4
             is_v2 = (thread.GetStopReasonDataAtIndex(0) == bp_v2.GetID())
             frame = thread.GetFrameAtIndex(0)
-            regs = frame.GetRegisters()
             # x86_64: rdi/rsi/rdx/rcx = arg1/2/3/4; arm64: x0..x3
             if is_v2:
-                pKey_val = _reg(regs, ["rdx", "x2"])
-                nKey_val = _reg(regs, ["rcx", "x3"])
+                pKey_val = _reg(frame, ["rdx", "x2"])
+                nKey_val = _reg(frame, ["rcx", "x3"])
             else:
-                pKey_val = _reg(regs, ["rsi", "x1"])
-                nKey_val = _reg(regs, ["rdx", "x2"])
+                pKey_val = _reg(frame, ["rsi", "x1"])
+                nKey_val = _reg(frame, ["rdx", "x2"])
             if pKey_val is None:
                 expr = "(const void*)$arg3" if is_v2 else "(const void*)$arg2"
                 v = frame.EvaluateExpression(expr)
@@ -226,17 +259,24 @@ while time.time() < deadline:
             process.Continue()
         except Exception:
             break
-    time.sleep(0.05)
 
-if not found:
-    print(f"FAIL:Timeout hits={{hits}}")
+    if not found:
+        print(f"FAIL:Timeout hits={{hits}}")
 
-# Detach（而非 Kill），保留断点现场恢复，让微信继续运行
+    # Detach（而非 Kill），保留断点现场恢复，让微信继续运行
+    try:
+        if process.IsValid():
+            process.Detach()
+    except Exception:
+        pass
+
 try:
-    if process.IsValid():
-        process.Detach()
-except Exception:
-    pass
+    _main()
+except SystemExit:
+    raise
+except Exception as e:
+    traceback.print_exc(file=sys.stdout)
+    print(f"FAIL:ScriptError:{{type(e).__name__}}: {{e}}")
 """
     return script
 
@@ -269,8 +309,10 @@ def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
                 log(f"[macos_lldb] breakpoint hit: {line[4:]}")
             elif line.startswith("PROCESS_DEAD:"):
                 log(f"[macos_lldb] process died: {line[13:]}")
+            elif line.startswith("Traceback") or line.startswith("  File"):
+                log(f"[macos_lldb] 脚本异常: {line}")
         if result.stderr:
-            err = result.stderr.strip()[:200]
+            err = result.stderr.strip()[:4000]
             if err:
                 log(f"[macos_lldb] stderr: {err}")
     except subprocess.TimeoutExpired:
