@@ -1185,6 +1185,151 @@ class TestVersionSource(unittest.TestCase):
         self.assertEqual(response.headers["Pragma"], "no-cache")
 
 
+class TestEnvInfo(unittest.TestCase):
+    """环境信息采集（供 bug 报告粘贴）：字段齐全、用户名打码、不污染 stdout。"""
+
+    def test_collect_has_fields_required_by_issue_template(self):
+        from siwx import __version__
+        from siwx import env_info
+
+        info = env_info.collect(quiet=True)
+        # 这几个字段对应 issue 模板里要求用户填写的内容
+        for key in ("siwx 版本", "运行模式", "操作系统", "系统版本",
+                    "系统架构", "Python", "数据目录", "密钥库"):
+            self.assertIn(key, info, f"缺少字段: {key}")
+        self.assertEqual(info["siwx 版本"], __version__)
+        self.assertIn(info["运行模式"], ("打包产物", "源码运行"))
+        # 所有值都必须是可直接粘贴的字符串
+        for key, value in info.items():
+            self.assertIsInstance(value, str, f"{key} 不是字符串")
+
+    def test_mask_path_hides_username_on_all_platforms(self):
+        from siwx.env_info import mask_path
+
+        cases = [
+            (r"C:\Users\alice\AppData\Local\stories-in-wx", "alice"),
+            ("/Users/bob/Library/Application Support/stories-in-wx", "bob"),
+            ("/home/carol/.local/share/stories-in-wx", "carol"),
+        ]
+        for raw, user in cases:
+            masked = mask_path(raw)
+            self.assertNotIn(user, masked, f"用户名未打码: {masked}")
+            self.assertIn("<user>", masked)
+
+    def test_format_text_masks_current_user(self):
+        from siwx import env_info
+
+        text = env_info.format_text(quiet=True)
+        self.assertIn("### 环境信息", text)
+        self.assertIn(f"- siwx 版本: {env_info.__version__}", text)
+        user = Path.home().name
+        if user and user not in ("root",):
+            self.assertNotIn(f"\\Users\\{user}", text, "Windows 用户名未打码")
+            self.assertNotIn(f"/Users/{user}", text, "macOS 用户名未打码")
+            self.assertNotIn(f"/home/{user}", text, "Linux 用户名未打码")
+
+    def test_collect_quiet_writes_nothing_to_stdout(self):
+        from siwx import env_info
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            info = env_info.collect(quiet=True)
+        self.assertEqual(buf.getvalue(), "", "quiet=True 仍向 stdout 输出了内容")
+        self.assertTrue(info)
+
+    def test_settings_env_api(self):
+        from flask import Flask
+        from siwx import __version__
+        from siwx import api_settings
+
+        app = Flask(__name__)
+        app.register_blueprint(api_settings.bp)
+        response = app.test_client().get("/api/settings/env")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertIn("info", data)
+        self.assertIn("text", data)
+        self.assertEqual(data["info"]["siwx 版本"], __version__)
+        self.assertIn("### 环境信息", data["text"])
+        # 接口返回的文本同样必须打码
+        user = Path.home().name
+        if user and user not in ("root",):
+            self.assertNotIn(f"\\Users\\{user}", data["text"])
+            self.assertNotIn(f"/Users/{user}", data["text"])
+
+    def test_cli_doctor_prints_paste_block(self):
+        import argparse
+        from siwx import cli
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cli.cmd_doctor(argparse.Namespace())
+
+        self.assertEqual(code, 0)
+        out = buf.getvalue()
+        self.assertIn("### 环境信息", out)
+        self.assertIn("- siwx 版本:", out)
+        self.assertIn("可直接粘贴到 GitHub issue", out)
+
+
+class TestContributionTemplates(unittest.TestCase):
+    """贡献规范化文件存在且 YAML 合法（GitHub 表单格式错误会直接不显示）。"""
+
+    def _parse(self, path: Path):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("未安装 pyyaml，跳过表单格式校验")
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    def test_issue_templates_present_and_valid(self):
+        tpl_dir = ROOT / ".github" / "ISSUE_TEMPLATE"
+        self.assertTrue(tpl_dir.is_dir(), "缺少 .github/ISSUE_TEMPLATE 目录")
+
+        expected = {"bug_report.yml", "feature_request.yml", "question.yml"}
+        found = {p.name for p in tpl_dir.glob("*.yml")}
+        self.assertTrue(expected.issubset(found), f"缺少模板: {expected - found}")
+
+        for name in sorted(expected):
+            data = self._parse(tpl_dir / name)
+            for key in ("name", "description", "body"):
+                self.assertIn(key, data, f"{name} 缺少 {key}")
+            ids = [b.get("id") for b in data["body"] if b.get("id")]
+            self.assertEqual(len(ids), len(set(ids)), f"{name} 存在重复 id")
+            for block in data["body"]:
+                self.assertIn(block.get("type"),
+                              ("markdown", "input", "textarea", "dropdown",
+                               "checkboxes"),
+                              f"{name} 含不支持的字段类型")
+
+    def test_bug_report_requires_version_os_arch(self):
+        """用户明确要求：bug 反馈必须填 siwx 版本、系统版本、架构。"""
+        data = self._parse(ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml")
+        required = {b["id"] for b in data["body"]
+                    if (b.get("validations") or {}).get("required")}
+        for field in ("siwx_version", "os_version", "arch", "os",
+                      "wechat_version", "run_mode", "env_info"):
+            self.assertIn(field, required, f"bug 模板未强制要求 {field}")
+
+    def test_bug_report_arch_is_dropdown(self):
+        data = self._parse(ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml")
+        arch = next(b for b in data["body"] if b.get("id") == "arch")
+        self.assertEqual(arch["type"], "dropdown")
+        options = " ".join(arch["attributes"]["options"]).lower()
+        self.assertIn("x64", options)
+        self.assertIn("arm64", options)
+
+    def test_blank_issues_disabled(self):
+        data = self._parse(ROOT / ".github" / "ISSUE_TEMPLATE" / "config.yml")
+        self.assertTrue(data.get("blank_issues_enabled") is False,
+                        "空白 issue 应被禁用，强制走模板")
+
+    def test_pr_template_and_contributing_present(self):
+        self.assertTrue((ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").is_file())
+        self.assertTrue((ROOT / "CONTRIBUTING.md").is_file())
+
+
 class TestCryptoIntact(unittest.TestCase):
 
     def test_verify_enc_key_byte_layout(self):

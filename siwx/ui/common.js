@@ -168,7 +168,25 @@
     return `<${tag}${attrs}>${body}</${tag}>`;
   }
 
+  /** 复制文本到剪贴板；非安全上下文回退到 execCommand。返回是否成功。 */
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  }
+
   window.SX = { esc, timeStr, fmtTs, fetchJSON, startJob, renderLog, go,
                 setupDone, setSetupDone, resetSetup, imgFallback, openPath,
-                renderNodes };
+                renderNodes, copyText };
 })();

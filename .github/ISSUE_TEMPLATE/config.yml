@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 使用文档 / README
+    url: https://github.com/ImUpXuu/SIWX#readme
+    about: 安装、密钥提取、解密、导出、MCP 接入的完整说明，建议先看这里
+  - name: ❓ 常见问题（FAQ）
+    url: https://github.com/ImUpXuu/SIWX#%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98
+    about: 解密失败、HTML 离线打开、语音导出等高频问题已有解答
+  - name: 📝 技术解析博客
+    url: https://upxuu.com
+    about: 媒体解密思路与微信数据库结构分析

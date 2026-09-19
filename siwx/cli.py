@@ -125,6 +125,20 @@ def cmd_mcp(_args) -> int:
     return 0
 
 
+def cmd_doctor(_args) -> int:
+    """打印环境信息 —— 提交 issue / 反馈问题时可直接粘贴。
+
+    只输出文本块，不提供 --json：插件子命令注册阶段的日志会先写到 stdout，
+    机器可解析的输出目前无法保证，避免给出一个「看起来能用但实际会被污染」的开关。
+    """
+    from siwx import env_info
+    print()
+    print(env_info.format_text(quiet=True))
+    print()
+    print("提示：以上路径中的用户名已打码，可直接粘贴到 GitHub issue。")
+    return 0
+
+
 def main() -> int:
     import os
     import platform
@@ -170,6 +184,10 @@ def main() -> int:
 
     p_mcp = sub.add_parser("mcp", parents=[common], help="MCP 服务器 (stdio, 供 AI 客户端接入)")
     p_mcp.set_defaults(fn=cmd_mcp)
+
+    p_doc = sub.add_parser("doctor", parents=[common],
+                           help="打印环境信息 (提 issue 时粘贴)")
+    p_doc.set_defaults(fn=cmd_doctor)
 
     # ── 插件子命令（插件贡献的 CLI 入口）─────────────────────
     _register_plugin_commands(sub, common)
