@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](./LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-5.0.1-success.svg)](./version.json)
+[![Version](https://img.shields.io/badge/version-5.0.2-success.svg)](./version.json)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](#平台支持)
 
 [快速开始](#快速开始) · [核心功能](#核心功能) · [MCP 接入](#让-ai-读取你的聊天记录mcp) · [免责声明](#免责声明)
