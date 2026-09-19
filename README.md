@@ -361,6 +361,15 @@ git push origin v5.0.0
 本免责声明是对 AGPL-3.0 许可证的补充说明，不改变、也不替代 AGPL-3.0 的条款。若本声明与 AGPL-3.0 存在冲突，以 AGPL-3.0 为准；但本声明的**用途限定与责任免除**部分，应被视为作者在许可之外另行作出的、更严格的使用条件说明。
 
 ---
+## Star History
+
+<a href="https://www.star-history.com/?repos=imupxuu%2Fsiwx&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=imupxuu/siwx&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=imupxuu/siwx&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=imupxuu/siwx&type=date&legend=top-left" />
+ </picture>
+</a>
 
 <div align="center">
 
