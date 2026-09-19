@@ -1146,7 +1146,7 @@ class TestVersionSource(unittest.TestCase):
         from siwx import __version__
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
-        self.assertEqual(__version__, "5.0.2")
+        self.assertEqual(__version__, "5.0.3")
 
     def test_remote_version_uses_newest_source_and_bypasses_cache(self):
         from siwx import auto_update
@@ -1348,6 +1348,306 @@ class TestCryptoIntact(unittest.TestCase):
             prev = int.from_bytes(iv + ct[:len(ct) - 16], "little")
             mine = (int.from_bytes(raw, "little") ^ prev).to_bytes(len(ct), "little")
             self.assertEqual(mine, std, f"ct_len={ct_len}")
+
+
+# ── 数据安全修复：临时文件唯一性（D-2）─────────────────────────
+
+class TestTempFileUniqueness(unittest.TestCase):
+    """`_read_page1` / `decrypt_database` 的临时文件必须并发唯一。
+
+    修复前用 f"siwx_p1_{os.getpid()}.tmp"：Flask 以 threaded=True 运行，
+    `/api/status` 每次请求都会走 `collect_db_files` -> `_read_page1`，
+    「微信占用中」时同进程多线程会撞名互相覆盖，读到对方的 page1，
+    进而把 salt 张冠李戴写进密钥库。
+    """
+
+    def test_read_page1_concurrent_no_crosstalk(self):
+        """并发读取多个文件，每个都必须拿到自己的 page1。"""
+        import threading
+        import builtins
+        from siwx.sqlcipher import PAGE_SZ, _read_page1
+
+        tmp = Path(tempfile.mkdtemp(prefix="siwx_p1_"))
+        try:
+            n = 8
+            targets = []
+            for i in range(n):
+                p = tmp / f"db_{i}" / "message.db"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                marker = 0x10 + i
+                p.write_bytes(bytes([marker]) * 16
+                              + bytes((j + marker) % 256 for j in range(PAGE_SZ - 16)))
+                targets.append((p, marker))
+
+            # 强制走「复制到临时文件」的回退分支
+            real_open = builtins.open
+            locked = {str(p) for p, _ in targets}
+
+            def flaky_open(file, *a, **kw):
+                if str(file) in locked:
+                    raise OSError(13, "simulated lock")
+                return real_open(file, *a, **kw)
+
+            results, errors = {}, []
+            lock = threading.Lock()
+            barrier = threading.Barrier(n)
+
+            def worker(path, marker):
+                barrier.wait()
+                try:
+                    pg = _read_page1(path)
+                    with lock:
+                        results[str(path)] = pg[:16] if pg else None
+                except Exception as e:      # noqa: BLE001
+                    with lock:
+                        errors.append(repr(e))
+
+            builtins.open = flaky_open
+            try:
+                ts = [threading.Thread(target=worker, args=t) for t in targets]
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join()
+            finally:
+                builtins.open = real_open
+
+            self.assertEqual(errors, [], f"并发异常: {errors}")
+            for path, marker in targets:
+                self.assertEqual(
+                    results.get(str(path)), bytes([marker]) * 16,
+                    f"{path.parent.name} 读到的 page1 不匹配（并发串扰）")
+
+            residue = list(Path(tempfile.gettempdir()).glob("siwx_p1_*.tmp"))
+            self.assertEqual(residue, [], f"临时文件残留: {residue}")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_temp_names_are_unique_across_calls(self):
+        """mkstemp 生成的临时名必须唯一（旧实现恒为同一个名）。"""
+        names = []
+        for _ in range(20):
+            fd, name = tempfile.mkstemp(prefix="siwx_p1_", suffix=".tmp")
+            os.close(fd)
+            names.append(name)
+            Path(name).unlink(missing_ok=True)
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_source_uses_mkstemp(self):
+        """源码层面确认临时文件名不再是「固定前缀 + PID」的拼接。
+
+        注意：注释里会引用旧实现的名字做说明，因此只看**代码行**
+        （去掉注释与空行）是否还存在 `gettempdir() / f"siwx_..._{os.getpid()}"`。
+        """
+        src = Path(__file__).resolve().parent.parent / "siwx" / "sqlcipher.py"
+        code_lines = []
+        for line in src.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or not stripped:
+                continue
+            code_lines.append(stripped)
+        code = "\n".join(code_lines)
+        self.assertNotIn("siwx_p1_{os.getpid()}", code,
+                         "仍在使用 PID 拼接的临时文件名")
+        self.assertNotIn("siwx_db_{os.getpid()}", code,
+                         "仍在使用 PID 拼接的临时文件名")
+        self.assertIn("mkstemp", code)
+
+
+# ── 数据安全修复：同名账号冲突检测（方案 C）────────────────────
+
+class TestAccountConflicts(unittest.TestCase):
+
+    def test_detects_duplicate_wxid(self):
+        from siwx.discover import find_account_conflicts
+        dirs = [
+            ("wxid_a", r"C:\x\wxid_a\db_storage"),
+            ("wxid_a", r"D:\x\wxid_a\db_storage"),
+            ("wxid_b", r"C:\x\wxid_b\db_storage"),
+        ]
+        conflicts = find_account_conflicts(dirs)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["wxid"], "wxid_a")
+        self.assertEqual(len(conflicts[0]["dirs"]), 2)
+
+    def test_no_conflict_returns_empty(self):
+        from siwx.discover import find_account_conflicts
+        dirs = [("wxid_a", r"C:\x\a\db_storage"),
+                ("wxid_b", r"C:\x\b\db_storage")]
+        self.assertEqual(find_account_conflicts(dirs), [])
+
+    def test_empty_input(self):
+        from siwx.discover import find_account_conflicts
+        self.assertEqual(find_account_conflicts([]), [])
+
+    def test_three_copies(self):
+        from siwx.discover import find_account_conflicts
+        dirs = [("w", "1"), ("w", "2"), ("w", "3")]
+        c = find_account_conflicts(dirs)
+        self.assertEqual(len(c), 1)
+        self.assertEqual(len(c[0]["dirs"]), 3)
+
+    def test_status_api_exposes_conflicts(self):
+        """/api/status 必须返回 conflicts 字段（前端据此提示）。"""
+        from siwx import server
+        client = server.app.test_client()
+        resp = client.get("/api/status")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("conflicts", resp.get_json())
+
+
+# ── 数据安全修复：manifest 来源保护（方案 B）──────────────────
+
+class TestManifestSourceGuard(unittest.TestCase):
+    """同名账号共用 output/<wxid>/ 时，来源变更不得静默覆盖已存在产物。
+
+    核心兼容约束：旧 manifest 无 @source（升级自 v5.0.x）必须放行，
+    行为与旧版完全一致。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_srcguard_"))
+        from siwx import extract
+        from siwx import pool
+        self.extract, self.pool = extract, pool
+        self._bench = []
+        # 隔离密钥依赖：让 _resolve_key 必定成功，从而走到来源判定分支
+        self._orig = (extract.parse_key, extract.verify_enc_key,
+                      extract.decrypt_parallel)
+        extract.parse_key = lambda k: b"\x00" * 32
+        extract.verify_enc_key = lambda kb, p1: True
+
+        def fake_parallel(tasks, workers=None, on_done=None):
+            res = []
+            for rel, src, dst, key_hex in tasks:
+                Path(dst).parent.mkdir(parents=True, exist_ok=True)
+                Path(dst).write_bytes(b"DECRYPTED")
+                r = (rel, 2, "ok", "")
+                res.append(r)
+                if on_done:
+                    on_done(r)
+            return res
+
+        extract.decrypt_parallel = fake_parallel
+        self._bench.append(fake_parallel)
+
+    def tearDown(self):
+        (self.extract.parse_key, self.extract.verify_enc_key,
+         self.extract.decrypt_parallel) = self._orig
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _entry(self, rel, path, size=8192):
+        from siwx.sqlcipher import DbEntry
+        return DbEntry(rel, Path(path), size, "aa" * 16, b"\x00" * 4096)
+
+    def _make_dirs(self):
+        c = self.tmp / "c" / "wxid_t" / "db_storage"
+        d = self.tmp / "d" / "wxid_t" / "db_storage"
+        for base in (c, d):
+            (base / "contact").mkdir(parents=True, exist_ok=True)
+            (base / "contact" / "contact.db").write_bytes(b"x" * 8192)
+        return c, d
+
+    def test_upgrade_without_source_field_is_allowed(self):
+        """升级场景：旧 manifest 无 @source -> 放行（关键兼容性保证）。"""
+        c, d = self._make_dirs()
+        out = self.tmp / "out" / "wxid_t"
+        (out / "contact").mkdir(parents=True, exist_ok=True)
+        (out / "contact" / "contact.db").write_bytes(b"LEGACY")
+
+        # 模拟 v5.0.2 的 manifest：只有业务键，没有 @source
+        self.pool.save_manifest(out, {
+            "contact\\contact.db": {"size": 1, "mtime": 1, "pages": 1,
+                                    "key": "ab" * 32}})
+
+        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
+                                      entries=entries, use_cache=True)
+        self.assertEqual(rep["conflicts"], 0, "升级用户不应被拦截")
+        self.assertEqual(rep["ok"], 1)
+
+    def test_source_change_blocks_overwrite(self):
+        """来源变更 + 产物存在 -> 跳过，内容不变。"""
+        c, d = self._make_dirs()
+        out = self.tmp / "out" / "wxid_t"
+        (out / "contact").mkdir(parents=True, exist_ok=True)
+        target = out / "contact" / "contact.db"
+        target.write_bytes(b"PROTECT-ME")
+
+        self.pool.save_manifest(out, {
+            self.extract.SOURCE_FIELD: str(c.resolve()).casefold()})
+
+        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
+                                      entries=entries, use_cache=True)
+        self.assertEqual(rep["conflicts"], 1)
+        self.assertEqual(target.read_bytes(), b"PROTECT-ME",
+                         "其他副本的产物被覆盖了")
+
+    def test_same_source_allows_decrypt(self):
+        """来源一致 -> 正常解密。"""
+        c, d = self._make_dirs()
+        out = self.tmp / "out" / "wxid_t"
+        (out / "contact").mkdir(parents=True, exist_ok=True)
+        (out / "contact" / "contact.db").write_bytes(b"OLD")
+
+        self.pool.save_manifest(out, {
+            self.extract.SOURCE_FIELD: str(d.resolve()).casefold()})
+
+        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
+                                      entries=entries, use_cache=True)
+        self.assertEqual(rep["conflicts"], 0)
+        self.assertEqual(rep["ok"], 1)
+
+    def test_writes_source_when_absent(self):
+        """无历史来源且成功解密后，必须写入 @source。"""
+        c, d = self._make_dirs()
+        out = self.tmp / "out" / "wxid_t"
+        (out / "contact").mkdir(parents=True, exist_ok=True)
+
+        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
+                                entries=entries, use_cache=True)
+        m = self.pool.load_manifest(out)
+        self.assertEqual(m.get(self.extract.SOURCE_FIELD),
+                         str(d.resolve()).casefold())
+
+    def test_no_conflict_when_no_existing_artifact(self):
+        """来源变更但无产物 -> 不拦截。"""
+        c, d = self._make_dirs()
+        out = self.tmp / "out" / "wxid_t"
+        (out / "contact").mkdir(parents=True, exist_ok=True)   # 目录在，文件不在
+        self.pool.save_manifest(out, {
+            self.extract.SOURCE_FIELD: str(c.resolve()).casefold()})
+
+        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
+                                      entries=entries, use_cache=True)
+        self.assertEqual(rep["conflicts"], 0)
+        self.assertEqual(rep["ok"], 1)
+
+    def test_source_field_coexists_with_business_keys(self):
+        """@source 与业务键混存不互相干扰。"""
+        out = self.tmp / "out" / "wxid_t"
+        out.mkdir(parents=True)
+        self.pool.save_manifest(out, {
+            "contact\\contact.db": {"size": 1, "mtime": 1, "pages": 1,
+                                    "key": "ab" * 32},
+            self.extract.SOURCE_FIELD: "d:\\x"})
+        m = self.pool.load_manifest(out)
+        self.assertEqual(len(m), 2)
+        self.assertIn("contact\\contact.db", m)
+        self.assertEqual(m.get(self.extract.SOURCE_FIELD), "d:\\x")
+
+    def test_report_includes_conflicts_count(self):
+        """report 必须带 conflicts 字段（供上层/日志展示）。"""
+        c, d = self._make_dirs()
+        out = self.tmp / "out" / "wxid_t"
+        (out / "contact").mkdir(parents=True, exist_ok=True)
+        rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
+                                      entries=[], use_cache=True)
+        self.assertIn("conflicts", rep)
 
 
 if __name__ == "__main__":

@@ -79,6 +79,28 @@ def wxid_of(db_dir) -> str:
     return p.parent.name or "unknown"
 
 
+def find_account_conflicts(dirs=None) -> list:
+    """检测同名账号（多个 db_dir 映射到同一输出目录）。
+
+    `wxid_of()` 只取 db_dir 的父目录名，而 `find_wechat_data_dirs()` 会扫描
+    所有盘符与所有用户目录 —— 同一个微信号在 C 盘和 D 盘各留一份
+    xwechat_files 时（换过数据盘、迁移残留、备份副本），会产生两条 wxid
+    相同、db_dir 不同的记录，但它们共用 `output/<wxid>/`：
+    后跑的那份会覆盖先跑的产物。
+
+    本函数只做**检测与告警**，不改变目录解析行为（零破坏性）。
+
+    返回 [{"wxid": str, "dirs": [db_dir, ...]}]，无冲突时返回 []。
+    """
+    if dirs is None:
+        dirs = find_wechat_data_dirs()
+    grouped: dict = {}
+    for wxid, db in dirs:
+        grouped.setdefault(wxid, []).append(db)
+    return [{"wxid": w, "dirs": d} for w, d in sorted(grouped.items())
+            if len(d) > 1]
+
+
 def find_wechat_pids():
     """运行中的微信进程（按内存占用降序，主进程优先）。"""
     system = platform.system()

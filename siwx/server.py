@@ -14,8 +14,9 @@ from werkzeug.exceptions import HTTPException
 
 from siwx import extract, keystore, logger as log
 from siwx import paths as _paths
-from siwx.discover import (add_manual_data_dir, find_wechat_data_dirs,
-                           find_wechat_pids, load_manual_data_dirs, wxid_of)
+from siwx.discover import (add_manual_data_dir, find_account_conflicts,
+                           find_wechat_data_dirs, find_wechat_pids,
+                           load_manual_data_dirs, wxid_of)
 from siwx.sqlcipher import collect_db_files
 
 
@@ -222,6 +223,14 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         if not dirs:
             raise RuntimeError("未找到微信数据目录 — 请确认本机登录过微信")
         _log(f"[job] 发现 {len(dirs)} 个账号")
+
+        # 同名账号告警：多个 db_dir 映射到同一 output/<wxid>/ 时，后跑的会覆盖
+        # 先跑的产物。这里只提示，不阻断（用户可能确实想重新解密某一副本）。
+        for c in find_account_conflicts(dirs):
+            _log(f"[job] ⚠ 账号 {c['wxid']} 发现 {len(c['dirs'])} 个副本目录，"
+                 f"它们共用同一输出目录，解密会互相覆盖：")
+            for i, d in enumerate(c["dirs"], 1):
+                _log(f"[job]      {i}. {d}")
 
         if mode == "keys":
             _log("[job] 步骤1/2: 收集数据库文件…")
@@ -465,7 +474,8 @@ def status():
                   for _wxid, db in load_manual_data_dirs()}
     store = keystore.load()
     from siwx.sqlcipher import parse_key, verify_enc_key
-    for wxid, db in find_wechat_data_dirs():
+    all_dirs = find_wechat_data_dirs()
+    for wxid, db in all_dirs:
         total = cached = 0
         try:
             for e in collect_db_files(db):
@@ -491,6 +501,8 @@ def status():
         "pids": pids,
         "accounts": accounts,
         "stored_salts": len(store),
+        # 同名账号冲突：多个 db_dir 共用 output/<wxid>/，解密会互相覆盖
+        "conflicts": find_account_conflicts(all_dirs),
     })
 
 

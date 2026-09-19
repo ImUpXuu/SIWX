@@ -59,15 +59,24 @@ def _read_page1(path: Path):
         with open(path, "rb") as f:
             page1 = f.read(PAGE_SZ)
     except OSError:
-        # 微信占用中：复制到临时文件再读
+        # 微信占用中：复制到临时文件再读。
+        # 必须用 mkstemp 生成唯一名：Flask 以 threaded=True 运行，且 /api/status
+        # 每次请求都会走这里，「微信占用中」时同进程多线程会同时复制。旧实现
+        # 用 f"siwx_p1_{os.getpid()}.tmp" 只含 PID，两个线程会撞名互相覆盖，
+        # 导致读到对方的 page1 → salt 张冠李戴 → 污染 DPAPI 密钥库。
+        tmp = None
         try:
-            tmp = Path(tempfile.gettempdir()) / f"siwx_p1_{os.getpid()}.tmp"
+            fd, name = tempfile.mkstemp(prefix="siwx_p1_", suffix=".tmp")
+            os.close(fd)
+            tmp = Path(name)
             shutil.copy2(path, tmp)
             with open(tmp, "rb") as f:
                 page1 = f.read(PAGE_SZ)
-            tmp.unlink(missing_ok=True)
         except OSError:
             return None
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
     if len(page1) < PAGE_SZ or page1.count(0) == PAGE_SZ:
         return None
     return page1
@@ -114,9 +123,19 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
     try:
         fin = open(src, "rb", buffering=8 * 1024 * 1024)
     except OSError:
-        tmp_copy = Path(tempfile.gettempdir()) / f"siwx_db_{os.getpid()}.tmp"
-        shutil.copy2(src, tmp_copy)
-        fin = open(tmp_copy, "rb", buffering=8 * 1024 * 1024)
+        # 同 _read_page1：唯一临时名，避免同进程并发撞名互相覆盖。
+        fd, name = tempfile.mkstemp(prefix="siwx_db_", suffix=".tmp")
+        os.close(fd)
+        tmp_copy = Path(name)
+        try:
+            shutil.copy2(src, tmp_copy)
+            fin = open(tmp_copy, "rb", buffering=8 * 1024 * 1024)
+        except OSError:
+            # 复制/打开失败时立刻清理，否则空的 mkstemp 文件会残留在 TEMP
+            # （异常会跳过下方第二个 try 的 finally）。
+            tmp_copy.unlink(missing_ok=True)
+            tmp_copy = None
+            raise
 
     try:
         size = os.fstat(fin.fileno()).st_size
