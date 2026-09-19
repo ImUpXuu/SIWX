@@ -44,10 +44,15 @@ _KEY_FILE_NAME = "media_key.json"
 
 
 def _key_file() -> Path:
-    base = (os.environ.get("LOCALAPPDATA")
-            or os.environ.get("USERPROFILE")
-            or str(Path(tempfile.gettempdir())))
-    return Path(base) / "stories-in-wx" / "media_key.json"
+    """派生密钥缓存位置：系统数据目录（与 cwd / 安装位置解耦，issue #11）。"""
+    try:
+        from siwx.paths import data_dir
+        return data_dir() / "media_key.json"
+    except Exception:
+        base = (os.environ.get("LOCALAPPDATA")
+                or os.environ.get("USERPROFILE")
+                or str(Path(tempfile.gettempdir())))
+        return Path(base) / "stories-in-wx" / "media_key.json"
 
 
 def _load_key_cache() -> dict:

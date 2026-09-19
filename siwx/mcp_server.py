@@ -6,7 +6,8 @@
 传输: stdio, newline-delimited JSON-RPC 2.0（MCP 2024-11-05 规范）
 启动: python run.py mcp
 说明: 与 Web 控制台共用密钥库与解密产物，只读查询，不做解密操作。
-工具开关配置: %LOCALAPPDATA%/stories-in-wx/mcp_config.json
+工具开关配置: Windows=%LOCALAPPDATA%/stories-in-wx/mcp_config.json
+             macOS=~/Library/Application Support/stories-in-wx/mcp_config.json
 """
 import hashlib
 import json
@@ -33,22 +34,29 @@ JSON = "application/json"
 # ── MCP 专用日志（轮转文件 + 详细调用记录）──────────────────────
 
 def _mcp_log_path() -> Path:
-    base = (os.environ.get("LOCALAPPDATA")
-            or os.environ.get("USERPROFILE") or ".")
-    return Path(base) / "stories-in-wx" / "mcp.log"
+    # 跨平台数据目录（Windows=LOCALAPPDATA, macOS=~/Library/Application Support,
+    # Linux=XDG）。旧实现兜底 "."，双击 .app 启动时 cwd 为只读的 /，
+    # mkdir 直接 Errno 30 导致应用秒退 (issue #11)。
+    return paths.data_dir() / "mcp.log"
 
 def _setup_mcp_logger() -> logging.Logger:
     logger = logging.getLogger("siwx.mcp")
     if logger.handlers:
         return logger
     logger.setLevel(logging.DEBUG)
-    p = _mcp_log_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fh = RotatingFileHandler(p, maxBytes=2 * 1024 * 1024, backupCount=3,
-                              encoding="utf-8")
-    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
-                                      datefmt="%Y-%m-%d %H:%M:%S"))
-    logger.addHandler(fh)
+    try:
+        p = _mcp_log_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(p, maxBytes=2 * 1024 * 1024, backupCount=3,
+                                  encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
+                                          datefmt="%Y-%m-%d %H:%M:%S"))
+        logger.addHandler(fh)
+    except OSError as e:
+        # 日志文件不可用（只读卷/权限/磁盘满）绝不能阻塞应用启动：
+        # 退化为无文件日志，仅保留控制台输出
+        print(f"[mcp] MCP 日志文件初始化失败({e})，本轮无文件日志", file=sys.stderr)
+        logger.addHandler(logging.NullHandler())
     return logger
 
 mcp_log = _setup_mcp_logger()
@@ -57,9 +65,7 @@ mcp_log = _setup_mcp_logger()
 # ── 配置（工具开关）─────────────────────────────────────────────
 
 def config_path() -> Path:
-    base = (os.environ.get("LOCALAPPDATA")
-            or os.environ.get("USERPROFILE") or ".")
-    return Path(base) / "stories-in-wx" / "mcp_config.json"
+    return paths.data_dir() / "mcp_config.json"
 
 
 def load_config() -> dict:
