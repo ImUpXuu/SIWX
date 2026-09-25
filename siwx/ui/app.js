@@ -7,7 +7,9 @@
  */
 (function () {
   const PAGES_BUILTIN = ['guide', 'chat', 'stats', 'export', 'mcp', 'logs', 'settings'];
-  const UI_VERSION = '2026091302';
+  const UI_VERSION = '2026092501';
+  // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
+  const DISCLAIMER_VERSION = '20260925';
 
   let pluginPages = [];            // 服务端已按显示条件过滤
   let current = null;              // { name, mod }
@@ -98,6 +100,7 @@
   }
 
   async function navigate() {
+    if (overlayOpen) return;                 // 免责声明弹层打开期间冻结导航
     let name = currentPageName();
     if (!allPages().includes(name)) {
       name = defaultRoute();
@@ -147,15 +150,105 @@
     }
   }
 
+  /* ── 免责声明门 ───────────────────────────────────────────
+   * 首次启动 / 条款版本更新后先展示全文并要求确认；未确认前冻结全部页面。
+   * 确认状态存 localStorage（siwx-disclaimer-ack = 条款版本号），侧栏可随时重看。 */
+  let overlayOpen = false;
+
+  function disclaimerAcked() {
+    return localStorage.getItem('siwx-disclaimer-ack') === DISCLAIMER_VERSION;
+  }
+
+  async function openDisclaimer(mode) {   // 'gate' 需确认 | 'review' 重读
+    if (overlayOpen) return;
+    overlayOpen = true;
+    const ov = document.createElement('div');
+    ov.className = 'disc-overlay';
+    const card = document.createElement('div');
+    card.className = 'disc-card';
+
+    const head = document.createElement('div');
+    head.className = 'disc-head';
+    const h2 = document.createElement('h2');
+    h2.textContent = '免责声明 · 法律声明';
+    const ver = document.createElement('span');
+    ver.className = 'hint';
+    ver.textContent = `v${DISCLAIMER_VERSION}`;
+    head.append(h2, ver);
+
+    const sub = document.createElement('div');
+    sub.className = 'disc-sub';
+    sub.textContent = mode === 'gate'
+      ? '首次使用需阅读并确认本声明后才能进入控制台；条款更新后会再次弹出。'
+      : '以下是本声明的全文。';
+
+    const body = document.createElement('div');
+    body.className = 'disc-body';
+    body.textContent = '加载中…';
+
+    const actions = document.createElement('div');
+    actions.className = 'disc-actions';
+    if (mode === 'gate') {
+      const decline = document.createElement('button');
+      decline.className = 'btn';
+      decline.textContent = '不同意并退出';
+      decline.addEventListener('click', () => {
+        window.close();                       // 仅对脚本打开的窗口有效
+        body.innerHTML = '';
+        body.insertAdjacentHTML('beforeend',
+          '<div class="card"><h2>你未同意免责声明</h2>' +
+          '<p class="dim">已停止提供服务，请关闭本页并删除本工具。若为误点，请刷新页面重新阅读。</p></div>');
+        actions.innerHTML = '';
+      });
+      const accept = document.createElement('button');
+      accept.className = 'btn btn-primary';
+      accept.textContent = '我已阅读并同意';
+      accept.addEventListener('click', () => {
+        localStorage.setItem('siwx-disclaimer-ack', DISCLAIMER_VERSION);
+        ov.remove();
+        overlayOpen = false;
+        navigate();
+      });
+      actions.append(decline, accept);
+    } else {
+      const close = document.createElement('button');
+      close.className = 'btn btn-primary';
+      close.textContent = '关闭';
+      close.addEventListener('click', () => { ov.remove(); overlayOpen = false; });
+      actions.append(close);
+    }
+
+    card.append(head, sub, body, actions);
+    ov.appendChild(card);
+    document.body.appendChild(ov);
+    try {
+      const r = await fetch(`/pages/disclaimer.html?v=${UI_VERSION}`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      body.innerHTML = await r.text();
+    } catch (e) {
+      body.innerHTML = '';
+      body.insertAdjacentHTML('beforeend',
+        '<div class="card"><h2>免责声明加载失败</h2>' +
+        `<p class="dim">${SX.esc(String(e))}</p>` +
+        '<p class="dim">请前往 GitHub 仓库（github.com/ImUpXuu/SIWX）阅读 README 中的完整免责声明后，刷新本页重试。</p></div>');
+    }
+  }
+
   initTheme();
   document.getElementById('side-theme').addEventListener('click', () => {
     const el = document.documentElement;
     el.dataset.theme = el.dataset.theme === 'dark' ? 'light' : 'dark';
     localStorage.setItem('siwx-theme', el.dataset.theme);
   });
+  document.getElementById('side-disclaimer').addEventListener('click',
+    () => openDisclaimer('review'));
   window.addEventListener('hashchange', navigate);
   sideStatus();
   setInterval(sideStatus, 5000);
   loadPluginMenu();      // 先拉插件菜单，再决定路由
-  navigate();
+  if (disclaimerAcked()) {
+    navigate();
+  } else {
+    openDisclaimer('gate');
+  }
 })();
