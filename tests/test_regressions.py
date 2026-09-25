@@ -1650,5 +1650,47 @@ class TestManifestSourceGuard(unittest.TestCase):
         self.assertIn("conflicts", rep)
 
 
+class TestDisclaimerSync(unittest.TestCase):
+    """免责声明双源同步：README 与控制台弹层（ui/pages/disclaimer.html）必须一致。
+
+    免责条款改写时两处必须同步更新，避免「文档说一套、应用里另一套」。
+    若调整哨兵条款的措辞，请同步修改本测试。
+    """
+
+    README = ROOT / "README.md"
+    UI_DISCLAIMER = ROOT / "siwx" / "ui" / "pages" / "disclaimer.html"
+
+    def test_ui_disclaimer_file_exists(self):
+        self.assertTrue(self.UI_DISCLAIMER.is_file(),
+                        "缺少 siwx/ui/pages/disclaimer.html（控制台免责弹层全文）")
+
+    def test_key_clauses_present_in_both_sources(self):
+        readme = self.README.read_text(encoding="utf-8")
+        ui = self.UI_DISCLAIMER.read_text(encoding="utf-8")
+        for phrase in (
+            "技术研究与个人数据管理工具",
+            "数据权属合法",
+            "取得必要授权",
+            "账号被平台限制或封禁",
+            "世界多数国家和地区",
+            "AS IS",
+            "明文或不完全加密",
+            "接入 AI 客户端前自行评估",
+            "本声明不修改、不限制 AGPL-3.0 已授予的权利",
+            "商用支持需另行授权",
+            "可分割性与更新",
+        ):
+            self.assertIn(phrase, readme, f"README 免责声明缺少关键条款：{phrase}")
+            self.assertIn(phrase, ui, f"应用内免责声明缺少关键条款：{phrase}")
+
+    def test_consent_gate_wired_into_shell(self):
+        app_js = (ROOT / "siwx" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("DISCLAIMER_VERSION", app_js, "app.js 缺少免责条款版本常量")
+        self.assertIn("siwx-disclaimer-ack", app_js, "app.js 未接入确认状态（localStorage）")
+        self.assertIn("/pages/disclaimer.html", app_js, "app.js 未加载免责声明全文")
+        index_html = (ROOT / "siwx" / "ui" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="side-disclaimer"', index_html, "侧栏缺少免责声明查看入口")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

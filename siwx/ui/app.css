@@ -210,3 +210,36 @@ input, select, textarea {
 input:hover, select:hover, textarea:hover { background: var(--card-alt); }
 input:disabled, select:disabled, textarea:disabled { opacity: .55; cursor: not-allowed; background: #f5f5f5; }
 input[type="checkbox"] { accent-color: var(--text); min-height: auto; }
+
+/* ── 免责声明弹层（壳层组件，由 app.js 注入）──────────── */
+.disc-overlay {
+  position: fixed; inset: 0; z-index: 90; overflow-y: auto;
+  background: var(--bg);              /* 不透明底：未同意前不透出任何页面内容 */
+  display: flex; justify-content: center;
+  padding: 28px 16px;
+}
+.disc-card {
+  width: min(760px, 100%); flex: none;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  display: flex; flex-direction: column; max-height: calc(100vh - 56px);
+}
+.disc-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 18px 24px 0; }
+.disc-head h2 { font-size: 17px; font-weight: 700; color: var(--text); }
+.disc-sub { font-size: 12px; color: var(--muted); padding: 4px 24px 12px; }
+.disc-body { flex: 1; overflow-y: auto; padding: 0 24px; }
+.disc-body h4 { font-size: 13.5px; font-weight: 700; margin: 16px 0 6px; }
+.disc-body p { font-size: 13px; margin: 6px 0; }
+.disc-body ul { padding-left: 20px; }
+.disc-body li { font-size: 13px; margin: 3px 0; }
+.disc-lead {
+  font-size: 12.5px; line-height: 1.6; margin: 10px 0 4px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--card-alt); padding: 10px 12px;
+}
+.disc-foot { margin: 14px 0 4px; border-top: 1px dashed var(--line); padding-top: 10px; font-size: 12px; }
+.disc-actions {
+  display: flex; justify-content: flex-end; gap: 10px;
+  padding: 16px 24px 20px; border-top: 1px solid var(--line-soft);
+}
+.disc-overlay::-webkit-scrollbar { width: 8px; }
+.disc-overlay::-webkit-scrollbar-thumb { background: var(--text); border-radius: 999px; border: 2px solid var(--bg); }
