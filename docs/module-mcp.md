@@ -38,7 +38,7 @@
 | `list_sessions` | 列出某账号的全部会话（含预览） | `account`, `limit?` |
 | `get_messages` | 读取某会话最新 N 条消息（正序） | `account`, `chat`, `limit?` |
 | `search_messages` | 按关键词搜索（指定会话或全库扫描） | `account`, `keyword`, `chat?`, `limit?` |
-| `export_chat` | 导出某会话到文件 | `account`, `chat`, `format?`, `media?`, `avatars?` |
+| `export_chat` | 导出某会话到文件 | `account`, `chat`, `format?`, `media?`, `avatars?`, `voice?`, `pack?` |
 
 ---
 
@@ -107,7 +107,7 @@ PyInstaller 打包后：
 {"tools": {"get_status": true, "search_messages": false}}
 ```
 
-配置文件位置：`%LOCALAPPDATA%\stories-in-wx\mcp_config.json`
+配置文件位置：`paths.data_dir() / "mcp_config.json"`（跨平台，Windows 上为 `%LOCALAPPDATA%\stories-in-wx\mcp_config.json`）
 
 ---
 
@@ -126,6 +126,6 @@ PyInstaller 打包后：
 
 ### 安全
 
-- MCP 服务器**只读**：不执行解密、不修改密钥库
+- MCP 服务器**查询只读**：`get_status` / `list_accounts` / `list_sessions` / `get_messages` / `search_messages` 不执行解密、不修改密钥库；`export_chat` 会调用 `exporter.run_export()` 执行媒体解密并写入 `exports/` 目录
 - 工具开关：可在配置页禁用敏感工具（如 `export_chat`）
 - 数据不外流：stdio 本地通信，无网络端口

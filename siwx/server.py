@@ -106,6 +106,7 @@ from siwx.api_mcp import bp as mcp_bp  # noqa: E402
 from siwx.api_update import bp as update_bp  # noqa: E402
 from siwx.api_plugins import bp as plugins_bp  # noqa: E402
 from siwx.api_stats import bp as stats_bp  # noqa: E402
+from siwx.api_sns import bp as sns_bp  # noqa: E402
 app.register_blueprint(chat_bp)
 app.register_blueprint(settings_bp)
 app.register_blueprint(export_bp)
@@ -113,6 +114,7 @@ app.register_blueprint(mcp_bp)
 app.register_blueprint(update_bp)
 app.register_blueprint(plugins_bp)
 app.register_blueprint(stats_bp)
+app.register_blueprint(sns_bp)
 
 # 插件发现与加载（目录自动发现，逐插件隔离；失败不阻塞启动）
 from siwx.plugins import load_all as _load_plugins  # noqa: E402
@@ -219,6 +221,57 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                      no_cache=no_cache, workers=workers)
     _t0 = time.time()
     try:
+        # 朋友圈导出只依赖已解密产物，无需扫描微信数据目录（省一次全盘发现）
+        if mode == "sns_export":
+            from siwx import sns_export
+            data = export_opts or {}
+            account = data.get("account") or ""
+            acc_dir = _paths.out_root() / account
+            db = acc_dir / "sns" / "sns.db"
+            if not db.is_file():
+                raise RuntimeError("该账号还没有朋友圈数据库，请先完成引导")
+            fmt = data.get("format", "json")
+            if fmt not in sns_export.FORMATS:
+                raise RuntimeError(f"不支持的导出格式: {fmt}")
+            users = data.get("usernames") or None
+            if not users and data.get("username"):
+                users = [data["username"]]
+            _log(f"[sns] 账号={account} 格式={fmt} 媒体={bool(data.get('media'))} "
+                 f"图片={data.get('images', True)} 视频={data.get('videos', True)} "
+                 f"实况={data.get('livephotos', True)} "
+                 f"并发={data.get('concurrency') or sns_export.DEFAULT_CONCURRENCY}")
+            if users:
+                _log(f"[sns] 发布者筛选: {', '.join(map(str, users))}")
+            if data.get("keyword"):
+                _log(f"[sns] 关键词: {data['keyword']}")
+            res = sns_export.run_sns_export(
+                db, account, fmt=fmt,
+                usernames=users,
+                start=data.get("start"), end=data.get("end"),
+                want_media=bool(data.get("media")),
+                want_images=bool(data.get("images", True)),
+                want_videos=bool(data.get("videos", True)),
+                want_livephotos=bool(data.get("livephotos", True)),
+                concurrency=data.get("concurrency") or sns_export.DEFAULT_CONCURRENCY,
+                cache_dir=acc_dir / "sns_media",
+                limit=data.get("limit"),
+                keyword=data.get("keyword"),
+                progress=lambda done, total, msg: _log(f"[sns] {done}/{total} {msg}"),
+            )
+            if not res.get("ok"):
+                raise RuntimeError(res.get("error") or "朋友圈导出失败")
+            m = res.get("media") or {}
+            _log(f"[sns] 导出完成：{res['count']} 条动态，"
+                 f"媒体 {m.get('ok', 0)}/{m.get('total', 0)}（失败 {m.get('fail', 0)}），"
+                 f"耗时 {res.get('duration_ms', 0)}ms")
+            report = {"kind": "sns_export", **res}
+            with _lock:
+                _job["ok"] = True
+                _job["report"] = report
+            _emit_task_event("done", mode=mode, ok=True, report=report,
+                             duration_ms=int((time.time() - _t0) * 1000))
+            return
+
         dirs = ([(wxid_of(db_dir), db_dir)] if db_dir else find_wechat_data_dirs())
         if not dirs:
             raise RuntimeError("未找到微信数据目录 — 请确认本机登录过微信")

@@ -25,7 +25,7 @@
 ┌─────────────┐ ┌─────────────┐   ┌─────────────┐ ┌─────────────┐
 │ 策略链       │ │ 解密池       │   │ 媒体解密     │ │ 导出引擎     │
 │ strategies/ │ │ pool.py     │   │ media.py    │ │ exporter.py │
-│ (4 个策略)   │ │ (多进程)     │   │ (V0/V1/V2)  │ │ (8 种格式)  │
+│ (平台条件)   │ │ (多进程)     │   │ (V0/V1/V2)  │ │ (8 种格式)  │
 └──────┬──────┘ └──────┬──────┘   └──────┬──────┘ └──────┬──────┘
        │               │                  │               │
        ▼               ▼                  ▼               ▼
@@ -68,11 +68,12 @@ extract.py 编排器
   │
   ├─ 4. 逐账号提取 (extract_keys_for_dir)
   │     ├─ 预置密钥（全局收割/密钥库）→ HMAC 复核
-  │     ├─ run_strategies(ctx) → 策略链
+  │     ├─ run_strategies(ctx) → 策略链（平台条件加载）
   │     │    ├─ keystore_source  (密钥库缓存)
   │     │    ├─ mmkv             (MMKV 离线)
-  │     │    ├─ config_cipher    (WCDB Config.Cipher 主力)
-  │     │    └─ memscan          (内存字面量兜底)
+  │     │    ├─ config_cipher    (WCDB Config.Cipher 主力, Windows)
+  │     │    ├─ memscan          (内存字面量兜底, Windows)
+  │     │    └─ macos_lldb       (LLDB 断点 + PBKDF2, macOS)
   │     └─ 交叉验证：已知密钥复测缺失 salt
   │
   └─ 5. 保存到 DPAPI 密钥库
@@ -100,7 +101,15 @@ media.py → get_image()
   │    ├─ ② Bubble 气泡缓存
   │    └─ ③ Thumb 明文缩略图
   ├─ 按头分派：V2(账号key) / V1(固定key) / V0(XOR自动检测)
-  └─ wxgf → VoipEngine.dll 转码
+  └─ wxgf → VoipEngine.dll 转码（仅 Windows）
+```
+
+### 阶段 5：朋友圈（SNS）
+
+```
+sns.py → parse_timeline() → 解析 XML → 结构化 dict
+sns_cdn.py → fetch_media() → CDN 下载 + ISAAC64 解密
+sns_isaac64.py → keystream() → 纯 Python ISAAC64 实现
 ```
 
 ---
@@ -151,8 +160,8 @@ def extract(ctx) -> int:
 | 特性 | 说明 |
 |---|---|
 | 索引方式 | salt_hex（数据库真实身份） |
-| 加密方式 | Windows DPAPI + 项目熵 (`CryptProtectData`) |
-| 存储位置 | `%LOCALAPPDATA%\stories-in-wx\keystore.bin` |
+| 加密方式 | Windows DPAPI + 项目熵 (`CryptProtectData`)；非 Windows 为明文 JSON |
+| 存储位置 | `paths.data_dir() / "keystore.bin"`（跨平台） |
 | 命中条件 | 全部 salt 在库中有有效 key |
 | 效果 | 跳过内存扫描，秒回 |
 
@@ -211,7 +220,7 @@ PyCryptodome 的 CBC 模式每页调用一次 `AES.new()`，
 
 | 边界 | 实现 |
 |---|---|
-| 密钥静止加密 | DPAPI + 项目熵，不落明文 |
+| 密钥静止加密 | DPAPI + 项目熵，不落明文（非 Windows 为明文 JSON） |
 | 进程只读访问 | `PROCESS_VM_READ \| PROCESS_QUERY_INFORMATION` |
 | 日志脱敏 | 只输出 salt + 打码密钥 (`xxxxxx…xxxx`) |
 | 媒体不落盘 | 内存 LRU 缓存，程序关闭释放 |

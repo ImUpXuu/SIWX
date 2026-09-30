@@ -14,7 +14,7 @@
 - 名称: stories-in-wx
 - 图标: (可选)
 - 数据文件: siwx/ui/ → ui/
-- 可选二进制: siwx/vendor/silk-decoder/**/silk_v3_decoder(.exe) → vendor/silk-decoder/
+- 可选二进制: siwx/vendor/silk-decoder/**/silk_v3_decoder(.exe) → vendor/silk-decoder/（仓库中不存在，代码会优雅跳过）
 - 隐藏导入: pilk
 ```
 
@@ -84,14 +84,8 @@ def _ui_dir() -> Path:
 ### 隐藏导入
 
 ```python
-# spec 文件中
-hiddenimports=[
-    'siwx.strategies',
-    'siwx.strategies.config_cipher',
-    'siwx.strategies.keystore_source',
-    'siwx.strategies.mmkv',
-    'siwx.strategies.memscan',
-]
+# spec 文件中（实际配置）
+hiddenimports=["pilk"]
 ```
 
 ---
@@ -110,14 +104,14 @@ hiddenimports=[
 
 ```json
 {
-  "version": "5.0.0",
-  "date": "2026-09-12 07:28:41",
-  "notes": "stories-in-wx v5.0.0",
+  "version": "5.0.3",
+  "date": "2026-09-19 04:40:19",
+  "notes": "stories-in-wx v5.0.3",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.0/stories-in-wx-v5.0.0-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.0/stories-in-wx-v5.0.0-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.3/stories-in-wx-v5.0.3-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.3/stories-in-wx-v5.0.3-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.0/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.3/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
@@ -154,6 +148,7 @@ psutil>=5.9           # 进程发现
 openpyxl>=3.1         # XLSX 导出
 rich>=13.0            # 终端 UI
 zstandard>=0.22       # zstd 解压（消息内容）
+pilk>=0.2.4           # SILK 语音解码（纯 Python）
 ```
 
 ---

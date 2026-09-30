@@ -16,11 +16,14 @@
 ## 存储位置
 
 ```
-%LOCALAPPDATA%\stories-in-wx\keystore.bin
+paths.data_dir() / "keystore.bin"
 ```
 
-通常是：
-`C:\Users\<user>\AppData\Local\stories-in-wx\keystore.bin`
+- Windows: `%LOCALAPPDATA%\stories-in-wx\keystore.bin`
+- macOS: `~/Library/Application Support/stories-in-wx/keystore.bin`
+- Linux: `~/.local/share/stories-in-wx/keystore.bin`
+
+旧版本路径（`%LOCALAPPDATA%\stories-in-wx\keystore.bin` 或安装目录下）会自动迁移到新位置。
 
 ---
 
@@ -74,14 +77,16 @@ WindowsPath('C:/Users/xxx/AppData/Local/stories-in-wx/keystore.bin')
 
 ```
 流程:
-1. 检查文件是否存在
-2. 读取二进制内容
-3. CryptUnprotectData() 解密
-4. JSON 解析
-5. 返回 dict
+1. 检查新位置文件是否存在
+2. 若不存在，检查旧位置（兼容迁移）
+3. 读取二进制内容
+4. CryptUnprotectData() 解密（非 Windows 为明文 JSON）
+5. JSON 解析
+6. 返回 dict
 ```
 
 **异常处理**: 任何错误（文件不存在、解密失败、JSON 解析错误）返回空 dict。
+**向后兼容**: 旧位置数据自动迁移到新位置。
 
 ---
 
@@ -129,6 +134,11 @@ for key in unique_keys(store):
 ---
 
 ## DPAPI 加密实现
+
+### 平台差异
+
+- **Windows**: 使用 DPAPI（`CryptProtectData` + 项目熵）加密落盘
+- **非 Windows**（macOS/Linux）: 降级为明文 JSON（无 DPAPI 可用）
 
 ### 项目熵
 

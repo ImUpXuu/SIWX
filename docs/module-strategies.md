@@ -20,8 +20,16 @@
 
 ```python
 # strategies/__init__.py
+# Windows: 4 个策略
 STRATEGY_REGISTRY = [keystore_source, mmkv, config_cipher, memscan]
-# 顺序即优先级
+_PROCESS_DEPENDENT = {config_cipher, memscan}
+
+# 非 Windows: 只加载 keystore + mmkv（避免 import winproc 崩溃）
+# macOS 额外启用 LLDB 策略
+STRATEGY_REGISTRY = [keystore_source, mmkv]
+if platform.system() == "Darwin":
+    STRATEGY_REGISTRY.append(macos_lldb)
+    _PROCESS_DEPENDENT.add(macos_lldb)
 ```
 
 ---
@@ -36,7 +44,7 @@ STRATEGY_REGISTRY = [keystore_source, mmkv, config_cipher, memscan]
 | 4 | `memscan` | 全内存 x'<hex>' 字面量兜底 | 是 |
 
 **跳过逻辑**:
-- `use_memory=False` 时跳过 `config_cipher` 和 `memscan`（全局收割已覆盖）
+- `use_memory=False` 时跳过 `_PROCESS_DEPENDENT` 中的策略（全局收割已覆盖）
 - 全部 salt 已验证时提前终止
 
 ---
@@ -233,12 +241,13 @@ def run_strategies(ctx):
     for mod in STRATEGY_REGISTRY:
         if len(ctx["key_map"]) >= len(ctx["page1_by_salt"]):
             break
-        if not ctx.get("use_memory", True) and mod in (config_cipher, memscan):
+        if not ctx.get("use_memory", True) and mod in _PROCESS_DEPENDENT:
             continue
         try:
             mod.extract(ctx)
         except Exception as e:
-            ctx["log"](f"[策略 {mod.__name__}] 异常: {e}")
+            ctx["log"](f"[策略 {mod.__name__.rsplit('.', 1)[-1]}] 异常: {e}")
+    _run_plugin_strategies(ctx)  # 插件策略追加在内置之后
 ```
 
 **单策略失败不影响整链**: 任何策略抛出异常只记录日志，继续执行下一个策略。

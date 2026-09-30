@@ -23,6 +23,7 @@
 | `READABLE_PROTECT` | {0x02,0x04,0x08,0x10,0x20,0x40,0x80} | 可读保护标志 |
 | `MAX_USER_ADDRESS` | 0x0000_8000_0000_0000 | 用户空间上限 |
 | `REGION_LIMIT` | 500MB | 单区域大小上限 |
+| `PAGE_SZ` | 4096 | 页大小 |
 | `PROCESS_VM_READ` | 0x0010 | 读取权限 |
 | `PROCESS_QUERY_INFORMATION` | 0x0400 | 查询权限 |
 
@@ -102,10 +103,12 @@ class MBI(ctypes.Structure):
         ("BaseAddress", c_uint64),
         ("AllocationBase", c_uint64),
         ("AllocationProtect", DWORD),
+        ("_pad1", DWORD),          # 64 位对齐填充
         ("RegionSize", c_uint64),
         ("State", DWORD),
         ("Protect", DWORD),
         ("Type", DWORD),
+        ("_pad2", DWORD),          # 64 位对齐填充
     ]
 ```
 
@@ -119,10 +122,25 @@ class MBI(ctypes.Structure):
 流程:
 for base, size in regions:
     offset = 0
+    tail = b""
+    tail_base = base
     while offset < size:
-        chunk = read_mem(h, base + offset, min(chunk_size, size - offset))
-        yield (base + offset, chunk)
-        offset += chunk_size
+        cur = min(chunk_size, size - offset)
+        chunk = read_mem(h, base + offset, cur) or b""
+        data_base = tail_base if tail else base + offset
+        data = tail + chunk
+        if data:
+            yield (data_base, data)
+            if overlap:
+                tail = data[-overlap:]
+                tail_base = data_base + max(0, len(data) - len(tail))
+            else:
+                tail = b""
+                tail_base = base + offset + cur
+        else:
+            tail = b""
+            tail_base = base + offset + cur
+        offset += cur
 ```
 
 **overlap 参数**: 保证跨块模式可命中（如搜索字符串跨越块边界时）。

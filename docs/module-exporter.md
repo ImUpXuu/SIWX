@@ -47,11 +47,27 @@
 
 ## 关键函数
 
-### `run_export(acc_out_dir, account, chat, ...) → dict`
+### `run_export(acc_out_dir, account, chat, display, fmt, ...) → dict`
 
 **主导出入口**。双遍扫描 + 流式写出。
 
 ```
+参数:
+- acc_out_dir: 解密产物目录
+- account: 账号 wxid
+- chat: 会话 username
+- display: 显示名称
+- fmt: 导出格式（json/html/txt/csv/markdown/toml/sqlite/xlsx）
+- start_ts / end_ts: 时间范围（可选）
+- want_messages: 是否导出消息（默认 True）
+- want_media: 是否导出媒体（默认 True）
+- want_voice: 是否导出语音（默认 False）
+- want_avatars: 是否导出头像（默认 True）
+- export_root: 导出根目录（默认 paths.exports_root()）
+- pack: 打包方式（folder/single/each/zip/none）
+- folder_name: 自定义文件夹名（可选）
+- progress: 进度回调（可选）
+
 流程:
 1. 第一遍：_collect_metadata() → 计数/发送者/图片引用/语音引用（轻量）
 2. 头像提取：collect_avatars()（仅需要的发送者）
@@ -66,6 +82,7 @@
     "export_dir": str, "zip": str, "file": str,
     "format": str, "pack": str,
     "message_count": int, "media_count": int, "avatar_count": int,
+    "image_count": int, "voice_count": int,
     "duration_ms": int,
 }
 ```
@@ -132,6 +149,8 @@ writer.close()
 | `folder` | 仅文件夹（每会话一个子文件夹） |
 | `single` | 单个 ZIP（全部会话打包一个） |
 | `each` | 每会话一个 ZIP |
+| `zip` | 同 `single`（向后兼容） |
+| `none` | 不打包 |
 
 ---
 
@@ -159,6 +178,56 @@ writer.close()
 `pilk`，不要求 ffmpeg；若 pilk 不可用，再尝试项目内置 `siwx/vendor/silk-decoder/...`、
 `SIWX_SILK_DECODER` 或 PATH 中的本机解码器。
 仍不可转码时自动回退写出 `.silk`，导出流程不中断。
+
+---
+
+## 插件系统集成
+
+### 插件导出格式
+
+```python
+# 插件声明
+PLUGIN = {
+    "export_formats": [{
+        "fmt": "tsv",
+        "ext": "tsv",
+        "writer": "write_tsv",
+        "label": "TSV（制表符）",
+    }]
+}
+
+# 宿主调用
+def _plugin_export_format(fmt: str):
+    """查找插件导出格式。"""
+    from siwx.plugins import registry
+    for _i, w in registry.export_writers.sorted_items():
+        if w.fmt == fmt:
+            return w
+    return None
+```
+
+### 插件导出后处理
+
+```python
+# 插件声明
+PLUGIN = {
+    "after_export": [{
+        "run": "my_post_process",
+        "when": "before_zip",  # 或 "after_zip"
+    }]
+}
+
+# 宿主调用
+def _run_after_export(when: str, ctx: dict) -> None:
+    """执行导出后处理钩子。"""
+    from siwx.plugins import registry
+    for _i, h in registry.after_export.sorted_items():
+        if h.when == when:
+            try:
+                h.run(ctx)
+            except Exception as e:
+                log.warn("plugin", f"after_export({when}) 失败: {e}")
+```
 
 ---
 

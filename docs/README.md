@@ -56,6 +56,7 @@ python run.py decrypt --out ./output
 | [module-server.md](./module-server.md) | `server.py` | Flask Web 控制台 + 任务槽 + 日志流 |
 | [module-exporter.md](./module-exporter.md) | `exporter.py` | 多格式导出引擎（8 种格式 + 多选会话批量导出） |
 | [module-mcp.md](./module-mcp.md) | `mcp_server.py` + `api_mcp.py` | MCP 服务器（stdio, JSON-RPC 2.0, 6 个工具） + 配置 API |
+| [module-sns.md](./module-sns.md) | `sns.py` + `sns_cdn.py` + `sns_isaac64.py` + `sns_export.py` | **朋友圈**：XML 解析、CDN 媒体获取、ISAAC64 解密、多格式导出 |
 
 ### 扩展与插件
 
@@ -86,6 +87,9 @@ python run.py decrypt --out ./output
 |---|---|
 | [media-decryption-principles.md](./media-decryption-principles.md) | V2 文件格式逐字节解析 + 账号级密钥派生 |
 | [media-research.md](./media-research.md) | 媒体解密研究笔记 + 实测数据 |
+| [sns-implementation-guide.md](./sns-implementation-guide.md) | **朋友圈实施指南**：参考项目、已完成资产、待办清单、风险红线 |
+| [sns-research-2026-09-29.md](./sns-research-2026-09-29.md) | 朋友圈研究记录（30 轮实验原始数据、排除的假设、未解之谜） |
+| [sns-todo.md](./sns-todo.md) | **朋友圈待办与接入指南**：未完成项清单（含真实数量、待提取字段、接入点、测试建议、优先级） |
 
 ---
 
@@ -126,8 +130,16 @@ stories-in-wx-py/
     ├── api_settings.py     # 设置 API 蓝图
     ├── api_mcp.py          # MCP 配置 API 蓝图
     ├── api_plugins.py      # 插件 API 蓝图
+    ├── api_stats.py        # 统计 API 蓝图
+    ├── api_sns.py          # 朋友圈 API 蓝图
+    ├── api_update.py       # 更新 API 蓝图
     ├── exporter.py         # 导出引擎
     ├── html_template.py    # HTML 模板
+    │
+    ├── sns.py              # 朋友圈：XML 解析 + snsId 时间还原
+    ├── sns_cdn.py          # 朋友圈：CDN URL 构造 / 下载 / 解密 / 缓存
+    ├── sns_isaac64.py      # 朋友圈：ISAAC64 流密码（纯 Python）
+    ├── sns_export.py       # 朋友圈：多格式导出
     │
     ├── plugins/            # 插件系统（中央注册表 + 17 类 hook）
     │   ├── registry.py     # PluginRegistry 单例 + 命名空间

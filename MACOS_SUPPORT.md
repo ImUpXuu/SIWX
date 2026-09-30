@@ -10,10 +10,9 @@
 
 ## 依赖
 
-- macOS 12+（已实测）
+- macOS（已实测 12.7.6）
 - LLDB 命令行工具（Xcode Command Line Tools 自带）
 - Python 3.10+
-- psutil
 
 ## 使用
 

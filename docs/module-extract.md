@@ -129,6 +129,7 @@ ctx = {
     "verified": int,          # 已验证密钥数
     "cached": int,            # 缓存命中数
     "duration_ms": int,
+    "conflicts": int,         # 来源冲突数
     "salts": [{               # 每个 salt 的状态
         "salt": str,
         "dbs": list[str],
@@ -168,7 +169,7 @@ ctx = {
         "rel": str,
         "size_mb": float,
         "pages": int,
-        "status": str,        # "ok" / "failed" / "skipped" / "cached"
+        "status": str,        # "ok" / "failed" / "skipped" / "cached" / "conflict"
         "key_masked": str,
     }]
 }
@@ -197,6 +198,31 @@ ctx = {
 >>> mask_key("short")
 '…'
 ```
+
+---
+
+## 来源保护机制
+
+### SOURCE_FIELD 常量
+
+```python
+SOURCE_FIELD = "@source"  # manifest 中记录「产出该输出目录的 db_dir」的保留键
+```
+
+### 冲突检测
+
+```python
+# 在 decrypt_dir() 中
+source_guard = manifest.get(SOURCE_FIELD)
+if source_guard and source_guard != str(db_dir):
+    # 来源冲突：跳过而非覆盖
+    conflicts.append(e.rel)
+    files.append({"rel": e.rel, "size_mb": _round_mb(e.size), "pages": 0,
+                  "status": "conflict", "key_masked": ""})
+    continue
+```
+
+**设计要点**: 同一账号在多个盘符/用户目录各存一份时，后跑的副本会跳过而非覆盖先跑的产物。
 
 ---
 
