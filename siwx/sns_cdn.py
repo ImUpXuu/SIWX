@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import logging
 import os
 import re
 import ssl
@@ -50,6 +51,11 @@ from pathlib import Path
 from urllib.parse import urlsplit, parse_qsl, urlencode
 
 from . import sns_isaac64 as isaac
+
+# 落到 logs/siwx.log 的 logger（server 里给它挂了 RotatingFileHandler）。
+# 用标准 logging 而不是 siwx.logger：前者是**持久化文件**，进程重启后
+# 「运行日志」页（/api/logs 会 tail 该文件）依然能看到失败原因。
+_file_log = logging.getLogger("siwx")
 
 # 微信客户端的 UA —— 缺了会被 CDN 拒绝
 WECHAT_UA = "MicroMessenger Client"
@@ -99,6 +105,40 @@ def is_video_url(url: str) -> bool:
     if "vweixinthumb" in url:
         return False
     return ("snsvideodownload" in url) or ("video" in url) or url.endswith(".mp4")
+
+
+# 允许代理下载的域名后缀 —— 只放微信/腾讯自家 CDN。
+# 朋友圈 XML 里的媒体一定是这些域名；`b23.tv` / 网易云 / B 站直播这种外链卡片
+# 不是媒体，既下不下来，也不该让 `/api/sns/media` 变成任意 URL 的代理（SSRF）。
+#
+# ⚠️ `tc.qq.com` 不能漏：视频号封面走 `wxapp.tc.qq.com`（本机实测 1606 个），
+# 漏了会让所有视频号卡片变破图；`wechat.com` 用于 `snsvideo.c2c.wechat.com`。
+_CDN_SUFFIXES = ("qpic.cn", "qlogo.cn", "video.qq.com", "tc.qq.com",
+                 "weixin.qq.com", "weixin.com", "wechat.com", "gtimg.com")
+
+
+def is_wechat_cdn(url: str) -> bool:
+    """URL 是否属于微信/腾讯 CDN（媒体可下载域）。"""
+    if not url:
+        return False
+    try:
+        host = urlsplit(url).netloc.split("@")[-1].rsplit(":", 1)[0].lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return any(host == s or host.endswith("." + s) for s in _CDN_SUFFIXES)
+
+
+def safe_url(url: str) -> str:
+    """日志用 URL：**去掉 query**（token 是凭据，不进日志）。"""
+    if not url:
+        return ""
+    try:
+        u = urlsplit(url)
+        return f"{u.netloc}{u.path}"
+    except ValueError:
+        return url.split("?", 1)[0]
 
 
 # ── URL 构造 ────────────────────────────────────────────────────────
@@ -329,21 +369,57 @@ def read_cached(cache_dir, url: str):
     return None
 
 
+_QPIC_HOSTS = ("mmsns.qpic.cn", "shmmsns.qpic.cn", "szmmsns.qpic.cn")
+
+
 def _host_candidates(url: str):
-    """域名候选：原样优先，其余补齐备用域名。"""
+    """域名候选：原样优先，qpic 图片再加备用域名。
+
+    ⚠️ 只对 ``*.qpic.cn`` 做回退。视频走 ``*.video.qq.com``，把它塞给
+    ``mmsns.qpic.cn`` 只会拿到 400 —— 旧实现对所有域名都回退，于是「视频
+    下载成功但认不出来」的真实原因被后面这几个 400 **覆盖**，报出去的错误
+    完全指错方向（实测血案）。
+    """
     try:
         host = urlsplit(url).netloc
     except ValueError:
         return [url]
-    alts = ["mmsns.qpic.cn", "shmmsns.qpic.cn", "szmmsns.qpic.cn"]
     out = [url]
-    for alt in alts:
-        if alt != host:
-            out.append(re.sub(r"//[^/]+/", f"//{alt}/", url, count=1))
+    if host.endswith(".qpic.cn"):
+        for alt in _QPIC_HOSTS:
+            if alt != host:
+                out.append(re.sub(r"//[^/]+/", f"//{alt}/", url, count=1))
     return out
 
 
 # ── 对外主入口 ──────────────────────────────────────────────────────
+
+def _log_media_failure(url: str, out: dict) -> None:
+    """失败必须留痕 —— 这是「图挂了但日志里什么都没有」的根治点。
+
+    日志页会 tail ``logs/siwx.log``，所以这里用标准 logging。
+    注意别写 "Not Found"：``server._tail_app_log`` 会过滤掉含该字样的行。
+    """
+    _file_log.warning(
+        "[sns-media] 下载失败 reason=%s status=%s hosts_tried=%s got=%sB err=%s url=%s",
+        out.get("reason"), out.get("status"), out.get("hosts_tried"),
+        out.get("got_bytes"), out.get("error"), safe_url(url))
+
+
+def _log_media_ok(url: str, out: dict) -> None:
+    """成功不写文件日志（一次翻页几十张图，会把「运行日志」冲爆）。
+
+    走 ``siwx.logger.detailed``：只有用户把日志切到「详细模式」时才记录。
+    """
+    try:
+        from . import logger as _ring
+        _ring.detailed("sns", f"[媒体] 成功 ext={out.get('ext')} "
+                             f"{len(out.get('data') or b'')}B "
+                             f"encrypted={out.get('encrypted')} "
+                             f"cached={out.get('cached')} url={safe_url(url)}")
+    except Exception:  # noqa: BLE001  日志永远不能影响下载
+        pass
+
 
 def fetch_media(url: str, key: str | int | None = None,
                 token: str | None = None,
@@ -354,54 +430,90 @@ def fetch_media(url: str, key: str | int | None = None,
 
     :param cache_dir: 媒体缓存目录；命中缓存时不再访问网络
     :param hosts:     最多尝试几个域名（微信 CDN 域名可能部分失效）
-    :return: ``{ok, data, ext, mime, error, status, encrypted, cached}``
+    :return: ``{ok, data, ext, mime, error, status, encrypted, cached,
+              reason, hosts_tried, got_bytes}``
+
+    失败时 ``reason`` 是**机器可读**的分类（``not-cdn`` / ``empty-url`` /
+    ``http-404`` / ``undecodable`` / ...），``error`` 是给人看的中文说明。
     """
     out = {"ok": False, "data": None, "ext": None, "mime": None,
-           "error": None, "status": None, "encrypted": False, "cached": False}
+           "error": None, "status": None, "encrypted": False, "cached": False,
+           "reason": None, "hosts_tried": 0, "got_bytes": 0}
+
+    if not url:
+        out.update(error="缺少 URL", reason="empty-url")
+        _log_media_failure(url, out)
+        return out
+
+    if not is_wechat_cdn(url):
+        out.update(error="不是微信 CDN 地址（外链卡片不是可下载的媒体）",
+                   reason="not-cdn")
+        _log_media_failure(url, out)
+        return out
 
     hit = read_cached(cache_dir, url) if cache_dir else None
     if hit:
         data, ext, mime = hit
         out.update(ok=True, data=data, ext=ext, mime=mime, cached=True)
+        _log_media_ok(url, out)
         return out
 
+    # key="0" / "" 是占位值（sns._meta_attr 已归一化，这里再兜一层，
+    # 避免旧数据/旧调用方把密文用密钥 0 解得面目全非）
+    has_key = bool(key) and str(key).strip().isdigit() and str(key).strip() != "0"
+
     candidates = _host_candidates(build_media_url(url, token))[: max(1, hosts)]
-    last_err = None
+    first_http_err = None      # 第一次 HTTP 错误：比最后一个域名的错误更可信
+    undecodable = None         # 下载成功但认不出内容（最可能的真实原因）
     for target in candidates:
+        out["hosts_tried"] += 1
         try:
             body, headers = fetch(target, timeout=timeout)
         except urllib.error.HTTPError as e:
-            last_err = (e.code, f"HTTP {e.code}")
+            if first_http_err is None:
+                first_http_err = (e.code, f"HTTP {e.code}")
             continue
         except Exception as e:  # noqa: BLE001
-            last_err = (None, f"{type(e).__name__}: {e}")
+            if first_http_err is None:
+                first_http_err = (None, f"{type(e).__name__}: {e}")
             continue
 
+        out["got_bytes"] = len(body)
         x_enc = str(headers.get("x-enc", "")).strip()
         ext, mime = detect_mime(body)
-        need = (x_enc == "1" or ext is None) and key not in (None, "", 0)
-        if need and re.fullmatch(r"\d+", str(key).strip()):
+        need = (x_enc == "1" or ext is None) and has_key
+        if need:
             try:
                 body = decrypt_isaac(body, key)
                 out["encrypted"] = True
                 ext, mime = detect_mime(body)
             except Exception as e:  # noqa: BLE001
-                last_err = (None, f"decrypt: {e}")
+                undecodable = f"解密失败：{type(e).__name__}: {e}"
                 continue
 
         if ext is None:
-            last_err = (None, "无法识别的媒体格式（密钥不匹配或 token 过期）")
+            # 下载本身是成功的（拿到了 N 字节），只是内容认不出来。
+            # 这种情况**不能**被后续域名的 400/404 覆盖，否则报错方向全错。
+            why = ("无可用密钥，密文解不开" if not has_key
+                   else "解密后仍不是已知图片/视频格式（key 可能不匹配）")
+            undecodable = (f"已下载 {len(body)}B 但{why}"
+                           f"（x-enc={x_enc or '无'}，头部={body[:12]!r}）")
             continue
 
         if cache_dir:
             _atomic_write(cached_path(cache_dir, url, ext), body)
         out.update(ok=True, data=body, ext=ext, mime=mime)
+        _log_media_ok(url, out)
         return out
 
-    if last_err:
-        out["status"], out["error"] = last_err
+    if undecodable:
+        out.update(error=undecodable, reason="undecodable")
+    elif first_http_err:
+        out["status"], out["error"] = first_http_err
+        out["reason"] = f"http-{first_http_err[0]}" if first_http_err[0] else "network"
     else:
-        out["error"] = "下载失败"
+        out.update(error="下载失败", reason="unknown")
+    _log_media_failure(url, out)
     return out
 
 
@@ -474,4 +586,6 @@ def fetch_emoji(emoji: dict, cache_dir=None, timeout: float = 12.0) -> dict:
             out["error"] = (out["error"] or "") + f" | encrypt: {type(e).__name__}: {e}"
 
     out["error"] = out["error"] or "表情获取失败"
+    _file_log.warning("[sns-emoji] 获取失败 url=%s err=%s",
+                      safe_url(plain or enc_url), out["error"])
     return out

@@ -640,6 +640,49 @@ class TestSnsCardExport(unittest.TestCase):
         self.assertIn('class="cm-img"', html)
 
 
+class TestSnsTimeRange(unittest.TestCase):
+    """时间范围过滤：tid 区间下推 + 秒级边界。"""
+
+    def test_tid_bounds_cover_the_second(self):
+        # 2026-09-30 12:00:00 这一秒内的所有随机低位都应落在 [lo, hi]
+        sec = 1790740800
+        lo, hi = sns.ts_to_tid_bounds(sec, sec)
+        base = (sec * 1000) << 23
+        self.assertLessEqual(lo, sns._to_signed64(base))
+        self.assertLessEqual(sns._to_signed64(base + 999), hi)
+        # 相邻秒必须被排除
+        self.assertGreater(sns._to_signed64(((sec + 1) * 1000) << 23), hi)
+        self.assertLess(sns._to_signed64((sec * 1000 - 1) << 23), lo)
+        # 现代时间戳都在同一（负数）区，BETWEEN 语义才成立
+        self.assertLess(lo, 0)
+        self.assertLess(hi, 0)
+
+    def test_tid_bounds_open_ended(self):
+        lo, hi = sns.ts_to_tid_bounds(1790740800, None)
+        self.assertIsNotNone(lo)
+        self.assertIsNone(hi)
+        lo2, hi2 = sns.ts_to_tid_bounds(None, 1790740800)
+        self.assertIsNone(lo2)
+        self.assertIsNotNone(hi2)
+        self.assertEqual(sns.ts_to_tid_bounds(None, None), (None, None))
+
+    def test_parse_ts_arg(self):
+        self.assertEqual(sns.parse_ts_arg("1790740800"), 1790740800)
+        self.assertEqual(sns.parse_ts_arg(1790740800), 1790740800)
+        self.assertIsNone(sns.parse_ts_arg(""))
+        self.assertIsNone(sns.parse_ts_arg("昨天"))
+        # 日期字符串按本地时区解析
+        import datetime as _dt
+        got = sns.parse_ts_arg("2026-09-30")
+        self.assertEqual(_dt.datetime.fromtimestamp(got).strftime("%Y-%m-%d"), "2026-09-30")
+        self.assertEqual(sns.parse_ts_arg("2026-09-30"), sns.parse_ts_arg("2026/09/30"))
+
+
+def _make_sns_db_times(path: Path, posts):
+    """建库，posts = [(tid, user, xml)]（时间范围测试用，语义同 raw）。"""
+    _make_sns_db_raw(path, posts)
+
+
 class TestSnsApi(unittest.TestCase):
     """API 层：账号隔离、分页、边界、异步导出任务。"""
 
@@ -777,6 +820,88 @@ class TestSnsApi(unittest.TestCase):
         self.assertTrue(j.get("ok"))
         self.assertEqual((j.get("report") or {}).get("count"), 1)
 
+    def test_timeline_time_range_filter(self):
+        """时间范围应下推成 tid 区间，并精确按秒过滤。"""
+        acc = "wxid_range"
+        db = Path(self._tmp.name) / "output" / acc / "sns" / "sns.db"
+        days = [1700000000, 1700086400, 1700172800, 1700259200]      # 连续 4 天
+        posts = []
+        for i, ts in enumerate(days):
+            xml = (f"<SnsDataItem><TimelineObject><id>{i}</id><username>wxid_a</username>"
+                   f"<createTime>{ts}</createTime><contentDesc>第{i}天</contentDesc>"
+                   "<ContentObject><type>1</type><mediaList/></ContentObject>"
+                   "</TimelineObject></SnsDataItem>")
+            posts.append((_to_signed64((ts * 1000) << 23), "wxid_a", xml))
+        _make_sns_db_times(db, posts)
+        c = self._client()
+
+        d = c.get(f"/api/sns/timeline?account={acc}&limit=50").get_json()
+        self.assertEqual(len(d["timeline"]), 4)
+
+        # 只取中间两天（含端点）
+        d2 = c.get(f"/api/sns/timeline?account={acc}&limit=50"
+                   f"&start={days[1]}&end={days[2]}").get_json()
+        self.assertEqual([p["ts"] for p in d2["timeline"]], [days[2], days[1]])
+
+        # 单秒范围
+        d3 = c.get(f"/api/sns/timeline?account={acc}&limit=50"
+                   f"&start={days[3]}&end={days[3]}").get_json()
+        self.assertEqual([p["ts"] for p in d3["timeline"]], [days[3]])
+
+        # 只有下界 / 只有上界
+        d4 = c.get(f"/api/sns/timeline?account={acc}&limit=50&start={days[2]}").get_json()
+        self.assertEqual([p["ts"] for p in d4["timeline"]], [days[3], days[2]])
+        d5 = c.get(f"/api/sns/timeline?account={acc}&limit=50&end={days[1]}").get_json()
+        self.assertEqual([p["ts"] for p in d5["timeline"]], [days[1], days[0]])
+
+        # 空区间
+        d6 = c.get(f"/api/sns/timeline?account={acc}&limit=50"
+                   f"&start={days[0] - 100}&end={days[0] - 50}").get_json()
+        self.assertEqual(d6["timeline"], [])
+
+        # 非法值按「不限」处理，不能 500
+        d7 = c.get(f"/api/sns/timeline?account={acc}&limit=50&start=abc&end=昨天").get_json()
+        self.assertEqual(len(d7["timeline"]), 4)
+
+    def test_friends_avatar_flags_and_range(self):
+        """friends 返回 has_avatar / first_ts / last_ts（供头像 + 排序用）。"""
+        acc = "wxid_friends"
+        acc_dir = Path(self._tmp.name) / "output" / acc
+        db = acc_dir / "sns" / "sns.db"
+        t0, t1 = 1700000000, 1700086400
+        posts = []
+        for i, (user, ts) in enumerate([("wxid_with", t0), ("wxid_with", t1),
+                                        ("wxid_without", t1)]):
+            xml = (f"<SnsDataItem><TimelineObject><id>{i}</id><username>{user}</username>"
+                   f"<createTime>{ts}</createTime><contentDesc>x</contentDesc>"
+                   "<ContentObject><type>1</type><mediaList/></ContentObject>"
+                   "</TimelineObject></SnsDataItem>")
+            posts.append((_to_signed64((ts * 1000) << 23) + i, user, xml))
+        _make_sns_db_times(db, posts)
+
+        # 造一个有头像的 head_image.db（image_buffer 为明文 JPEG）
+        import sqlite3
+        hi_dir = acc_dir / "head_image"
+        hi_dir.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(hi_dir / "head_image.db")
+        con.execute("CREATE TABLE head_image(username TEXT PRIMARY KEY, md5 TEXT, "
+                    "image_buffer BLOB, update_time INTEGER)")
+        con.execute("INSERT INTO head_image VALUES (?,?,?,?)",
+                    ("wxid_with", "m", b"\xff\xd8\xffFAKE", 0))
+        con.commit()
+        con.close()
+
+        d = self._client().get(f"/api/sns/friends?account={acc}&names=0").get_json()
+        rows = {f["username"]: f for f in d["friends"]}
+        self.assertTrue(rows["wxid_with"]["has_avatar"])
+        self.assertFalse(rows["wxid_without"]["has_avatar"])
+        self.assertEqual(rows["wxid_with"]["count"], 2)
+        self.assertEqual(rows["wxid_with"]["first_ts"], t0)
+        self.assertEqual(rows["wxid_with"]["last_ts"], t1)
+
+        # names=0 时 display == username（不影响 has_avatar）
+        self.assertEqual(rows["wxid_with"]["display"], "wxid_with")
+
     def test_emoji_requires_url(self):
         c = self._client()
         self.assertEqual(c.get("/api/sns/emoji").status_code, 400)
@@ -842,6 +967,185 @@ class TestSnsApi(unittest.TestCase):
         # 负面用例：搜不到的词仍应为空
         d4 = c.get(f"/api/sns/timeline?account={acc}&keyword=不存在").get_json()
         self.assertEqual(len(d4["timeline"]), 0)
+
+
+class TestSnsCdnDiagnosis(unittest.TestCase):
+    """CDN 拉不下来时：原因要对、要有日志、要看得见。
+
+    背景（本机 5684 条真实库实测，2026-09-30）：
+    * 视频 media 写成 ``<url key="0">`` + ``<enc key="929615230">``，
+      旧实现把 ``"0"`` 当真密钥 → 密文 XOR 成乱码 → **100% 视频拉不下来**；
+    * 视频域名上失败后又被后续 qpic 域名的 400 覆盖，报错方向全错；
+    * 整条链路零日志 → 用户「图挂了但日志里什么都没有」。
+    """
+
+    def test_zero_placeholder_key_falls_back_to_enc_key(self):
+        """真实 XML 片段：url@key="0" 是占位，真密钥在 <enc key>。"""
+        import xml.etree.ElementTree as ET
+        xml = ("<media><id>1</id><type>6</type><sub_type>0</sub_type>"
+               "<url type='1' md5='" + "a" * 32 + "' key='0' enc_idx='0' "
+               "videomd5='" + "b" * 32 + "'>http://h/102/20202/snsvideodownload?x=1</url>"
+               "<size width='288' height='512' totalSize='6794'/>"
+               "<videoDuration>18.83</videoDuration>"
+               "<enc key='929615230'>1</enc></media>")
+        d = sns._parse_media_el(ET.fromstring(xml))
+        self.assertEqual(d["key"], "929615230")
+        self.assertEqual(d["enc_key"], "929615230")
+
+    def test_zero_and_empty_attrs_are_missing(self):
+        import xml.etree.ElementTree as ET
+        d = sns._parse_media_el(ET.fromstring(
+            "<media><type>2</type><url token='0' key='0'>http://h/mmsns/a/0</url>"
+            "<enc key='0'>0</enc></media>"))
+        self.assertIsNone(d["key"])
+        self.assertIsNone(d["token"])
+        self.assertIsNone(d["enc_key"])
+        self.assertIsNone(sns._meta_attr(None, "", "  ", "0", "none", "NULL"))
+        self.assertEqual(sns._meta_attr("0", "42"), "42")
+
+    def test_thumb_token_attribute_parsed(self):
+        import xml.etree.ElementTree as ET
+        d = sns._parse_media_el(ET.fromstring(
+            "<media><type>2</type>"
+            "<thumb token='tt'>http://h/mmsns/a/150</thumb>"
+            "<url token='ut' key='5'>http://h/mmsns/a/0</url></media>"))
+        self.assertEqual(d["token"], "ut")
+        self.assertEqual(d["thumb_token"], "tt")
+
+    def test_host_fallback_only_for_qpic(self):
+        """视频域名不该被换成 qpic —— 只会多拿几个 400 把真实原因盖掉。"""
+        vid = "https://shzjwxsns.video.qq.com/102/20202/snsvideodownload?encfilekey=x"
+        self.assertEqual(sns_cdn._host_candidates(vid), [vid])
+        img = "https://shmmsns.qpic.cn/mmsns/a/0?token=t&idx=1"
+        self.assertEqual(len(sns_cdn._host_candidates(img)), 3)
+
+    def test_is_wechat_cdn(self):
+        self.assertTrue(sns_cdn.is_wechat_cdn("https://shmmsns.qpic.cn/mmsns/a/0"))
+        self.assertTrue(sns_cdn.is_wechat_cdn("https://shzjwxsns.video.qq.com/x"))
+        self.assertTrue(sns_cdn.is_wechat_cdn("https://wx.qlogo.cn/x"))
+        # 视频号封面（实测 1606 个）与 c2c 视频域名必须放行
+        self.assertTrue(sns_cdn.is_wechat_cdn("http://wxapp.tc.qq.com/251/20304/stodownload?x=1"))
+        self.assertTrue(sns_cdn.is_wechat_cdn(
+            "http://snsvideo.c2c.wechat.com/102/20202/snsvideodownload?x=1"))
+        # 外链卡片：不是媒体，拒绝（顺带堵掉任意 URL 代理）
+        self.assertFalse(sns_cdn.is_wechat_cdn("https://b23.tv/LgNWM4c"))
+        self.assertFalse(sns_cdn.is_wechat_cdn("https://y.music.163.com/m/song?id=1"))
+        self.assertFalse(sns_cdn.is_wechat_cdn("https://live.bilibili.com/21738461"))
+        self.assertFalse(sns_cdn.is_wechat_cdn("http://evil.com/qpic.cn/x"))
+        self.assertFalse(sns_cdn.is_wechat_cdn(""))
+        # 日志里不能出现 token
+        self.assertEqual(
+            sns_cdn.safe_url("https://h.qpic.cn/mmsns/a/0?token=SECRET&idx=1"),
+            "h.qpic.cn/mmsns/a/0")
+
+    def test_fetch_media_rejects_non_cdn_and_logs(self):
+        with self.assertLogs("siwx", level="WARNING") as cm:
+            r = sns_cdn.fetch_media("https://b23.tv/abc", cache_dir=None)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "not-cdn")
+        self.assertTrue(any("[sns-media]" in line for line in cm.output))
+
+    def test_undecodable_wins_over_later_http_error(self):
+        """下载成功但认不出内容时，不能被后续域名的 400 覆盖成「HTTP 400」。"""
+        import urllib.error
+        calls = {"n": 0, "hosts": []}
+
+        def fake_fetch(url, timeout=15.0, ctx=None):
+            calls["n"] += 1
+            calls["hosts"].append(url.split("/")[2])
+            if calls["n"] == 1:
+                return b"\x01\x02\x03" * 8, {"x-enc": "1"}
+            raise urllib.error.HTTPError(url, 400, "Bad Request", {}, None)
+
+        url = "https://shmmsns.qpic.cn/mmsns/a/0?token=t"
+        old = sns_cdn.fetch
+        sns_cdn.fetch = fake_fetch
+        try:
+            with self.assertLogs("siwx", level="WARNING") as cm:
+                r = sns_cdn.fetch_media(url, key="12345", cache_dir=None)
+        finally:
+            sns_cdn.fetch = old
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["reason"], "undecodable")
+        self.assertEqual(r["hosts_tried"], 3)
+        self.assertIn("已下载", r["error"])
+        self.assertIsNone(r["status"])
+        self.assertIn("[sns-media]", "\n".join(cm.output))
+
+    def test_first_http_error_reported(self):
+        """真 404 的图：报 404（而不是最后一个域名的状态码）。"""
+        import urllib.error
+        codes = []
+
+        def fake_fetch(url, timeout=15.0, ctx=None):
+            code = 404 if len(codes) == 0 else 400
+            codes.append(code)
+            raise urllib.error.HTTPError(url, code, "x", {}, None)
+
+        url = "https://shmmsns.qpic.cn/mmsns/a/0?token=t"
+        old = sns_cdn.fetch
+        sns_cdn.fetch = fake_fetch
+        try:
+            r = sns_cdn.fetch_media(url, key="1", cache_dir=None)
+        finally:
+            sns_cdn.fetch = old
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["status"], 404)
+        self.assertEqual(r["reason"], "http-404")
+
+    def test_encrypted_body_decrypts_with_parsed_key(self):
+        """离线闭环：按 <enc key> 加密的体，用 parse_timeline 的 key 能解出 mp4。"""
+        import xml.etree.ElementTree as ET
+        key = 929615230
+        plain = b"\x00\x00\x00 ftypisom" + b"\x00" * 32
+        ks = sns_isaac64.keystream(key, len(plain))
+        enc = bytes(a ^ b for a, b in zip(plain, ks))
+        el = ET.fromstring(
+            "<media><type>6</type><url key='0'>http://h/x/snsvideodownload?e=1</url>"
+            f"<enc key='{key}'>1</enc></media>")
+        parsed = sns._parse_media_el(el)
+        self.assertEqual(sns_cdn.detect_mime(sns_cdn.decrypt_isaac(enc, parsed["key"]))[0],
+                         "mp4")
+
+    def test_api_media_rejects_external_and_exposes_reason(self):
+        import tempfile
+        import urllib.error
+        from siwx import paths
+        old = os.environ.get("SIWX_ROOT")
+        tmp = tempfile.TemporaryDirectory(prefix="siwx_sns_media_",
+                                          ignore_cleanup_errors=True)
+        os.environ["SIWX_ROOT"] = tmp.name
+        paths._PATH_CACHE.clear()
+        try:
+            from siwx.server import app
+            c = app.test_client()
+            r = c.get("/api/sns/media?url=https://b23.tv/abc")
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.get_json()["reason"], "not-cdn")
+
+            # 404 的图：响应体要带原因，前端据此提示
+            def fake_fetch(url, timeout=15.0, ctx=None):
+                raise urllib.error.HTTPError(url, 404, "x", {}, None)
+
+            old_fetch = sns_cdn.fetch
+            sns_cdn.fetch = fake_fetch
+            try:
+                r2 = c.get("/api/sns/media?url=" +
+                           "https%3A%2F%2Fshmmsns.qpic.cn%2Fmmsns%2Fa%2F0%3Ftoken%3Dt"
+                           "&key=1&account=x")
+            finally:
+                sns_cdn.fetch = old_fetch
+            self.assertEqual(r2.status_code, 404)
+            body = r2.get_json()
+            self.assertEqual(body["reason"], "http-404")
+            self.assertEqual(body["hosts_tried"], 3)
+        finally:
+            if old is None:
+                os.environ.pop("SIWX_ROOT", None)
+            else:
+                os.environ["SIWX_ROOT"] = old
+            paths._PATH_CACHE.clear()
+            tmp.cleanup()
 
 
 if __name__ == "__main__":

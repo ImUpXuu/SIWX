@@ -188,6 +188,29 @@ HEX_RE = re.compile(rb"x'([0-9a-fA-F]{64,192})'")
 
 ---
 
+### 5. macos_lldb — LLDB 断点捕获（macOS 专属）
+
+**文件**: `strategies/macos_lldb.py`
+
+**原理**:
+1. 使用 LLDB 在 `wechat.dylib` 的 `sqlite3_key` / `sqlite3_key_v2` 函数上设断点
+2. 等微信打开数据库时，从寄存器中捕获 32 字节 passphrase
+3. 用 PBKDF2-SHA512（256000 次迭代，salt 取自每个数据库文件前 16 字节）为每个数据库派生独立密钥
+4. 用 SQLCipher 4 的 page-1 HMAC 验证派生密钥的正确性
+
+**常量**:
+```python
+PBKDF2_ITERATIONS = 256000
+PBKDF2_DKLEN = 32
+PBKDF2_DIGEST = "sha512"
+```
+
+**依赖**: macOS + lldb CLI + 微信已登录
+
+**适用场景**: WeChat 4.1.80+（raw key 不再缓存，只保留 passphrase）。
+
+---
+
 ## 添加新策略
 
 ### 步骤

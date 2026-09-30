@@ -73,6 +73,52 @@ def is_sns_id_in_range(sns_id: int) -> bool:
     return sns_id_to_ms(sns_id) < SNS_ID_EPOCH_LIMIT_MS
 
 
+def _to_signed64(u: int) -> int:
+    """无符号 64 位 → SQLite 存储用的有符号 int64。"""
+    return u - (1 << 64) if u >= (1 << 63) else u
+
+
+def ts_to_tid_bounds(start_sec: int | None = None, end_sec: int | None = None):
+    """秒级时间范围 → **tid 区间（含端点，有符号 int64）**，可直接下推 SQL。
+
+    ``tid = (createTime_ms << 23) | rand23``，因此：
+      * 下界 = ``start_ms << 23``
+      * 上界 = ``(end_sec + 1) * 1000 << 23  - 1``（覆盖 end 那一秒的 1000ms）
+
+    为什么可以比较大小：modern tid（2012 年后）的 ``ms << 23`` 都超过 2^63，
+    存进 SQLite 变成负数；而 u → s 的映射在 [2^63, 2^64) 上**单调递增**，
+    所以同一侧（都为负）时 ``BETWEEN`` 语义正确。
+    跨 2004-11 这种「正负混用」的区间本项目不可能出现，调用方仍会做兜底（回退 Python 过滤）。
+    """
+    lo = _to_signed64((int(start_sec) * 1000) << SNS_ID_SHIFT) if start_sec is not None else None
+    hi = (_to_signed64((((int(end_sec) + 1) * 1000) << SNS_ID_SHIFT) - 1)
+          if end_sec is not None else None)
+    return lo, hi
+
+
+def parse_ts_arg(v):
+    """解析时间参数：支持 unix 秒、``YYYY-MM-DD``（本地时区）、``YYYY-MM-DD HH:MM:SS``。
+
+    ``end`` 传日期时由调用方决定是否补到当日 23:59:59（见 ``api_sns._ts_arg``）。
+    """
+    import datetime as _dt
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return int(_dt.datetime.strptime(s, fmt).timestamp())
+        except ValueError:
+            continue
+    return None
+
+
 # ── XML 解析 ────────────────────────────────────────────────────────
 
 def _int(v, default=0) -> int:
@@ -80,6 +126,28 @@ def _int(v, default=0) -> int:
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+# 微信会把「没有这个值」写成 "0"（而不是省略属性）。
+# ⚠️ 只能按**字符串语义**判断：`"0"` 在 Python 里是真值，用 `or` 串起来会把它当成有效值。
+_NULL_ATTRS = frozenset({"", "0", "none", "null"})
+
+
+def _meta_attr(*vals):
+    """取第一个「有效」的属性值；``"0"`` / 空 / ``none`` 一律视为缺失。
+
+    实测（本机 5684 条真实库）踩过的坑：视频 media 写成
+    ``<url key="0">`` + ``<enc key="929615230">`` —— 真正的 ISAAC64 密钥在
+    ``<enc key>``，而 ``url@key="0"`` 只是占位。旧实现按 ``or`` 取值，于是
+    密钥被当成 0，下载回来的密文 XOR 后仍是乱码，表现为「CDN 视频拉不下来」。
+    """
+    for v in vals:
+        if v is None:
+            continue
+        s = v.strip() if isinstance(v, str) else str(v).strip()
+        if s and s.lower() not in _NULL_ATTRS:
+            return s
+    return None
 
 
 def _parse_media_el(el, url_tag: str = "url") -> dict:
@@ -110,7 +178,8 @@ def _parse_media_el(el, url_tag: str = "url") -> dict:
             h = _int(vs.get("height"))
 
     enc_el = el.find("enc")
-    enc_key = enc_el.get("key") if enc_el is not None else None
+    enc_key = _meta_attr(enc_el.get("key")) if enc_el is not None else None
+    thumb_el = el.find("thumb")
 
     return {
         "id": el.findtext("id") or el.findtext("media_id") or "",
@@ -123,10 +192,15 @@ def _parse_media_el(el, url_tag: str = "url") -> dict:
         # media 用 <thumb>，imageinfo 用 <thumb_url>，两者都要认
         "thumb_url": (el.findtext("thumb_url") or el.findtext("thumb") or "").strip(),
         "md5": (url_el.get("md5") if url_el is not None else None) or el.findtext("md5") or None,
-        "key": ((url_el.get("key") if url_el is not None else None)
-                or el.findtext("key") or enc_key or None),
-        "token": (url_el.get("token") if url_el is not None else None) or el.findtext("token") or None,
-        "thumb_token": el.findtext("thumb_url_token") or None,
+        # ⚠️ 必须是 _meta_attr：url@key="0" 是占位值，真密钥在 <enc key>
+        # （实测视频 100% 因此解不出来；见 _meta_attr 注释）
+        "key": _meta_attr(url_el.get("key") if url_el is not None else None,
+                          el.findtext("key"), enc_key),
+        "token": _meta_attr(url_el.get("token") if url_el is not None else None,
+                            el.findtext("token")),
+        # <thumb> 自带 token 属性；<thumb_url_token> 是扁平字段的写法
+        "thumb_token": _meta_attr(el.findtext("thumb_url_token"),
+                                  thumb_el.get("token") if thumb_el is not None else None),
         "videomd5": url_el.get("videomd5") if url_el is not None else None,
         "enc_idx": (_int(url_el.get("enc_idx")) if url_el is not None
                     else _int(el.findtext("enc_idx"))),
@@ -937,24 +1011,26 @@ def iter_authors(db_path: Path, limit: int | None = None) -> list[dict]:
     **纯 SQL GROUP BY，不解析 XML** —— 因为作者名就在 ``SnsTimeLine.user_name`` 列里。
     实测比解析全量 XML 快两个数量级。
 
-    :return: ``[{username, count, last_tid, last_ts}]``，按动态数降序
+    :return: ``[{username, count, last_tid, last_ts, first_tid, first_ts}]``，按动态数降序
     """
     import sqlite3
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.text_factory = bytes
     try:
-        sql = ("SELECT user_name, COUNT(*) AS n, MAX(tid) AS last_tid "
+        sql = ("SELECT user_name, COUNT(*) AS n, MAX(tid) AS last_tid, MIN(tid) AS first_tid "
                "FROM SnsTimeLine GROUP BY user_name ORDER BY n DESC")
         if limit:
             sql += f" LIMIT {int(limit)}"
         out = []
-        for who, n, last_tid in con.execute(sql):
+        for who, n, last_tid, first_tid in con.execute(sql):
             name = (who or b"").decode("utf-8", "replace") if isinstance(who, bytes) else (who or "")
             out.append({
                 "username": name,
                 "count": n,
                 "last_tid": last_tid,
                 "last_ts": sns_id_to_seconds(last_tid) if last_tid is not None else 0,
+                "first_tid": first_tid,
+                "first_ts": sns_id_to_seconds(first_tid) if first_tid is not None else 0,
             })
         return out
     finally:

@@ -209,4 +209,15 @@ tui.step("密钥提取")
 tui.log("[cipher] 扫描完成")
 tui.summary_line(32, 32, 1234)
 tui.decrypt_summary(31, 0, 0, 1, 5678, "output/wxid_xxx")
+tui.account_table([("wxid_xxx", "C:/.../db_storage", 32)])
+tui.make_status_bar(lambda: {"url": "...", "wechat": "...", "wxid": "...", "keys": "...", "job": "..."})
+tui.run_live_status(getter, on_start)
 ```
+
+---
+
+## 注意事项
+
+- `make_status_bar` 的 `getter` 参数是一个**无参函数**，返回状态字典
+- `run_live_status` 的 `on_start` 参数是一个**无参函数**，在状态栏启动前调用
+- Windows 上 `run_live_status` 会自动启用 ANSI 转义码（`SetConsoleMode`）

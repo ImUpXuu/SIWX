@@ -62,6 +62,24 @@ b'\xab\xcd\xef\x12...'  # 32 bytes
 
 ---
 
+### `_read_page1(path: Path) → bytes | None`
+
+**读取文件前 4KB**（page1）。
+
+```
+流程:
+1. 尝试直接打开文件读取 4096 字节
+2. 若 OSError（微信占用中）→ 复制到临时文件再读
+   - 使用 tempfile.mkstemp 唯一命名（线程安全）
+   - 失败时返回 None
+3. 校验: 长度 >= 4096 且非全零
+4. 返回 page1 或 None
+```
+
+**设计要点**: Flask `threaded=True` 下，同进程多线程会同时复制。旧实现用 PID 命名会撞名互相覆盖，导致 salt 张冠李戴 → 污染密钥库。
+
+---
+
 ### `collect_db_files(db_dir: str) → list[DbEntry]`
 
 递归收集 db_storage 下全部 .db 文件。

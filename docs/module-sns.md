@@ -112,6 +112,13 @@ build_media_url(url, token, is_video=None)
 **⚠️ `<url>` 元素有两个 token** —— 路径里的（77 字符）和 **`token` 属性**（88 字符）。
 **必须用属性值做查询参数**，两者不同。
 
+**⚠️ `key="0"` 是占位值，不是密钥**（2026-09-30 修复）。视频 media 实测写成
+`<url key="0">` + `<enc key="929615230">` —— 真密钥在 `<enc key>`。
+旧实现用 `or` 串联取值，`"0"` 是真值字符串，于是密钥被当成 0，
+下载回来的密文 XOR 后仍是乱码 → **视频 100% 拉不下来**。
+现在 `sns._meta_attr()` 把 `""` / `"0"` / `none` 一律视为缺失，
+再回退到 `<enc key>`（图片的 `url@key` 照旧优先）。
+
 **请求头**（缺 UA 会被拒）：`User-Agent: MicroMessenger Client`
 
 ### 2.2 缓存键
@@ -129,13 +136,43 @@ WeFlow 旧版用完整 URL 的 md5，**token 一变缓存全失效**，后来改
 ```python
 fetch_media(url, key=None, token=None, timeout=15.0,
             cache_dir=None, hosts=3) -> dict
-# → {ok, data, ext, mime, error, status, encrypted, cached}
+# → {ok, data, ext, mime, error, status, encrypted, cached,
+#    reason, hosts_tried, got_bytes}
 ```
 
-流程：查缓存 → 域名回退（原样 / `mmsns` / `shmmsns` / `szmmsns`）→ 读 `x-enc`
+流程：白名单 → 查缓存 → 域名回退（**仅 `*.qpic.cn`**）→ 读 `x-enc`
 → ISAAC64 XOR → 原子写缓存。
 
-### 2.4 表情（`fetch_emoji`）
+**⚠️ 域名回退只对 qpic 生效**：视频走 `*.video.qq.com`，把它塞给
+`mmsns.qpic.cn` 只会拿到 400。旧实现对所有域名回退，于是「视频下载成功但
+认不出来」的真实原因被后面几个 400 覆盖，报错方向完全错。现在：
+
+- `undecodable`（拿到字节但认不出格式）**优先级最高**，不被 HTTP 错误覆盖；
+- HTTP 错误取**第一次**遇到的（不再取最后一个域名的）；
+- 非微信 CDN 地址（`b23.tv` / 网易云 / B 站直播等外链卡片）直接判
+  `not-cdn`，顺带堵掉 `/api/sns/media` 的任意 URL 代理（SSRF）。
+
+### 2.4 失败诊断与日志（2026-09-30 补）
+
+失败不再静默，每次失败都写 `logs/siwx.log`（“运行日志”页会 tail 该文件）：
+
+```
+[sns-media] 下载失败 reason=http-404 status=404 hosts_tried=3 got=0B err=HTTP 404 url=<host+path>
+```
+
+`reason` 是机器可读分类，前端 / 导出报告都用它：
+
+| reason | 含义 | 能修吗 |
+|---|---|---|
+| `http-404` | CDN 上确实没有该资源（token 正确也 404） | ❌ 只能如实报错 |
+| `http-400` / `http-403` | 链接失效（视频 `encfilekey` 短时有效） | ❌ |
+| `undecodable` | 下载成功但解密/格式识别失败 | ✅ 类 bug（如上面的 key="0"） |
+| `not-cdn` | 外链卡片，不是媒体 | 预期拒绝 |
+| `network` | 连接层失败 | 重试即可 |
+
+日志里的 URL **去掉 query**（`safe_url()`）—— token 是凭据，不进日志。
+
+### 2.5 表情（`fetch_emoji`）
 
 ```python
 fetch_emoji(emoji_dict, cache_dir=None) -> dict   # → {ok, data, ext, mime, error, via}
@@ -474,9 +511,10 @@ download 越界 403 ｜ 非法格式 400 ｜ 缺参 400 ｜ 已有任务 409
 
 | 项 | 说明 |
 |---|---|
-| **CDN token 过期** | 旧动态大概率失效（实测 6 样本中 1 个 404）。降级到本地缓存（19%） |
-| **本地缓存覆盖率** | 19%（微信只缓存浏览过的图片）—— **物理上限** |
-| **域名失效** | `shmmsns.qpic.cn` 已见 404，故有域名回退 |
+| **CDN 已无此资源** | 实测（2026-09-30，抽样 664 张图）：**自己发的图 58% 404**、好友的 4% 404。token / 尺寸档 / 备用域名 / 本地缓存全部试过，都拿不到 —— 属 CDN 侧事实，只能如实报错 |
+| **本地缓存覆盖率** | 19%（微信只缓存浏览过的图片）—— **物理上限**；404 的那批图实测连尺寸都对不上，本地也没有 |
+| **视频链接短时有效** | `snsvideodownload?encfilekey=...` 过期后 400（实测 6 个样本中 1 个） |
+| **域名失效** | `shmmsns.qpic.cn` 已见 404，故对 qpic 保留域名回退 |
 | **`decrypt_emoji_aes`** | 备用路径，**尚无真实样本验证** |
 | **私密动态** | `private=1`（本机 9 条），默认照常展示 |
 | **位置** | 多数动态是 `0,0` 占位，已过滤 |
@@ -485,7 +523,7 @@ download 越界 403 ｜ 非法格式 400 ｜ 缺参 400 ｜ 已有任务 409
 
 ## 十、测试
 
-`tests/test_sns.py`（48 例）：
+`tests/test_sns.py`（64 例）：
 
 - ISAAC64 官方向量自检、snsId 还原（含负数）
 - URL 构造（token 属性 / 图片档位替换）、缓存键去 token
@@ -495,12 +533,21 @@ download 越界 403 ｜ 非法格式 400 ｜ 缺参 400 ｜ 已有任务 409
   **kind 按字段而非 type 判定**、finder 媒体不混进主 mediaList、`search_text` 口径
 - **卡片导出**（`TestSnsCardExport`）：关键词命中卡片标题/昵称、JSON `card` 结构、
   md/txt/html 的卡片块 + 位置 + 评论图
+- **CDN 诊断**（`TestSnsCdnDiagnosis`）：`key="0"` 回退 `<enc key>`（修复视频）、
+  域名回退只对 qpic、CDN 白名单（含 `wxapp.tc.qq.com`）、
+  `undecodable` 不被 HTTP 错误覆盖、失败必写日志、`/api/sns/media` 拒绝外链
 - 导出四格式、关键词/发布者过滤、空结果、非法格式
 - **API 层**（`SIWX_ROOT` 隔离）：账号列表、游标分页、详情、**路径穿越**、
   导出校验、**异步任务全流程**、download 越界、emoji 参数、**关键词命中卡片字段**
 
 ```bash
 python -m unittest tests.test_sns -v
+```
+
+**改 CDN 相关代码前先跑真库体检**（不写任何文件，只读 sns.db + 真网络）：
+
+```bash
+python diag_sns_cdn.py <账号目录名> 300 60
 ```
 
 ---

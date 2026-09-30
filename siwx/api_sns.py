@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import re
 import sqlite3
 import threading
@@ -18,6 +19,9 @@ from siwx import sns_cdn
 
 bp = Blueprint("sns_api", __name__, url_prefix="/api/sns")
 _ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
+
+# 媒体接口的失败原因要落 logs/siwx.log（「运行日志」页会 tail 该文件）
+_media_log = logging.getLogger("siwx")
 
 # 关键词搜索需要逐条解析 XML，无法下推 SQL；命中后立即停止，
 # 另设扫描上限避免极端情况下把整个请求阻塞住（实测 0.19ms/条）。
@@ -54,6 +58,72 @@ def _feed_json(feed: dict, include_comments: bool = True) -> dict:
     return out
 
 
+def _ts_arg(name: str, end: bool = False):
+    """解析 ``start`` / ``end`` 查询参数（unix 秒或 ``YYYY-MM-DD``）。
+
+    ``end`` 传纯日期时补到当日 23:59:59，否则「今天到某天」会少掉一整天。
+    """
+    raw = request.args.get(name)
+    if raw in (None, ""):
+        return None
+    ts = sns.parse_ts_arg(raw)
+    if ts is None:
+        return None
+    if end and re.fullmatch(r"\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*", str(raw)):
+        ts += 86399
+    return ts
+
+
+def _avatar_usernames(acc_dir: Path | None, usernames) -> set:
+    """批量查 head_image.db，返回**确实有头像**的 username 集合。
+
+    为什么不让前端逐个头像请求：113 位发布者会有 24 个 404（本机实测覆盖率 89/113），
+    既慢又在控制台刷错误。用户名与聊天一致，前端命中后才去取 `/api/chat/avatar`。
+    """
+    if acc_dir is None or not usernames:
+        return set()
+    db = acc_dir / "head_image" / "head_image.db"
+    if not db.is_file():
+        return set()
+    wanted = [u for u in usernames if u]
+    found = set()
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            for i in range(0, len(wanted), 400):
+                chunk = wanted[i:i + 400]
+                marks = ",".join("?" * len(chunk))
+                for (u,) in con.execute(
+                        f"SELECT username FROM head_image WHERE username IN ({marks})", chunk):
+                    if u:
+                        found.add(u)
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return set()
+    # 自己的头像：SNS 里的 user_name 通常是原始 wxid，但输出目录名可能是 wxid_xxx_6409
+    for u in wanted:
+        if u in found:
+            continue
+        for cand in _self_aliases(u, acc_dir.name):
+            if cand in found:
+                found.add(u)
+                break
+    return found
+
+
+def _self_aliases(username: str, account: str):
+    """本人 wxid 的候选写法（与 api_chat.avatar 的回退逻辑保持一致）。"""
+    from siwx import media
+    out = []
+    if username == account:
+        clean = media.clean_wxid(account)
+        out.append(clean)
+        if "_" in account:
+            out.append(account.rsplit("_", 1)[0])
+    return out
+
+
 @bp.get("/accounts")
 def accounts():
     out = []
@@ -83,6 +153,7 @@ def timeline():
     before = request.args.get("before_tid")
     keyword = (request.args.get("keyword") or "").strip().lower()
     user = (request.args.get("username") or "").strip()
+    start_ts, end_ts = _ts_arg("start"), _ts_arg("end", end=True)
     rows = []
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.text_factory = bytes
@@ -99,6 +170,16 @@ def timeline():
                 args.append(int(before))
             except ValueError:
                 return jsonify({"error": "before_tid 无效"}), 400
+        # 时间范围：tid 内含毫秒时间戳，直接下推成 tid 区间（比解析 XML 再过滤快得多）
+        lo, hi = sns.ts_to_tid_bounds(start_ts, end_ts)
+        if lo is not None and hi is not None and (lo >= 0) != (hi >= 0):
+            lo = hi = None      # 跨 2004-11 的正负分界（SNS 不可能）→ 回退 Python 过滤
+        if lo is not None:
+            where.append("tid >= ?")
+            args.append(lo)
+        if hi is not None:
+            where.append("tid <= ?")
+            args.append(hi)
         sql = ("SELECT tid, user_name, content FROM SnsTimeLine"
                + (" WHERE " + " AND ".join(where) if where else ""))
         sql += " ORDER BY tid DESC"
@@ -117,10 +198,16 @@ def timeline():
             scanned += 1
             if keyword and scanned > KEYWORD_MAX_SCAN:
                 break
+            ts_sec = sns.sns_id_to_seconds(tid)
+            # 时间范围兜底（正常已下推到 SQL；仅正负分界那种异常区间才生效）
+            if start_ts is not None and ts_sec < start_ts:
+                continue
+            if end_ts is not None and ts_sec > end_ts:
+                continue
             feed = sns.parse_timeline(content)
             if feed is None:
                 continue
-            feed.update(tid=tid, ts_ms=sns.sns_id_to_ms(tid), ts=sns.sns_id_to_seconds(tid),
+            feed.update(tid=tid, ts_ms=sns.sns_id_to_ms(tid), ts=ts_sec,
                         user_name=(who or b"").decode("utf-8", "replace") if isinstance(who, bytes) else (who or ""))
             # 关键词匹配卡片文本（标题/歌手/视频号昵称/位置/媒体描述），
             # 不只看 contentDesc —— 实测卡片类动态的 contentDesc 常为空。
@@ -195,7 +282,11 @@ def emoji():
 def friends():
     """按发布者聚合（纯 SQL GROUP BY，实测 ~111ms vs 全量解析 1230ms）。
 
-    可选解析联系人备注/昵称（复用 api_chat 的实现）。
+    可选解析联系人备注/昵称（复用 api_chat 的实现），并批量标记**是否有头像**
+    （前端据此决定 `<img>` 还是首字母圆形占位，避免一堆 404）。
+
+    排序在前端做：拼音排序依赖浏览器 `Intl.Collator(..., {collation:'pinyin'})`，
+    Python 标准库没有拼音能力，而发布者只有百量级，前端排序没有性能问题。
     """
     account = request.args.get("account", "")
     db = _sns_db(account)
@@ -207,18 +298,22 @@ def friends():
         limit = 200
     rows = sns.iter_authors(db, limit=limit)
 
-    if request.args.get("names", "1") != "0":
-        acc_dir = _account_dir(account)
-        if acc_dir:
-            try:
-                from siwx.api_chat import _contact_names
-                names = _contact_names(acc_dir)
-                for r in rows:
-                    r["display"] = names.get(r["username"]) or r["username"]
-            except Exception:  # noqa: BLE001  昵称解析失败不影响列表
-                pass
+    acc_dir = _account_dir(account)
+    if request.args.get("names", "1") != "0" and acc_dir:
+        try:
+            from siwx.api_chat import _contact_names
+            names = _contact_names(acc_dir)
+            for r in rows:
+                r["display"] = names.get(r["username"]) or r["username"]
+        except Exception:  # noqa: BLE001  昵称解析失败不影响列表
+            pass
     for r in rows:
         r.setdefault("display", r["username"])
+
+    with_avatar = _avatar_usernames(acc_dir, [r["username"] for r in rows])
+    for r in rows:
+        r["has_avatar"] = r["username"] in with_avatar
+
     return jsonify({"friends": rows, "total": len(rows)})
 
 
@@ -311,21 +406,37 @@ def export_download():
 
 @bp.get("/media")
 def media():
+    """代理下载朋友圈媒体（图片/视频/实况），带磁盘缓存。
+
+    只在微信 CDN 域名上取数：
+    * XML 里的媒体一定是 ``*.qpic.cn`` / ``*.video.qq.com``；
+    * 外链卡片（如 b23.tv）走这条路只会 400，而且会让接口变成任意 URL 代理。
+    失败时返回 ``reason`` / ``hosts_tried``，前端据此提示而不是静默隐藏。
+    """
     account = request.args.get("account", "")
     url = request.args.get("url", "")
     key = request.args.get("key")
     token = request.args.get("token")
     if not url:
         return jsonify({"error": "缺少 url"}), 400
+    if not sns_cdn.is_wechat_cdn(url):
+        _media_log.warning("[sns-media] 拒绝非微信 CDN 地址：%s",
+                           sns_cdn.safe_url(url))
+        return jsonify({"error": "只允许微信 CDN 地址（外链卡片不是可下载的媒体）",
+                        "reason": "not-cdn"}), 400
     cache = None
     acc_dir = _account_dir(account)
     if acc_dir:
         cache = acc_dir / "sns_media"
     result = sns_cdn.fetch_media(url, key=key, token=token, cache_dir=cache)
     if not result["ok"]:
-        return jsonify({"error": result["error"], "status": result["status"]}), result["status"] or 502
+        # 失败原因由 sns_cdn 落 logs/siwx.log（含 reason / 试了几个域名 / HTTP 码）
+        return jsonify({"error": result["error"], "status": result["status"],
+                        "reason": result.get("reason"),
+                        "hosts_tried": result.get("hosts_tried")}), result["status"] or 502
     data = sns_cdn.strip_wechat_tail(result["data"])
     return Response(data, mimetype=result["mime"], headers={
         "X-SIWX-SNS-Encrypted": "1" if result["encrypted"] else "0",
         "X-SIWX-SNS-Cached": "1" if result.get("cached") else "0",
+        "Cache-Control": "private, max-age=86400",
     })

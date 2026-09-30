@@ -264,6 +264,10 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _log(f"[sns] 导出完成：{res['count']} 条动态，"
                  f"媒体 {m.get('ok', 0)}/{m.get('total', 0)}（失败 {m.get('fail', 0)}），"
                  f"耗时 {res.get('duration_ms', 0)}ms")
+            # 失败原因必须进任务日志：否则用户只看到「失败 N」，无从判断是
+            # CDN 已无此图（http-404）还是密钥/格式问题（undecodable）。
+            if m.get("reasons"):
+                _log(f"[sns] 媒体失败原因分布：{m['reasons']}")
             report = {"kind": "sns_export", **res}
             with _lock:
                 _job["ok"] = True

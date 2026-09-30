@@ -14,6 +14,16 @@
 
 ## 关键函数
 
+### `CACHE_NAME` 常量
+
+```python
+CACHE_NAME = ".siwx_cache.json"
+```
+
+缓存清单文件名，存放在解密产物目录下。
+
+---
+
 ### `load_manifest(out_dir) → dict`
 
 加载缓存清单。
