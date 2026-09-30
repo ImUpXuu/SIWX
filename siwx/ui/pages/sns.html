@@ -1,12 +1,98 @@
 <div class="sns-page">
-  <div class="sns-toolbar card">
-    <div class="card-head"><h2>朋友圈</h2><span class="hint" id="sns-meta">加载中…</span></div>
-    <div class="sns-controls">
-      <select id="sns-account"></select>
-      <input id="sns-keyword" placeholder="搜索朋友圈文字…">
-      <select id="sns-user" title="按发布者筛选"><option value="">全部发布者</option></select>
-      <button id="sns-refresh" class="btn">⟳ 刷新</button>
+  <!-- 微信式头部：封面 + 本人头像 -->
+  <header class="sns-hero">
+    <div class="sns-cover"></div>
+    <div class="sns-hero-row">
+      <div class="sns-hero-right">
+        <span class="sns-hero-name" id="sns-me-name">我</span>
+        <div class="sns-hero-ava" id="sns-me-ava"><span id="sns-me-initial">我</span></div>
+      </div>
     </div>
+  </header>
+
+  <!-- 筛选栏 -->
+  <div class="sns-bar">
+    <div class="sns-search">
+      <span class="sns-search-icon" aria-hidden="true">🔍</span>
+      <input id="sns-keyword" placeholder="搜索朋友圈内容、标题、歌手、视频号…">
+      <button id="sns-keyword-clear" class="sns-search-clear" hidden title="清除">✕</button>
+    </div>
+    <div class="sns-chips">
+      <button id="sns-range-btn" class="sns-chip" aria-haspopup="true">
+        <span class="sns-chip-icon">🗓</span><span id="sns-range-label">全部时间</span>
+      </button>
+      <button id="sns-user-btn" class="sns-chip sns-chip-user" aria-haspopup="true">
+        <span class="sns-chip-ava" id="sns-user-chip-ava"></span>
+        <span id="sns-user-label">全部发布者</span>
+        <span class="sns-chip-caret">▾</span>
+      </button>
+      <span class="sns-bar-gap"></span>
+      <select id="sns-account" class="sns-account" title="选择账号"></select>
+      <button id="sns-refresh" class="sns-icon-btn" title="刷新">⟳</button>
+      <button id="sns-export-toggle" class="sns-icon-btn" title="导出">📦</button>
+      <span class="sns-meta" id="sns-meta"></span>
+    </div>
+  </div>
+
+  <!-- 时间范围面板 -->
+  <div class="sns-pop sns-pop-range" id="sns-range-panel" hidden>
+    <div class="sns-pop-head"><b>选择时间范围</b>
+      <button class="sns-pop-close" data-close="sns-range-panel" title="关闭">✕</button></div>
+    <div class="sns-quick" id="sns-quick">
+      <button data-range="all">全部</button>
+      <button data-range="today">今天</button>
+      <button data-range="7">最近 7 天</button>
+      <button data-range="30">最近 30 天</button>
+      <button data-range="90">最近 90 天</button>
+      <button data-range="365">最近一年</button>
+      <button data-range="thisyear">今年</button>
+    </div>
+    <div class="sns-cal">
+      <div class="sns-cal-head">
+        <button id="cal-prev" class="sns-cal-nav" title="上个月">‹</button>
+        <button id="cal-title" class="sns-cal-title">—</button>
+        <button id="cal-next" class="sns-cal-nav" title="下个月">›</button>
+      </div>
+      <div class="sns-cal-week"><span>日</span><span>一</span><span>二</span><span>三</span>
+        <span>四</span><span>五</span><span>六</span></div>
+      <div class="sns-cal-grid" id="cal-grid"></div>
+    </div>
+    <div class="sns-pop-foot">
+      <span class="sns-cal-hint" id="cal-hint">点击日期选择开始</span>
+      <button id="cal-clear" class="sns-btn-ghost">清除</button>
+      <button id="cal-ok" class="sns-btn-primary">确定</button>
+    </div>
+  </div>
+
+  <!-- 发布者面板 -->
+  <div class="sns-pop sns-pop-user" id="sns-user-panel" hidden>
+    <div class="sns-pop-head"><b>选择发布者</b>
+      <button class="sns-pop-close" data-close="sns-user-panel" title="关闭">✕</button></div>
+    <div class="sns-user-tools">
+      <div class="sns-search sns-search-sm">
+        <span class="sns-search-icon" aria-hidden="true">🔍</span>
+        <input id="sns-user-search" placeholder="搜索昵称 / 微信号">
+      </div>
+      <select id="sns-user-sort" class="sns-user-sort" title="排序方式">
+        <option value="count-desc">发送量 多 → 少</option>
+        <option value="count-asc">发送量 少 → 多</option>
+        <option value="name-asc">名称拼音 A → Z</option>
+        <option value="name-desc">名称拼音 Z → A</option>
+        <option value="recent-desc">最近发布</option>
+        <option value="oldest-asc">最早发布</option>
+      </select>
+    </div>
+    <div class="sns-user-list" id="sns-user-list"></div>
+    <div class="sns-pop-foot">
+      <span class="sns-cal-hint" id="sns-user-hint"></span>
+      <button id="sns-user-clear" class="sns-btn-ghost">清除筛选</button>
+    </div>
+  </div>
+
+  <!-- 导出面板 -->
+  <div class="sns-pop sns-pop-export" id="sns-export-panel" hidden>
+    <div class="sns-pop-head"><b>导出朋友圈</b>
+      <button class="sns-pop-close" data-close="sns-export-panel" title="关闭">✕</button></div>
     <div class="sns-export">
       <select id="sns-fmt">
         <option value="json">JSON</option>
@@ -18,22 +104,24 @@
       <label class="sns-conc">并发
         <input type="number" id="sns-exp-conc" min="1" max="16" value="5" title="媒体下载并发数（1-16，默认 5）">
       </label>
-      <button id="sns-export" class="btn btn-primary">📦 导出</button>
-      <span class="hint" id="sns-export-msg"></span>
+      <button id="sns-export" class="sns-btn-primary">导出</button>
     </div>
+    <div class="sns-export-tip" id="sns-export-scope"></div>
+    <span class="sns-export-msg" id="sns-export-msg"></span>
   </div>
+
   <div id="sns-notice" class="sns-notice" hidden></div>
-  <div id="sns-list" class="sns-list"><div class="st-loading">加载中…</div></div>
-  <button id="sns-more" class="btn sns-more" hidden>加载更多</button>
+  <div id="sns-list" class="sns-list"><div class="sns-loading">加载中…</div></div>
+  <button id="sns-more" class="sns-more" hidden>加载更多</button>
 
   <div id="sns-modal" class="sns-modal" hidden>
     <div class="sns-modal-mask" id="sns-modal-mask"></div>
     <div class="sns-modal-box">
       <div class="sns-modal-head">
         <span id="sns-modal-title">动态详情</span>
-        <button id="sns-modal-close" class="mini-btn" title="关闭">✕</button>
+        <button id="sns-modal-close" class="sns-icon-btn" title="关闭">✕</button>
       </div>
-      <div id="sns-modal-body" class="sns-modal-body"><div class="st-loading">加载中…</div></div>
+      <div id="sns-modal-body" class="sns-modal-body"><div class="sns-loading">加载中…</div></div>
     </div>
   </div>
 

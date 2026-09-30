@@ -13,12 +13,16 @@ from __future__ import annotations
 
 import html as _html
 import json
+import logging
 import time
 from pathlib import Path
 
 from . import sns
 from . import sns_cdn
 from .exporter import _safe_name
+
+# 媒体下载失败要有地方查（logs/siwx.log，“运行日志”页会 tail 它）
+_file_log = logging.getLogger("siwx")
 
 FORMATS = ("json", "markdown", "txt", "html")
 
@@ -265,7 +269,7 @@ def download_media(feeds, media_dir: Path, cache_dir=None,
 
     media_map: dict = {}
     stat = {"ok": 0, "fail": 0, "bytes": 0, "total": len(tasks),
-            "live_ok": 0, "live_fail": 0}
+            "live_ok": 0, "live_fail": 0, "reasons": {}, "fail_samples": []}
     if not tasks:
         return {"map": media_map, **stat}
 
@@ -274,21 +278,21 @@ def download_media(feeds, media_dir: Path, cache_dir=None,
         r = sns_cdn.fetch_media(m.get("url"), key=m.get("key"),
                                 token=m.get("token"), cache_dir=cache_dir)
         if not r["ok"]:
-            return tid, idx, suffix, None, 0, r.get("error")
+            return tid, idx, suffix, None, 0, r.get("error"), r.get("reason")
         data = sns_cdn.strip_wechat_tail(r["data"])
         name = f"{tid}_{idx}{suffix}.{r['ext']}"
         try:
             (media_dir / name).write_bytes(data)
         except OSError as e:
-            return tid, idx, suffix, None, 0, f"write: {e}"
-        return tid, idx, suffix, f"media/{name}", len(data), None
+            return tid, idx, suffix, None, 0, f"write: {e}", "write-error"
+        return tid, idx, suffix, f"media/{name}", len(data), None, None
 
     done = 0
     workers = clamp_concurrency(concurrency)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [ex.submit(_one, t) for t in tasks]
         for fu in as_completed(futs):
-            tid, idx, suffix, rel, nbytes, err = fu.result()
+            tid, idx, suffix, rel, nbytes, err, reason = fu.result()
             done += 1
             if rel:
                 media_map[(tid, idx, suffix)] = rel
@@ -300,11 +304,23 @@ def download_media(feeds, media_dir: Path, cache_dir=None,
                 stat["fail"] += 1
                 if suffix == "_live":
                     stat["live_fail"] += 1
+                # 失败原因要有地方看：明细进 stat，前 30 条进日志（避免刷爆）
+                key = reason or "unknown"
+                stat["reasons"][key] = stat["reasons"].get(key, 0) + 1
+                if len(stat["fail_samples"]) < 30:
+                    stat["fail_samples"].append(
+                        {"tid": tid, "index": idx, "live": suffix == "_live",
+                         "reason": key, "error": err})
+                    _file_log.warning("[sns-media] 导出下载失败 tid=%s idx=%s live=%s "
+                                      "reason=%s err=%s", tid, idx, suffix == "_live", key, err)
             if progress:
                 try:
                     progress(done, stat["total"], f"媒体 {done}/{stat['total']}")
                 except Exception:
                     pass
+    if stat["fail"]:
+        _file_log.warning("[sns-media] 导出媒体失败 %d/%d，原因分布 %s",
+                          stat["fail"], stat["total"], stat["reasons"])
     return {"map": media_map, **stat}
 
 
