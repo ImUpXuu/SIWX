@@ -9,7 +9,7 @@
 1. **静态资源服务**: 提供 UI 页面和静态文件
 2. **任务调度**: 单任务槽（同一时间只允许一个后台任务）
 3. **日志流**: 环形日志缓冲，供日志页展示
-4. **API 注册**: 模块化 Blueprint（chat / export / settings）
+4. **API 注册**: 模块化 Blueprint（chat / export / settings / mcp / update / plugins / stats / sns）
 5. **状态监控**: 微信进程 / 账号 / 密钥库状态
 
 ---
@@ -28,12 +28,23 @@ Flask App (server.py)
 ├─ API 路由:
 │   ├─ GET  /api/status   → 状态总览
 │   ├─ POST /api/run      → 启动任务
-│   └─ GET  /api/logs     → 环形日志缓冲
+│   ├─ GET  /api/logs     → 环形日志缓冲
+│   ├─ GET  /api/job      → 任务状态
+│   ├─ POST /api/discover/validate → 验证微信路径
+│   ├─ GET  /api/logs/settings → 日志设置
+│   ├─ POST /api/logs/settings → 更新日志设置
+│   ├─ GET  /api/logs/export → 导出日志
+│   └─ GET  /plugin-pages/<plugin>/<path> → 插件页面资源
 │
 ├─ Blueprint 注册:
 │   ├─ /api/chat/*        → api_chat.py
 │   ├─ /api/export/*      → api_export.py
-│   └─ /api/settings/*    → api_settings.py
+│   ├─ /api/settings/*    → api_settings.py
+│   ├─ /api/mcp/*         → api_mcp.py
+│   ├─ /api/update/*      → api_update.py
+│   ├─ /api/plugins/*     → api_plugins.py
+│   ├─ /api/stats/*       → api_stats.py
+│   └─ /api/sns/*         → api_sns.py
 │
 └─ 任务执行器:
     └─ _run_job()         → 后台线程执行
@@ -59,6 +70,7 @@ Flask App (server.py)
 | `auto` | 提取 + 解密 |
 | `sync` | 增量同步（密钥缓存优先 → 收割缺失 → 只解密变更库） |
 | `export` | 导出聊天记录 |
+| `sns_export` | 导出朋友圈 |
 
 ### 任务状态
 
@@ -139,9 +151,11 @@ def _log(msg):
         ts = int(time.time() * 1000)
         _job["logs"].append([ts, msg])      # 任务日志
         _LOG_RING.append([ts, msg])         # 全局环形缓冲
+        _siwx_logger.info(msg)              # 文件日志（logs/siwx.log）
 ```
 
 **环形缓冲**: 最大 2000 条，超出时删除最早的。
+**文件日志**: 同时写入 `logs/siwx.log`（10MB × 5 轮转）。
 
 ---
 
@@ -161,10 +175,13 @@ def _log(msg):
       "db_dir": "C:/.../db_storage",
       "db_count": 32,
       "keys_cached": 30,
-      "total_salts": 32
+      "total_salts": 32,
+      "manual": false
     }
   ],
-  "stored_salts": 32
+  "stored_salts": 32,
+  "conflicts": [{"wxid": "wxid_xxx", "dirs": ["C:/.../db_storage", "D:/.../db_storage"]}],
+  "job": "空闲"
 }
 ```
 
@@ -195,15 +212,101 @@ def _log(msg):
 
 ### `GET /api/logs`
 
-**返回环形日志缓冲**。
+**返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）**。
 
 ```json
 {
   "logs": [
     [1725600000000, "[cipher] 扫描完成"],
     [1725600000100, "…"],
-  ]
+  ],
+  "level": "rough"
 }
+```
+
+**合并逻辑**: 文件日志（`_tail_app_log`）+ 环形日志（`_LOG_RING`）+ MCP 日志（`_tail_mcp_log`）+ 结构化日志（`log.get_logs()`），按时间戳排序后去重。
+
+---
+
+### `GET /api/job`
+
+**返回当前任务状态（供前端轮询）**。
+
+```json
+{
+  "running": true,
+  "done": false,
+  "ok": false,
+  "mode": "auto",
+  "logs": [[1725600000000, "任务开始"]],
+  "report": null
+}
+```
+
+---
+
+### `POST /api/discover/validate`
+
+**验证并保存手动输入的微信存储路径**。
+
+```json
+// 请求
+{"path": "D:\\xwechat_files\\wxid_xxx\\db_storage"}
+// 响应
+{"ok": true, "wxid": "wxid_xxx", "db_dir": "...", "saved": true}
+```
+
+---
+
+### `GET /api/logs/settings` / `POST /api/logs/settings`
+
+**日志模式控制**。
+
+```json
+// GET 响应
+{"level": "rough"}
+// POST 请求
+{"level": "detailed"}
+```
+
+---
+
+### `GET /api/logs/export`
+
+**导出脱敏日志**。
+
+```
+参数: start, end, desensitize=1
+响应: text/plain（可直接下载）
+```
+
+---
+
+## 日志合并
+
+### `_tail_app_log(limit=800) → list`
+
+**读取 siwx.log 文件末尾，转换为 `[ts_ms, message]` 格式**。
+
+```
+流程:
+1. 找到 siwx.log 文件路径
+2. 读取文件末尾 256KB
+3. 解析每行时间戳 → ts_ms
+4. 过滤 404 Not Found 噪音
+5. 返回 [ts_ms, message] 列表
+```
+
+### `_tail_mcp_log(limit=500) → list`
+
+**读取 MCP 日志文件末尾，转换为 `[ts_ms, message]` 格式**。
+
+```
+流程:
+1. 找到 mcp.log 文件路径
+2. 读取文件末尾 64KB
+3. 解析每行时间戳 → ts_ms
+4. 返回 [ts_ms, "[MCP] message"] 列表
 ```
 
 ---
@@ -219,9 +322,13 @@ siwx/ui/
 └── pages/              # 模块化页面
     ├── guide.*         # 引导页（密钥提取 + 解密）
     ├── chat.*          # 聊天查看页
+    ├── sns.*           # 朋友圈页
+    ├── stats.*         # 聊天统计页
     ├── export.*        # 导出页
+    ├── mcp.*           # MCP 配置页
     ├── settings.*      # 设置页
-    └── logs.*          # 日志页
+    ├── logs.*          # 日志页
+    └── disclaimer.html # 免责声明弹层
 ```
 
 ### UI 路径解析
@@ -251,6 +358,97 @@ def _status_getter() -> dict:
 ```
 
 **常驻显示**: 1 秒刷新，ANSI 转义码定位光标。
+
+---
+
+## 自动同步调度器
+
+### `_start_auto_sync_scheduler() → None`
+
+**后台增量同步调度器**（30 秒轮询）。
+
+```
+流程:
+1. 每 30 秒检查一次
+2. 条件: 开启 + 到间隔 + 微信在线 + 无运行中任务
+3. 满足时启动 sync 任务
+4. 记录 last_run / last_ok / last_message
+```
+
+**配置**: `auto_sync.json`（存于 `paths.app_root()`）
+- `enabled`: 是否开启
+- `interval_minutes`: 间隔（1~1440，默认 30）
+
+---
+
+## 崩溃钩子
+
+### `_install_crash_hooks() → None`
+
+**记录非 Flask/任务线程里的未捕获异常和 Python fatal traceback**。
+
+```
+功能:
+1. sys.excepthook → 记录主线程未捕获异常
+2. threading.excepthook → 记录线程未捕获异常
+3. faulthandler.enable() → 记录 Python fatal traceback 到 crash.log
+```
+
+**日志位置**: `logs/crash.log`
+
+---
+
+## 文件日志
+
+### `_setup_file_logger() → logging.Logger`
+
+**详细文件日志**（10MB × 5 轮转）。
+
+```
+功能:
+1. 创建 logs/ 目录
+2. RotatingFileHandler: siwx.log, 10MB × 5
+3. 同时输出到控制台（INFO+）
+```
+
+**日志位置**: `logs/siwx.log`
+
+---
+
+## 插件系统集成
+
+### `_register_plugin_blueprints(flask_app) → None`
+
+**把插件声明的 api_blueprints 挂到 Flask 应用上**。
+
+```
+流程:
+1. 检查 registry.api_blueprints 是否为空
+2. 遍历插件蓝图，逐个 try/except
+3. 重名跳过，失败不影响宿主启动
+```
+
+### `_plugin_theme_links() → str`
+
+**插件主题 → `<link>` 标签串**（按 priority 排序）。
+
+```
+流程:
+1. 检查 registry.themes 是否为空
+2. 遍历插件主题，生成 <link> 标签
+3. 只允许页面资源目录内的相对 css 名（防路径穿越）
+```
+
+### `_emit_task_event(event: str, **ctx) → None`
+
+**广播任务生命周期事件给插件监听器**（start / done）。
+
+```
+流程:
+1. 检查 registry.task_listeners 是否为空
+2. 遍历插件监听器，逐个 try/except
+3. 插件异常只写日志，绝不影响任务本身
+```
 
 ---
 

@@ -1,0 +1,79 @@
+.sns-page { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+.sns-controls { display: grid; grid-template-columns: 180px minmax(180px,1fr) minmax(180px,1fr) auto; gap: 10px; }
+.sns-notice { padding: 10px 12px; border: 1px dashed var(--line); background: var(--card-alt); color: var(--muted); font-size: 12px; }
+.sns-list { display: flex; flex-direction: column; gap: 14px; }
+.sns-post { border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--card); padding: 16px; }
+.sns-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.sns-who { font-weight: 700; font-size: 13px; }
+.sns-time { color: var(--muted); font-size: 11px; }
+.sns-text { white-space: pre-wrap; line-height: 1.7; font-size: 14px; word-break: break-word; }
+.sns-media { display: grid; grid-template-columns: repeat(3, minmax(0, 180px)); gap: 6px; margin-top: 12px; }
+.sns-media img, .sns-media video { width: 100%; aspect-ratio: 1; object-fit: cover; border: 1px solid var(--line); background: var(--card-alt); }
+.sns-actions { margin-top: 12px; color: var(--muted); font-size: 12px; display: flex; gap: 16px; align-items: center; }
+.sns-actions .sns-detail { margin-left: auto; color: var(--text); text-decoration: underline; cursor: pointer; }
+.sns-comments { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; font-size: 12px; }
+.sns-comment { padding: 3px 0; }
+.sns-comment b { color: var(--text); }
+.sns-comment .cm-emoji { width: 22px; height: 22px; vertical-align: -5px; margin-left: 3px; }
+.sns-comment .cm-img { max-width: 120px; max-height: 120px; border: 1px solid var(--line); border-radius: 4px; margin: 4px 4px 0 0; vertical-align: top; }
+
+/* ── 详情弹层 ───────────────────────────────────────────── */
+.sns-modal { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; }
+.sns-modal[hidden] { display: none; }
+.sns-modal-mask { position: absolute; inset: 0; background: rgba(0,0,0,.45); }
+.sns-modal-box {
+  position: relative; z-index: 1; background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  width: min(720px, 92vw); max-height: 86vh; display: flex; flex-direction: column;
+}
+.sns-modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 700; font-size: 14px;
+}
+.sns-modal-body { padding: 16px; overflow-y: auto; }
+.sns-modal-body .sns-media { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.sns-loc { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.sns-lb { cursor: zoom-in; }
+
+/* ── 卡片（链接 / 视频号 / 直播 / 音乐 / 笔记）──────────── */
+.sns-card {
+  display: flex; gap: 10px; align-items: flex-start; margin-top: 12px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--card-alt); color: var(--text); text-decoration: none;
+}
+a.sns-card:hover { border-color: var(--muted); }
+.sns-card-cover {
+  width: 96px; height: 96px; flex: none; object-fit: cover;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--card);
+}
+.sns-card-body { min-width: 0; }
+.sns-card-tag { font-size: 11px; color: var(--muted); }
+.sns-card-title { font-size: 13.5px; font-weight: 700; margin-top: 2px; word-break: break-word; }
+.sns-card-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.sns-card-desc { font-size: 12.5px; color: var(--muted); margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+.sns-card--music .sns-card-title { color: #1db954; }
+
+/* ── 图片灯箱 ───────────────────────────────────────────── */
+.sns-lightbox {
+  position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.88);
+  display: flex; align-items: center; justify-content: center; cursor: zoom-out;
+}
+.sns-lightbox[hidden] { display: none; }
+.sns-lightbox img { max-width: 94vw; max-height: 92vh; object-fit: contain; }
+.sns-lightbox video { max-width: 94vw; max-height: 92vh; }
+.sns-lightbox video[hidden], .sns-lightbox img[hidden] { display: none; }
+
+/* 实况照片角标 */
+.sns-media-cell { position: relative; display: block; }
+.sns-media-cell .live-badge {
+  position: absolute; left: 6px; top: 6px; pointer-events: none;
+  font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 3px;
+  background: rgba(0,0,0,.55); color: #fff; letter-spacing: .5px;
+}
+.sns-more { align-self: center; }
+.sns-export { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.sns-export select { min-height: 34px; padding: 5px 10px; font-size: 13px; }
+.sns-export .f-chk { font-size: 12.5px; }
+.sns-export .sns-conc { font-size: 12.5px; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.sns-export .sns-conc input { width: 64px; min-height: 30px; padding: 4px 6px; font-size: 13px; }
+@media (max-width: 760px) { .sns-controls { grid-template-columns: 1fr; } .sns-media { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

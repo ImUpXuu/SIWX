@@ -6,7 +6,7 @@
  * 插件菜单项**追加在内置之后**，与内置项完全平级（同样式、同高亮逻辑）。
  */
 (function () {
-  const PAGES_BUILTIN = ['guide', 'chat', 'stats', 'export', 'mcp', 'logs', 'settings'];
+  const PAGES_BUILTIN = ['guide', 'chat', 'sns', 'stats', 'export', 'mcp', 'logs', 'settings'];
   const UI_VERSION = '2026092501';
   // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
   const DISCLAIMER_VERSION = '20260925';

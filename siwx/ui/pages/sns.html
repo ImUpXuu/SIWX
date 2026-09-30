@@ -1,0 +1,44 @@
+<div class="sns-page">
+  <div class="sns-toolbar card">
+    <div class="card-head"><h2>朋友圈</h2><span class="hint" id="sns-meta">加载中…</span></div>
+    <div class="sns-controls">
+      <select id="sns-account"></select>
+      <input id="sns-keyword" placeholder="搜索朋友圈文字…">
+      <select id="sns-user" title="按发布者筛选"><option value="">全部发布者</option></select>
+      <button id="sns-refresh" class="btn">⟳ 刷新</button>
+    </div>
+    <div class="sns-export">
+      <select id="sns-fmt">
+        <option value="json">JSON</option>
+        <option value="markdown">Markdown</option>
+        <option value="html">HTML</option>
+        <option value="txt">TXT</option>
+      </select>
+      <label class="f-chk"><input type="checkbox" id="sns-exp-media"> 同时下载媒体（较慢）</label>
+      <label class="sns-conc">并发
+        <input type="number" id="sns-exp-conc" min="1" max="16" value="5" title="媒体下载并发数（1-16，默认 5）">
+      </label>
+      <button id="sns-export" class="btn btn-primary">📦 导出</button>
+      <span class="hint" id="sns-export-msg"></span>
+    </div>
+  </div>
+  <div id="sns-notice" class="sns-notice" hidden></div>
+  <div id="sns-list" class="sns-list"><div class="st-loading">加载中…</div></div>
+  <button id="sns-more" class="btn sns-more" hidden>加载更多</button>
+
+  <div id="sns-modal" class="sns-modal" hidden>
+    <div class="sns-modal-mask" id="sns-modal-mask"></div>
+    <div class="sns-modal-box">
+      <div class="sns-modal-head">
+        <span id="sns-modal-title">动态详情</span>
+        <button id="sns-modal-close" class="mini-btn" title="关闭">✕</button>
+      </div>
+      <div id="sns-modal-body" class="sns-modal-body"><div class="st-loading">加载中…</div></div>
+    </div>
+  </div>
+
+  <div id="sns-lightbox" class="sns-lightbox" hidden>
+    <img id="sns-lightbox-img" alt="">
+    <video id="sns-lightbox-video" controls autoplay loop muted playsinline hidden></video>
+  </div>
+</div>

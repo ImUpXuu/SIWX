@@ -22,6 +22,7 @@
 | `RESERVE_SZ` | 80 | 每页尾部保留区 |
 | `IV_SZ` | 16 | 每页 IV 长度 |
 | `HMAC_SZ` | 64 | SHA-512 HMAC 长度 |
+| `SQLITE_HDR` | `b"SQLite format 3\x00"` | 明文 SQLite 文件头 |
 | KDF | PBKDF2-SHA512 × 2 | 密钥派生 |
 | Cipher | AES-256-CBC | 加密算法 |
 
@@ -93,7 +94,7 @@ class DbEntry:
 
 ```
 算法:
-1. 打开源文件（4MB 缓冲）
+1. 打开源文件（8MB 缓冲）
    - 若打开失败（微信占用）→ 复制到临时文件
 2. 读取 page1 → verify_enc_key() 验证
 3. 创建 AES-256-ECB cipher（复用，不每页新建）
@@ -103,15 +104,16 @@ class DbEntry:
    - 每页 IV = page[4096-80 : 4096-80+16]
    - CBC 解密 = ECB_decrypt(ct) XOR (iv + prev_ct[:len-16])
    - 使用大整数 XOR 恢复链（消掉 Python 循环开销）
-5. 写出明文 SQLite（4MB 缓冲）
+5. 写出明文 SQLite（8MB 缓冲）
 6. 返回总页数
 ```
 
 **性能优化**:
-- 4MB 读写缓冲（减少系统调用）
+- 8MB 读写缓冲（减少系统调用）
 - ECB cipher 复用（消掉 13.7 万次 AES.new 的 key schedule 开销）
 - 大整数 XOR（消掉 Python 字节循环）
 - 自动走 AES-NI 硬件加速
+- 原子写：先写 `.part` 文件，成功后 `os.replace()` 替换目标
 
 ---
 
@@ -151,12 +153,14 @@ PyCryptodome 的 CBC 模式每页调用一次 `AES.new()`，
 
 ```python
 try:
-    fin = open(src, "rb", buffering=4 * 1024 * 1024)
+    fin = open(src, "rb", buffering=8 * 1024 * 1024)
 except OSError:
-    # 微信占用中：复制到临时文件再读
-    tmp_copy = Path(tempfile.gettempdir()) / f"siwx_db_{os.getpid()}.tmp"
+    # 微信占用中：复制到临时文件再读（mkstemp 唯一命名，线程安全）
+    fd, name = tempfile.mkstemp(prefix="siwx_db_", suffix=".tmp")
+    os.close(fd)
+    tmp_copy = Path(name)
     shutil.copy2(src, tmp_copy)
-    fin = open(tmp_copy, "rb", buffering=4 * 1024 * 1024)
+    fin = open(tmp_copy, "rb", buffering=8 * 1024 * 1024)
 ```
 
 同样适用于 `collect_db_files()` 中的 page1 读取。

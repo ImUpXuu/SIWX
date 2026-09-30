@@ -63,6 +63,20 @@ PLUGIN = {"name": "x", "pages_dir": "C:/abs/path"}
 **两个插件同名** → 名字字典序在前的先加载，后者被跳过并在
 `GET /api/plugins` 中记为 `degraded`（原因："与已加载插件同名"）。
 
+### 进阶：`register()` 函数形式
+
+除 `PLUGIN` 字典外，插件还可以定义 `register(reg)` 函数直接操作注册表：
+
+```python
+def register(reg):
+    """直接注册 hook，适合需要条件注册或动态生成的场景。"""
+    reg.pages.append(UiPage(name="dynamic", title="动态页"))
+    reg.settings.append(SettingItem(plugin="myplugin", group="g", key="k"))
+```
+
+> ⚠️ `register()` 形式不做同名去重、不写 `registry.metas`、版本恒 `0.0.0`，且零测试覆盖。
+> 推荐优先使用 `PLUGIN` 字典形式。
+
 ---
 
 ## 三、PLUGIN 字典速查
@@ -476,7 +490,7 @@ def my_extract(ctx) -> int:
                     "process_dependent": False}]
 ```
 
-- 与内建策略同签名：`extract(ctx) -> int`，**追加在内建 4 个策略之后**
+- 与内建策略同签名：`extract(ctx) -> int`，**追加在内建策略之后**（Windows 4 个 / macOS 3 个）
 - `ctx`：`db_dir` / `entries` / `page1_by_salt` / `key_map` / `attrib` /
   `log` / `use_memory`
 - **propose-verify 分离**：策略只把候选写进 `key_map`，宿主统一用

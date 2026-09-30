@@ -16,6 +16,12 @@
 ## 主题
 
 ```python
+BANNER = """\
+[bold #2f6fdb]╭──────────────────────────────────────────╮
+│   [/][bold #e0a400]✦[/] [bold]stories[/][dim]-in-[/][bold #2f6fdb]wx[/]   [dim]微信密钥提取 · 解密[/]   [bold #e0a400]✦[/][bold #2f6fdb]   │
+╰──────────────────────────────────────────╯[/]
+[dim]仅供本人数据备份与研究 · 禁止商用与一切非法用途 · 使用前请阅读 README 免责声明[/]"""
+
 console = Console(theme=Theme({
     "tag.cipher": "bold cyan",
     "tag.mmkv": "bold magenta",
@@ -33,6 +39,47 @@ console = Console(theme=Theme({
 ---
 
 ## 关键函数
+
+### `tag_style(tag: str) → str`
+
+**日志前缀 → 主题样式 key**。
+
+```python
+def tag_style(tag: str) -> str:
+    t = tag.lower()
+    if t in ("cipher", "mmkv", "memscan", "keystore", "交叉验证"):
+        return f"tag.{t}"
+    return "accent"
+```
+
+---
+
+### `account_table(dirs_with_counts) → None`
+
+**账号总览表**。
+
+```python
+t = Table(box=box.SIMPLE_HEAVY, header_style="bold #2f6fdb", show_lines=False)
+t.add_column("微信号", style="bold")
+t.add_column("数据目录", style="dim", overflow="fold")
+t.add_column("数据库", justify="right")
+for wxid, db, cnt in dirs_with_counts:
+    t.add_row(wxid, db, str(cnt))
+console.print(t)
+```
+
+---
+
+### `step(title: str) → None`
+
+**分步标题**。
+
+```python
+console.print()
+console.print(Panel(f"[bold]{title}[/]", box=box.SQUARE, border_style="#2f6fdb", padding=(0, 2)))
+```
+
+---
 
 ### `log(msg: str) → None`
 
@@ -55,12 +102,17 @@ log("缓存命中")             # yellow
 
 ### `banner() → None`
 
-打印 ASCII banner。
+打印 ASCII banner（使用 `BANNER` 常量，含 rich 标记）。
 
-```
-╭──────────────────────────────────────────╮
-│   ✦ stories-in-wx   微信密钥提取 · 解密  ✦   │
-╰──────────────────────────────────────────╯
+```python
+BANNER = """\
+[bold #2f6fdb]╭──────────────────────────────────────────╮
+│   [/][bold #e0a400]✦[/] [bold]stories[/][dim]-in-[/][bold #2f6fdb]wx[/]   [dim]微信密钥提取 · 解密[/]   [bold #e0a400]✦[/][bold #2f6fdb]   │
+╰──────────────────────────────────────────╯[/]
+[dim]仅供本人数据备份与研究 · 禁止商用与一切非法用途 · 使用前请阅读 README 免责声明[/]"""
+
+def banner() -> None:
+    console.print(BANNER)
 ```
 
 ---

@@ -22,6 +22,10 @@
 1. %USERPROFILE%\Documents\xwechat_files
 2. %USERPROFILE%\xwechat_files
 3. A:\xwechat_files ~ Z:\xwechat_files
+4. A:\Users\*\Documents\xwechat_files（多用户）
+5. A:\Users\*\xwechat_files（多用户）
+6. macOS: ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files
+7. macOS: ~/Documents/xwechat_files
 
 流程:
 for root in roots:
@@ -30,7 +34,7 @@ for root in roots:
         if db.is_dir() and db not in seen:
             → (entry.name, str(db))
 
-按 wxid 排序返回
+按 (wxid, db_storage) 元组排序返回
 ```
 
 **返回**: `[(wxid, db_storage_path), ...]`
@@ -44,7 +48,7 @@ for root in roots:
 ```
 流程:
 1. psutil.process_iter()
-2. 过滤 name in ("weixin.exe", "wechat.exe")
+2. 过滤 name in WECHAT_PROCESSES_WIN 或 WECHAT_PROCESSES_MAC
 3. 按 rss 降序排序
 4. 返回 [pid, ...]
 ```
@@ -66,14 +70,16 @@ for root in roots:
 
 ## 进程发现机制
 
-### WECHAT_PROCESSES
+### 进程常量
 
 ```python
-WECHAT_PROCESSES = ("weixin.exe", "wechat.exe")
+WECHAT_PROCESSES_WIN = ("weixin.exe", "wechat.exe")
+WECHAT_PROCESSES_MAC = ("WeChat",)
 ```
 
-- `weixin.exe`: 微信国内版
-- `wechat.exe`: 微信国际版
+- `weixin.exe`: 微信国内版（Windows）
+- `wechat.exe`: 微信国际版（Windows）
+- `WeChat`: 微信 macOS 版
 
 ### 异常处理
 

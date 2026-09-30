@@ -18,8 +18,8 @@
 
 | 版本 | 头签名 | 加密方式 | 密钥来源 |
 |---|---|---|---|
-| V0 | 无签名 | 整文件单字节 XOR | 自动检测（JPEG 首字节 0xFF ⇒ key = data[0] ^ 0xFF） |
-| V1 | `\x07\x08V1\x08\x07` | AES-128-ECB + XOR | 固定 key `cfcd208495d565ef` |
+| V0 | 无签名 | 整文件单字节 XOR | 自动检测（尝试所有已知图像签名：JPEG/PNG/GIF/WebP/wxgf，用首字节异或反推 key） |
+| V1 | `\x07\x08V1\x08\x07` | AES-128-ECB + XOR | 固定 key `cfcd208495d565ef`，XOR key = `DEFAULT_XOR` (0xC9) |
 | V2 | `\x07\x08V2\x08\x07` | AES-128-ECB（头部）+ XOR（尾部） | 账号级密钥，MMKV 离线派生 |
 
 ---
@@ -95,6 +95,47 @@ C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_<code>_*.statistic
 ---
 
 ## 关键函数
+
+### `clean_wxid(wxid: str) → str`
+
+**去掉账号后缀**：`wxid_demo_1234 → wxid_demo`
+
+```python
+def clean_wxid(wxid: str) -> str:
+    parts = wxid.split('_')
+    if wxid.startswith('wxid_') and len(parts) >= 3:
+        return '_'.join(parts[:2])
+    return wxid
+```
+
+---
+
+### `find_kvcomm_codes() → list[int]`
+
+**扫描 kvcomm 目录提取 code**。
+
+```
+扫描路径:
+C:/Users/*/AppData/Roaming/Tencent/xwechat/net/kvcomm/key_*_*.statistic
+C:/Users/*/AppData/Roaming/Tencent/xwechat/ilink/kvcomm/key_*_*.statistic
+C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_*_*.statistic
+
+正则: key_(\d+)_ → code
+```
+
+---
+
+### `extract_md5_from_xml(text: str) → str | None`
+
+**从消息 XML 中提取 md5**。
+
+```python
+def extract_md5_from_xml(text: str):
+    m = re.search(r'md5\s*=\s*["\']([0-9a-fA-F]{32})["\']', text)
+    return m.group(1).lower() if m else None
+```
+
+---
 
 ### `get_image(account, md5, acc_out_dir, ...) → (bytes, content_type)`
 
@@ -221,7 +262,7 @@ _IMG_CACHE_MAX = 200  # 最多 200 张
 ### 派生密钥持久缓存
 
 ```python
-# %LOCALAPPDATA%\stories-in-wx\media_key.json
+# paths.data_dir() / "media_key.json"（跨平台）
 {"wxid_clean": {"aes": "hex", "xor": "0xc9"}}
 ```
 

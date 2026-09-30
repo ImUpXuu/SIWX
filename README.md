@@ -221,16 +221,42 @@ siwx/
 ├─ sqlcipher.py            # SQLCipher HMAC 验证 + 流式页级解密
 ├─ keystore.py             # salt 索引密钥库，Windows 使用 DPAPI 加密缓存
 ├─ discover.py             # 跨平台目录、账号、进程发现
-├─ strategies/             # 密钥提取策略链：keystore/mmkv/config_cipher/memscan/macos_lldb
+├─ winproc.py              # 跨进程只读内存访问原语（ctypes）
+├─ paths.py                # 统一应用路径（与 cwd 解耦）
+├─ logger.py               # 双模式日志（粗略/详细）+ 脱敏导出
+├─ strategies/             # 密钥提取策略链（平台条件加载）
+│   ├─ keystore_source.py  # 密钥库缓存
+│   ├─ mmkv.py             # MMKV 离线提取
+│   ├─ config_cipher.py    # WCDB Config.Cipher 扫描（Windows 主力）
+│   ├─ memscan.py          # 内存字面量兜底
+│   └─ macos_lldb.py       # LLDB 断点捕获（macOS 专属）
 ├─ extract.py              # 编排入口：全局收割 → 策略链 → 解密输出
+├─ pool.py                 # 多进程解密池 + 输出缓存清单
 ├─ media.py                # 图片、表情、头像等媒体解析（V0/V1/V2）
 ├─ voice.py                # 语音元数据解析、SILK 读取与 pilk→WAV 转码
 ├─ export_stream.py        # 流式消息解析与导出数据构造
 ├─ exporter.py             # JSON/HTML/TXT/CSV/MD/TOML/SQLite/XLSX 导出引擎
-├─ api_*.py                # Web API：chat / export / settings / mcp / update
+├─ html_template.py        # HTML 导出模板（自包含交互式查看器）
+├─ stats.py                # 聊天统计（跨分片聚合）
+├─ api_*.py                # Web API：chat / export / settings / mcp / update / plugins / stats / sns
 ├─ server.py               # Flask 应用与任务调度
 ├─ mcp_server.py           # MCP Server，stdio + JSON-RPC 2.0
 ├─ auto_update.py          # 自动更新检测与应用
+├─ env_info.py             # 环境信息采集（供 bug 报告）
+├─ tui.py                  # rich 驱动的终端 UI 组件层
+├─ cli.py                  # 命令行入口（argparse 子命令 + 流程编排）
+├─ sns.py                  # 朋友圈解析（snsId 时间还原 + XML 解析）
+├─ sns_cdn.py              # 朋友圈 CDN 下载 / ISAAC64 解密 / 缓存键
+├─ sns_isaac64.py          # 纯 Python ISAAC64 实现
+├─ sns_export.py           # 朋友圈导出
+├─ plugins/                # 插件系统（中央注册表 + 17 类 hook）
+│   ├─ registry.py         # PluginRegistry 单例 + 命名空间
+│   ├─ contract.py         # PLUGIN 字典校验 + 字符串函数名解析
+│   ├─ loader.py           # 用户级目录扫描 + importlib 装载
+│   ├─ conditions.py       # 声明式显示条件求值
+│   ├─ config.py           # 每插件配置存储
+│   ├─ report.py           # 加载报告
+│   └─ chat_bridge.py      # registry ↔ api_chat 桥接
 └─ ui/                     # Flask + 原生 HTML/CSS/JS Web 控制台
 ```
 
