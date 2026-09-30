@@ -1,12 +1,12 @@
 {
-  "version": "5.0.3",
-  "date": "2026-09-19 04:40:19",
-  "notes": "v5.0.3\n\n## 重点更新\n\n数据安全修复版，三处改动均为**零破坏性**，升级无需额外操作。\n\n- **修复同名账号产物互相覆盖**：同一账号在多个位置有数据目录时（如 C 盘空壳 + D 盘真实数据），两者会映射到同一输出目录并互相覆盖。新增冲突检测告警；解密清单新增 `@source` 来源标记，来源不一致时跳过已有产物不再覆盖。\n- **修复并发读取污染密钥库**：数据库被占用时的临时文件原按进程号命名，Web 服务多线程并发会撞名、读到对方首页数据，导致盐值与密钥错配。改用 `tempfile.mkstemp` 唯一命名。\n- 新增 15 例回归测试，全量 198 通过 / 1 跳过。\n\n## 升级说明\n\n直接覆盖安装。旧版清单无 `@source` 标记时视为来源未知并放行，**行为与旧版完全一致**，保护从升级后首次运行自动生效；无需删除输出目录，也不触发全量重新解密。\n\n## English\n\nData-safety release. All three changes are **non-destructive** — no extra steps needed to upgrade.\n\n- **Fixed same-name account outputs overwriting each other**: when one account has data directories in multiple locations, both map to the same output directory. Added conflict detection, plus an `@source` marker in the decrypt manifest so artifacts from a different source are skipped instead of overwritten.\n- **Fixed concurrent reads polluting the keystore**: temp files used process-ID naming, so concurrent threads in the multi-threaded web server could collide and read each other's first page, mismatching salt and key. Now uses unique `tempfile.mkstemp` naming.\n- 15 new regression tests; full suite 198 passed / 1 skipped.\n\nManifests from older versions carry no `@source` and pass through unchanged — **identical behavior to the previous release**. No need to delete output directories; no full re-decrypt.",
+  "version": "5.0.4",
+  "date": "2026-09-30 14:38:31",
+  "notes": "v5.0.4\n\n修复朋友圈 CDN 媒体拉取问题，并为「图挂了」提供完整留痕：\n\n- 修复视频密钥取错：`<url key=0>` 是占位值，真密钥在 `<enc key>`，此前朋友圈视频 100% 拉不下来；修复后视频恢复正常下载解密。\n- 修复报错方向：域名回退只对 qpic 图片生效；「已下载但认不出格式」不再被后续域名 400 覆盖。\n- `/api/sns/media` 增加微信 CDN 域名白名单（含 tc.qq.com / c2c.wechat.com），外链卡片直接拒绝，同时堵住任意 URL 代理（SSRF）。\n- 失败全链路留痕：每次失败写 `logs/siwx.log`（运行日志页可见，URL 去 token），导出报告带失败原因分布。\n- 前端：媒体加载失败改为可见占位条，不再静默隐藏；导出完成提示列出失败原因。\n\n注：自己发布的旧图有约 58% 在 CDN 侧已不存在（HTTP 404），属微信侧事实，代码只能如实报错。\n\n全量测试 265 通过 / 1 跳过。",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.3/stories-in-wx-v5.0.3-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.3/stories-in-wx-v5.0.3-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.4/stories-in-wx-v5.0.4-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.4/stories-in-wx-v5.0.4-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.3/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.4/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
