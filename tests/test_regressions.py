@@ -1146,7 +1146,7 @@ class TestVersionSource(unittest.TestCase):
         from siwx import __version__
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
-        self.assertEqual(__version__, "5.0.3")
+        self.assertEqual(__version__, "5.0.5")
 
     def test_remote_version_uses_newest_source_and_bypasses_cache(self):
         from siwx import auto_update

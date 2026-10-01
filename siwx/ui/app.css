@@ -69,6 +69,8 @@ textarea:focus-visible, [tabindex]:focus-visible {
 .mono { font-family: "SF Mono", Consolas, "Cascadia Code", monospace; }
 .dim { color: var(--muted); }
 .hidden { display: none !important; }
+/* Vue 挂载前隐藏模板（避免 v-if 元素闪一下）*/
+[v-cloak] { display: none !important; }
 
 /* ── 壳布局 ─────────────────────────── */
 .shell { display: flex; min-height: 100vh; background: var(--bg); }
@@ -243,3 +245,19 @@ input[type="checkbox"] { accent-color: var(--text); min-height: auto; }
 }
 .disc-overlay::-webkit-scrollbar { width: 8px; }
 .disc-overlay::-webkit-scrollbar-thumb { background: var(--text); border-radius: 999px; border: 2px solid var(--bg); }
+
+/* ── 切页过渡（app.js navigate 触发）──────────────────────
+ * 支持时走 View Transitions API（整页快照淡出/淡入 + 轻微位移）；
+ * 不支持时降级为 .view-enter 单侧淡入。均尊重 prefers-reduced-motion。 */
+::view-transition-old(root) { animation: siwx-vt-out .16s ease both; }
+::view-transition-new(root) { animation: siwx-vt-in .2s ease both; }
+@keyframes siwx-vt-out { to { opacity: 0; transform: translateY(-6px); } }
+@keyframes siwx-vt-in { from { opacity: 0; transform: translateY(8px); } }
+
+.view-enter { animation: siwx-view-in .2s ease both; }
+@keyframes siwx-view-in { from { opacity: 0; transform: translateY(8px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root), ::view-transition-new(root) { animation: none; }
+  .view-enter { animation: none !important; }
+}

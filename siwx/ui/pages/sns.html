@@ -1,11 +1,15 @@
-<div class="sns-page">
+<div class="sns-page" v-cloak>
   <!-- 微信式头部：封面 + 本人头像 -->
   <header class="sns-hero">
     <div class="sns-cover"></div>
     <div class="sns-hero-row">
       <div class="sns-hero-right">
-        <span class="sns-hero-name" id="sns-me-name">我</span>
-        <div class="sns-hero-ava" id="sns-me-ava"><span id="sns-me-initial">我</span></div>
+        <span class="sns-hero-name">{{ meName }}</span>
+        <div class="sns-hero-ava">
+          <span>{{ meInitial }}</span>
+          <img v-if="meAvaOk" :src="avaUrl(account)" alt=""
+               @error="meAvaOk = false">
+        </div>
       </div>
     </div>
   </header>
@@ -14,66 +18,89 @@
   <div class="sns-bar">
     <div class="sns-search">
       <span class="sns-search-icon" aria-hidden="true">🔍</span>
-      <input id="sns-keyword" placeholder="搜索朋友圈内容、标题、歌手、视频号…">
-      <button id="sns-keyword-clear" class="sns-search-clear" hidden title="清除">✕</button>
+      <input v-model.trim="kwInput" placeholder="搜索朋友圈内容、标题、歌手、视频号…">
+      <button v-show="kwInput" class="sns-search-clear" title="清除"
+              @click="clearKeyword">✕</button>
     </div>
     <div class="sns-chips">
-      <button id="sns-range-btn" class="sns-chip" aria-haspopup="true">
-        <span class="sns-chip-icon">🗓</span><span id="sns-range-label">全部时间</span>
+      <button class="sns-chip" data-pop="range" :class="{ on: !!rangeOn }" aria-haspopup="true"
+              @click="togglePop('range')">
+        <span class="sns-chip-icon">🗓</span><span>{{ rangeLabel }}</span>
       </button>
-      <button id="sns-user-btn" class="sns-chip sns-chip-user" aria-haspopup="true">
-        <span class="sns-chip-ava" id="sns-user-chip-ava"></span>
-        <span id="sns-user-label">全部发布者</span>
+      <button class="sns-chip sns-chip-user" data-pop="user" :class="{ on: !!username }" aria-haspopup="true"
+              @click="togglePop('user')">
+        <span class="sns-chip-ava" v-show="username">
+          <sns-ava v-if="username" :username="username" :display="userLabel"></sns-ava>
+        </span>
+        <span>{{ userLabel }}</span>
         <span class="sns-chip-caret">▾</span>
       </button>
       <span class="sns-bar-gap"></span>
-      <select id="sns-account" class="sns-account" title="选择账号"></select>
-      <button id="sns-refresh" class="sns-icon-btn" title="刷新">⟳</button>
-      <button id="sns-export-toggle" class="sns-icon-btn" title="导出">📦</button>
-      <span class="sns-meta" id="sns-meta"></span>
+      <select v-model="account" class="sns-account" title="选择账号"
+              @change="onAccountChange">
+        <option v-for="a in accounts" :key="a.wxid" :value="a.wxid">
+          {{ a.wxid }} · {{ a.count || 0 }} 条
+        </option>
+      </select>
+      <button class="sns-icon-btn" title="刷新" @click="refresh">⟳</button>
+      <button class="sns-icon-btn sns-export-toggle" data-pop="export" title="导出朋友圈"
+              aria-haspopup="true" @click="togglePop('export')">📦 导出</button>
+      <span class="sns-meta">{{ metaText }}</span>
     </div>
   </div>
 
   <!-- 时间范围面板 -->
-  <div class="sns-pop sns-pop-range" id="sns-range-panel" hidden>
+  <div class="sns-pop sns-pop-range" v-show="pops.range">
     <div class="sns-pop-head"><b>选择时间范围</b>
-      <button class="sns-pop-close" data-close="sns-range-panel" title="关闭">✕</button></div>
-    <div class="sns-quick" id="sns-quick">
-      <button data-range="all">全部</button>
-      <button data-range="today">今天</button>
-      <button data-range="7">最近 7 天</button>
-      <button data-range="30">最近 30 天</button>
-      <button data-range="90">最近 90 天</button>
-      <button data-range="365">最近一年</button>
-      <button data-range="thisyear">今年</button>
+      <button class="sns-pop-close" title="关闭" @click="pops.range = false">✕</button></div>
+    <div class="sns-quick">
+      <button v-for="q in quickRanges" :key="q.key"
+              :class="{ on: rangeKey === q.key }"
+              @click="selectRange(q.key)">{{ q.label }}</button>
     </div>
     <div class="sns-cal">
       <div class="sns-cal-head">
-        <button id="cal-prev" class="sns-cal-nav" title="上个月">‹</button>
-        <button id="cal-title" class="sns-cal-title">—</button>
-        <button id="cal-next" class="sns-cal-nav" title="下个月">›</button>
+        <button class="sns-cal-nav" title="上个月" @click="shiftMonth(-1)">‹</button>
+        <button class="sns-cal-title" @click="cycleJump">{{ calTitle }}</button>
+        <button class="sns-cal-nav" title="下个月" @click="shiftMonth(1)">›</button>
       </div>
       <div class="sns-cal-week"><span>日</span><span>一</span><span>二</span><span>三</span>
         <span>四</span><span>五</span><span>六</span></div>
-      <div class="sns-cal-grid" id="cal-grid"></div>
+      <div class="sns-cal-grid" :class="{ jump: !!cal.jump }">
+        <template v-if="cal.jump === 'year'">
+          <button v-for="y in jumpYears" :key="y" class="sns-cal-jump-btn"
+                  :class="{ edge: y === cal.y }"
+                  @click="cal.y = y; cal.jump = 'month'">{{ y }}年</button>
+        </template>
+        <template v-else-if="cal.jump === 'month'">
+          <button v-for="i in 12" :key="i" class="sns-cal-jump-btn"
+                  :class="{ edge: i - 1 === cal.m }"
+                  @click="cal.m = i - 1; cal.jump = null">{{ i }}月</button>
+        </template>
+        <template v-else>
+          <button v-for="(c, i) in calCells" :key="i"
+                  :class="calCellClass(c)"
+                  @click="pickDay(c)">{{ c.d }}</button>
+        </template>
+      </div>
     </div>
     <div class="sns-pop-foot">
-      <span class="sns-cal-hint" id="cal-hint">点击日期选择开始</span>
-      <button id="cal-clear" class="sns-btn-ghost">清除</button>
-      <button id="cal-ok" class="sns-btn-primary">确定</button>
+      <span class="sns-cal-hint">{{ calHint }}</span>
+      <button class="sns-btn-ghost" @click="clearRange">清除</button>
+      <button class="sns-btn-primary" @click="confirmRange">确定</button>
     </div>
   </div>
 
   <!-- 发布者面板 -->
-  <div class="sns-pop sns-pop-user" id="sns-user-panel" hidden>
+  <div class="sns-pop sns-pop-user" v-show="pops.user">
     <div class="sns-pop-head"><b>选择发布者</b>
-      <button class="sns-pop-close" data-close="sns-user-panel" title="关闭">✕</button></div>
+      <button class="sns-pop-close" title="关闭" @click="pops.user = false">✕</button></div>
     <div class="sns-user-tools">
       <div class="sns-search sns-search-sm">
         <span class="sns-search-icon" aria-hidden="true">🔍</span>
-        <input id="sns-user-search" placeholder="搜索昵称 / 微信号">
+        <input v-model="userQuery" placeholder="搜索昵称 / 微信号">
       </div>
-      <select id="sns-user-sort" class="sns-user-sort" title="排序方式">
+      <select v-model="userSort" class="sns-user-sort" title="排序方式">
         <option value="count-desc">发送量 多 → 少</option>
         <option value="count-asc">发送量 少 → 多</option>
         <option value="name-asc">名称拼音 A → Z</option>
@@ -82,51 +109,84 @@
         <option value="oldest-asc">最早发布</option>
       </select>
     </div>
-    <div class="sns-user-list" id="sns-user-list"></div>
+    <div class="sns-user-list">
+      <button class="sns-user-row" :class="{ on: !username }" @click="applyUser('')">
+        <span class="ava"><span>全</span></span>
+        <span class="who"><span class="nm">全部发布者</span><span class="un">不筛选发送者</span></span>
+        <span class="cnt">{{ friends.length }}</span>
+      </button>
+      <button v-for="f in sortedFriends" :key="f.username" class="sns-user-row"
+              :class="{ on: f.username === username }" @click="applyUser(f.username)">
+        <sns-ava :username="f.username" :display="f.display"></sns-ava>
+        <span class="who"><span class="nm">{{ f.display || f.username }}</span>
+          <span class="un">{{ f.username }}</span></span>
+        <span class="cnt">{{ f.count }}</span>
+      </button>
+      <div v-if="!friends.length && friendsLoaded" class="sns-user-empty">暂无发布者</div>
+    </div>
     <div class="sns-pop-foot">
-      <span class="sns-cal-hint" id="sns-user-hint"></span>
-      <button id="sns-user-clear" class="sns-btn-ghost">清除筛选</button>
+      <span class="sns-cal-hint">{{ userHint }}</span>
+      <button class="sns-btn-ghost" @click="applyUser('')">清除筛选</button>
     </div>
   </div>
 
   <!-- 导出面板 -->
-  <div class="sns-pop sns-pop-export" id="sns-export-panel" hidden>
+  <div class="sns-pop sns-pop-export" v-show="pops.export">
     <div class="sns-pop-head"><b>导出朋友圈</b>
-      <button class="sns-pop-close" data-close="sns-export-panel" title="关闭">✕</button></div>
+      <button class="sns-pop-close" title="关闭" @click="pops.export = false">✕</button></div>
     <div class="sns-export">
-      <select id="sns-fmt">
+      <select v-model="exportFmt">
         <option value="json">JSON</option>
         <option value="markdown">Markdown</option>
         <option value="html">HTML</option>
         <option value="txt">TXT</option>
       </select>
-      <label class="f-chk"><input type="checkbox" id="sns-exp-media"> 同时下载媒体（较慢）</label>
+      <label class="f-chk"><input type="checkbox" v-model="exportMedia"> 同时下载媒体（较慢）</label>
       <label class="sns-conc">并发
-        <input type="number" id="sns-exp-conc" min="1" max="16" value="5" title="媒体下载并发数（1-16，默认 5）">
+        <input type="number" v-model.number="exportConc" min="1" max="16"
+               title="媒体下载并发数（1-16，默认 5）">
       </label>
-      <button id="sns-export" class="sns-btn-primary">导出</button>
+      <button class="sns-btn-primary" :disabled="exportState === 'running'" @click="doExport">导出</button>
     </div>
-    <div class="sns-export-tip" id="sns-export-scope"></div>
-    <span class="sns-export-msg" id="sns-export-msg"></span>
+    <div class="sns-export-tip">{{ exportScopeText }}</div>
+    <span class="sns-export-msg" v-if="exportState === 'running'">导出中… {{ exportProgress }}</span>
+    <span class="sns-export-msg" v-else-if="exportState === 'ok' && exportResult">
+      ✓ 已导出 {{ exportResult.count }} 条{{ exportExtra }} ·
+      <a :href="'/api/sns/export/download?path=' + encodeURIComponent(exportResult.file || '')">下载</a> ·
+      <a href="#" @click.prevent="openExportDir">打开目录</a>
+    </span>
+    <span class="sns-export-msg" v-else-if="exportState === 'error'">✗ {{ exportError }}</span>
   </div>
 
-  <div id="sns-notice" class="sns-notice" hidden></div>
-  <div id="sns-list" class="sns-list"><div class="sns-loading">加载中…</div></div>
-  <button id="sns-more" class="sns-more" hidden>加载更多</button>
+  <div class="sns-notice" v-show="notice">{{ notice }}</div>
 
-  <div id="sns-modal" class="sns-modal" hidden>
-    <div class="sns-modal-mask" id="sns-modal-mask"></div>
+  <div class="sns-list">
+    <div v-if="loading && !timeline.length" class="sns-loading">加载中…</div>
+    <div v-else-if="!timeline.length" class="sns-empty">{{ emptyText }}</div>
+    <template v-else>
+      <sns-post v-for="p in timeline" :key="String(p.tid)" :post="p"></sns-post>
+    </template>
+  </div>
+  <button class="sns-more" v-show="hasMore && !loading" @click="loadMore">加载更多</button>
+
+  <div class="sns-modal" v-show="modal.visible" @click.self="closeModal">
+    <div class="sns-modal-mask" @click="closeModal"></div>
     <div class="sns-modal-box">
       <div class="sns-modal-head">
-        <span id="sns-modal-title">动态详情</span>
-        <button id="sns-modal-close" class="sns-icon-btn" title="关闭">✕</button>
+        <span>动态详情</span>
+        <button class="sns-icon-btn" title="关闭" @click="closeModal">✕</button>
       </div>
-      <div id="sns-modal-body" class="sns-modal-body"><div class="sns-loading">加载中…</div></div>
+      <div class="sns-modal-body">
+        <div v-if="modal.error" class="sns-empty">加载失败：{{ modal.error }}</div>
+        <sns-post v-else-if="modal.post" :post="modal.post" :compact="false"></sns-post>
+        <div v-else class="sns-loading">加载中…</div>
+      </div>
     </div>
   </div>
 
-  <div id="sns-lightbox" class="sns-lightbox" hidden>
-    <img id="sns-lightbox-img" alt="">
-    <video id="sns-lightbox-video" controls autoplay loop muted playsinline hidden></video>
+  <div class="sns-lightbox" v-show="lightbox.visible" @click="lightbox.visible = false">
+    <video v-if="lightbox.video" :src="lightbox.src" controls autoplay loop muted playsinline
+           @click.stop></video>
+    <img v-else :src="lightbox.src" alt="">
   </div>
 </div>
