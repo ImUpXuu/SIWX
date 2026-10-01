@@ -1,23 +1,15 @@
+/* 朋友圈页（Vue 3 全局构建版，无构建链）。
+ *
+ * 架构：
+ *   - 模板就是 pages/sns.html —— init() 用「容器 innerHTML 即模板」挂载 Vue，
+ *     保持既有的 hash 路由 + 模块化加载契约（init(view) / destroy()）不变；
+ *   - 纯函数区保持导出（relTime/monthCells/sortFriends/…），便于脚本化验证；
+ *   - 响应式状态集中在 store，子组件（sns-post / sns-ava）共享；
+ *   - 好友列表到达后昵称/头像自动刷新（Vue 响应式，不再需要 rerenderList 补丁）。
+ */
 const { esc, fetchJSON, copyText } = window.SX;
-const el = id => document.getElementById(id);
 const pad = n => String(n).padStart(2, '0');
-// esc() 走 textContent/innerHTML，不转义引号；放进属性值时必须再转一次
-const attr = s => esc(s).replace(/"/g, '&quot;');
 const nowSec = () => Math.floor(Date.now() / 1000);
-
-let account = '', before = null, busy = false, inited = false;
-let friends = [];                       // /api/sns/friends 全量
-const friendMap = new Map();            // username -> friend
-let usersLoaded = false, usersLoading = false;
-let pollTimer = null;
-
-/** 当前生效的筛选条件（时间范围 + 发布者 + 关键词 + 排序）。 */
-const filter = { keyword: '', username: '', start: null, end: null, rangeKey: 'all' };
-/** 发布者面板：搜索词与排序方式。 */
-let userQuery = '', userSort = 'count-desc';
-/** 日历面板的草稿选择与当前显示月份。 */
-let draft = { start: null, end: null };
-let cal = { y: 0, m: 0, jump: null };
 
 /* ══ 纯函数区（不碰 DOM，便于脚本化验证）══════════════════════ */
 
@@ -159,779 +151,658 @@ export function reasonText(reason) {
 const MEDIA_FAIL_HINT = '微信 CDN 上已经没有这个资源（原图可能被清理或已过期）。'
   + '详细原因见「运行日志」里的 [sns-media] 记录。';
 
-/* ══ 工具 ══════════════════════════════════════════════════ */
+const QUICK_RANGES = [
+  { key: 'all', label: '全部' },
+  { key: 'today', label: '今天' },
+  { key: '7', label: '最近 7 天' },
+  { key: '30', label: '最近 30 天' },
+  { key: '90', label: '最近 90 天' },
+  { key: '365', label: '最近一年' },
+  { key: 'thisyear', label: '今年' },
+];
+
+/* ══ 响应式共享状态 ═══════════════════════════════════════════ */
+
+const store = Vue.reactive({
+  account: '',
+  accounts: [],
+  friends: [],
+  friendsLoaded: false,
+  friendsLoading: false,
+
+  timeline: [],
+  before: null,
+  hasMore: false,
+  loading: false,
+  emptyText: '没有符合条件的动态',
+  notice: '',
+
+  kwInput: '',
+  keyword: '',
+  username: '',
+  start: null,
+  end: null,
+  rangeKey: 'all',
+  rangeLabel: '全部时间',
+
+  pops: { range: false, user: false, export: false },
+  draft: { start: null, end: null },
+  cal: { y: 0, m: 0, jump: null },
+  userQuery: '',
+  userSort: 'count-desc',
+
+  lightbox: { visible: false, src: '', video: false },
+  modal: { visible: false, post: null, error: '' },
+  meAvaOk: false,
+  activeMenuTid: null,
+
+  exportFmt: 'json',
+  exportMedia: false,
+  exportConc: 5,
+  exportState: 'idle',     // idle | running | ok | error
+  exportProgress: '',
+  exportResult: null,
+  exportError: '',
+});
+
+const friendMap = Vue.computed(() => {
+  const m = new Map();
+  for (const f of store.friends) m.set(f.username, f);
+  return m;
+});
 
 function nameOf(username) {
-  const f = friendMap.get(username);
+  const f = friendMap.value.get(username);
   return (f && f.display) || username || '';
 }
-
 /** 昵称优先，其次回退（评论里 XML 自带 nickname） */
 function displayOf(username, fallback) {
-  const f = friendMap.get(username);
+  const f = friendMap.value.get(username);
   return (f && f.display) || fallback || username || '';
 }
-
 function avaUrl(username) {
-  return `/api/chat/avatar?account=${encodeURIComponent(account)}&username=${encodeURIComponent(username)}`;
+  return `/api/chat/avatar?account=${encodeURIComponent(store.account)}&username=${encodeURIComponent(username)}`;
 }
-
-/** 头像内部结构（首字母色块 + 有头像时才请求图片） */
-function avaInner(username, display) {
-  const f = friendMap.get(username);
-  const initial = esc(String(display || username || '?').trim().slice(0, 1).toUpperCase() || '?');
-  const img = (f && f.has_avatar)
-    ? `<img loading="lazy" alt="" src="${attr(avaUrl(username))}" onerror="this.remove()">` : '';
-  return `<span>${initial}</span>${img}`;
-}
-
-function avaHtml(username, display, cls = 'ava') {
-  return `<span class="${cls}">${avaInner(username, display)}</span>`;
-}
-
 function mediaUrl(m) {
-  const q = new URLSearchParams({ account, url: m.url || '', key: m.key || '', token: m.token || '' });
+  const q = new URLSearchParams({ account: store.account, url: m.url || '', key: m.key || '', token: m.token || '' });
   return `/api/sns/media?${q}`;
 }
-
-function setNotice(text) { const n = el('sns-notice'); n.textContent = text || ''; n.hidden = !text; }
-
-function toast(text) {
-  setNotice(text);
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => setNotice(''), 2600);
+function proxyUrl(url) {
+  return `/api/sns/media?${new URLSearchParams({ account: store.account, url: url || '' })}`;
 }
-
-/* ══ 浮层管理 ══════════════════════════════════════════════ */
-
-const POPS = ['sns-range-panel', 'sns-user-panel', 'sns-export-panel'];
-
-function closePops(except) {
-  POPS.forEach(id => { if (id !== except) el(id).hidden = true; });
-}
-
-function togglePop(id) {
-  const p = el(id);
-  const show = p.hidden;
-  closePops(show ? id : null);
-  p.hidden = !show;
-  if (show && id === 'sns-user-panel') ensureFriends();
-  if (show && id === 'sns-export-panel') updateExportScope();
-}
-
-/* ══ 时间范围面板 ══════════════════════════════════════════ */
-
-function openRangePanel() {
-  const p = el('sns-range-panel');
-  p.hidden = false;
-  // 面板贴着筛选栏左缘（容器是 position:relative）
-  const anchor = el('sns-range-btn');
-  p.style.left = `${Math.max(0, anchor ? anchor.offsetLeft : 0)}px`;
-  // 用当前生效的筛选回填草稿（打开面板**不改变**筛选）
-  draft = { start: filter.start, end: filter.end };
-  const d = new Date((filter.start || nowSec()) * 1000);
-  cal = { y: d.getFullYear(), m: d.getMonth(), jump: null };
-  markQuick(filter.rangeKey);
-  renderCal();
-}
-
-function markQuick(key) {
-  [...el('sns-quick').children].forEach(b => b.classList.toggle('on', b.dataset.range === key));
-}
-
-/** 选中快捷范围（applyNow=true 时立即生效，否则只填进日历草稿） */
-function selectRange(key, applyNow) {
-  if (key === 'custom') { markQuick('custom'); return; }
-  const r = rangeFromKey(key);
-  if (!r) return;
-  markQuick(key);
-  draft = { start: r.start, end: r.end };
-  const d = new Date((r.start || nowSec()) * 1000);
-  cal = { y: d.getFullYear(), m: d.getMonth(), jump: null };
-  if (applyNow) applyRange(r.start, r.end, key, r.label);
-  else renderCal();
-}
-
-function applyRange(start, end, key, label) {
-  filter.start = start;
-  filter.end = end;
-  filter.rangeKey = key || 'custom';
-  filter.rangeLabel = label || describeRange(start, end);
-  el('sns-range-label').textContent = filter.rangeLabel;
-  el('sns-range-btn').classList.toggle('on', !!(start || end));
-  closePops();
-  load(true);
-  updateExportScope();
-}
-
-function describeRange(start, end) {
-  const f = t => {
-    const d = new Date(t * 1000);
-    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-  };
-  if (start && end) return start === end ? f(start) : `${f(start)} - ${f(end)}`;
-  if (start) return `${f(start)} 起`;
-  if (end) return `至 ${f(end)}`;
-  return '全部时间';
-}
-
-function renderCal() {
-  if (cal.jump) return renderCalJump();
-  el('cal-title').textContent = `${cal.y}年${cal.m + 1}月 ▾`;
-  el('cal-grid').classList.remove('jump');
-  const cells = monthCells(cal.y, cal.m);
-  const todayTs = Math.floor(new Date(new Date().getFullYear(), new Date().getMonth(),
-    new Date().getDate()).getTime() / 1000);
-  const lo = Math.min(draft.start || Infinity, draft.end || Infinity);
-  const hi = Math.max(draft.start || -Infinity, draft.end || -Infinity);
-  el('cal-grid').innerHTML = cells.map((c, i) => {
-    const cls = ['sns-cal-day'];
-    if (c.out) cls.push('out');
-    if (c.ts === todayTs) cls.push('today');
-    if (c.ts === draft.start || c.ts === draft.end) cls.push('edge');
-    else if (c.ts > lo && c.ts < hi) cls.push('in-range');
-    return `<button class="${cls.join(' ')}" data-i="${i}" data-ts="${c.ts}">${c.d}</button>`;
-  }).join('');
-  el('cal-hint').textContent = draft.start
-    ? (draft.end ? describeRange(draft.start, draft.end) : `${describeRange(draft.start, null)} → 选择结束日期`)
-    : '点击日期选择开始';
-}
-
-/** 年 / 月快速跳转（点标题进入） */
-function renderCalJump() {
-  const nowY = new Date().getFullYear();
-  const grid = el('cal-grid');
-  grid.classList.add('jump');
-  if (cal.jump === 'year') {
-    el('cal-title').textContent = '选择年份';
-    const years = [];
-    for (let y = nowY; y >= nowY - 11; y--) years.push(y);
-    grid.innerHTML = years.map(y =>
-      `<button class="sns-cal-jump-btn ${y === cal.y ? 'edge' : ''}" data-year="${y}">${y}年</button>`).join('');
-  } else {
-    el('cal-title').textContent = '选择月份';
-    grid.innerHTML = Array.from({ length: 12 }, (_, i) =>
-      `<button class="sns-cal-jump-btn ${i === cal.m ? 'edge' : ''}" data-month="${i}">${i + 1}月</button>`).join('');
-  }
-  el('cal-hint').textContent = '选择月份后再点日期微调';
-}
-
-function onCalClick(ev) {
-  if (ev.target.closest('#cal-title')) {          // 标题：年 → 月 → 日 循环
-    cal.jump = cal.jump === 'year' ? 'month' : (cal.jump === 'month' ? null : 'year');
-    renderCal();
-    return;
-  }
-  const btn = ev.target.closest('button');
-  if (!btn) return;
-  if (btn.dataset.year) { cal.y = Number(btn.dataset.year); cal.jump = 'month'; renderCal(); return; }
-  if (btn.dataset.month) { cal.m = Number(btn.dataset.month); cal.jump = null; renderCal(); return; }
-  if (btn.dataset.ts) {
-    const ts = Number(btn.dataset.ts);
-    if (!draft.start || draft.end) draft = { start: ts, end: null };
-    else if (ts >= draft.start) draft.end = ts;
-    else draft = { start: ts, end: null };
-    markQuick(draft.end ? 'custom' : '');
-    renderCal();
-  }
-}
-
-/* ══ 发布者面板 ════════════════════════════════════════════ */
-
-async function ensureFriends(force) {
-  if (usersLoaded && !force) return;
-  if (usersLoading) return;
-  usersLoading = true;
-  el('sns-user-hint').textContent = '加载中…';
-  try {
-    const d = await fetchJSON(`/api/sns/friends?account=${encodeURIComponent(account)}&limit=1000`);
-    friends = d.friends || [];
-    friendMap.clear();
-    friends.forEach(f => friendMap.set(f.username, f));
-    usersLoaded = true;
-  } catch (e) {
-    el('sns-user-hint').textContent = '发布者加载失败：' + e.message;
-  } finally {
-    usersLoading = false;
-  }
-  renderFriends();
-}
-
-function renderFriends() {
-  const list = sortFriends(friends.filter(f => matchFriend(f, userQuery)), userSort);
-  const total = friends.length;
-  el('sns-user-hint').textContent = total
-    ? `共 ${total} 位发布者${userQuery ? ` · 匹配 ${list.length}` : ''}`
-    : '';
-  if (!total) { el('sns-user-list').innerHTML = '<div class="sns-user-empty">暂无发布者</div>'; return; }
-  const rows = [`<button class="sns-user-row ${filter.username ? '' : 'on'}" data-user="">
-      <span class="ava"><span>全</span></span>
-      <span class="who"><span class="nm">全部发布者</span><span class="un">不筛选发送者</span></span>
-      <span class="cnt">${total}</span></button>`];
-  rows.push(...list.map(f => `<button class="sns-user-row ${f.username === filter.username ? 'on' : ''}"
-      data-user="${attr(f.username)}">
-      ${avaHtml(f.username, f.display, 'ava')}
-      <span class="who"><span class="nm">${esc(f.display || f.username)}</span>
-        <span class="un">${esc(f.username)}</span></span>
-      <span class="cnt">${f.count}</span></button>`));
-  el('sns-user-list').innerHTML = rows.join('');
-}
-
-function applyUser(username) {
-  filter.username = username || '';
-  const f = username ? friendMap.get(username) : null;
-  el('sns-user-label').textContent = f ? (f.display || f.username) : '全部发布者';
-  el('sns-user-btn').classList.toggle('on', !!username);
-  const chip = el('sns-user-chip-ava');
-  chip.innerHTML = username ? avaInner(username, (f && f.display) || username) : '';
-  chip.hidden = !username;
-  closePops();
-  renderFriends();
-  load(true);
-  updateExportScope();
-}
-
-/* ══ 列表渲染（微信式）══════════════════════════════════════ */
-
-function renderMedia(medias) {
-  // 只渲染微信 CDN 上的媒体：外链卡片（b23.tv 等）不是图片/视频，
-  // 放进来只会拿到 400 并渲染成一个破图。
-  const items = (medias || []).filter(m => m.url && isCdnMedia(m.url));
-  if (!items.length) return '';
-  const cells = items.map(m => {
-    const src = esc(mediaUrl(m));
-    if (m.type === 6) {
-      return `<span class="sns-media-cell"><video class="sns-vid" controls preload="metadata" src="${src}"></video></span>`;
-    }
-    const lp = m.live_photo;
-    const liveAttr = lp && lp.url ? ` data-live="${attr(mediaUrl(lp))}" title="实况照片：点击播放"` : '';
-    const badge = liveAttr ? '<span class="live-badge">实况</span>' : '';
-    return `<span class="sns-media-cell"><img class="sns-lb" loading="lazy" src="${src}"`
-      + ` alt="朋友圈图片"${liveAttr}>${badge}</span>`;
-  }).join('');
-  return `<div class="sns-media ${mediaCols(items.length)}">${cells}</div>`;
-}
-
-/** 媒体加载失败：**必须可见**。
- *
- * 以前是 `onerror` 直接 visibility:hidden —— 用户只看到一块空白，
- * 既不知道是哪张图的锅，也拿不到任何线索（这正是「拉不下来 + 没日志」的观感来源）。
- * 现在换成占位条，并在 title 里写清去哪看原因。
- */
-function onMediaError(ev) {
-  const el = ev.target;
-  if (!el || el.nodeType !== 1) return;
-  const isVideo = el.tagName === 'VIDEO';
-  if (!isVideo && !(el.classList && el.classList.contains('sns-lb'))) return;
-  const cell = el.closest && el.closest('.sns-media-cell');
-  el.remove();
-  if (cell && !cell.querySelector('.sns-media-bad')) {
-    cell.insertAdjacentHTML('beforeend',
-      `<span class="sns-media-bad" title="${attr(MEDIA_FAIL_HINT)}">`
-      + `${isVideo ? '视频' : '图片'}加载失败</span>`);
-  }
-}
-
-function renderComments(comments, limit) {
-  let list = comments || [];
-  const total = list.length;
-  let hidden = 0;
-  if (limit && total > limit) { list = list.slice(-limit); hidden = total - limit; }
-  const html = list.map(c => {
-    const emo = (c.emojis || []).map(e =>
-      `<img class="cm-emoji" loading="lazy" src="${esc(emojiUrl(e))}" alt="表情" onerror="this.remove()">`
-    ).join('');
-    const imgs = (c.images || []).filter(i => i.url).map(i =>
-      `<img class="cm-img sns-lb" loading="lazy" src="${esc(mediaUrl(i))}" alt="评论图片" onerror="this.remove()">`
-    ).join('');
-    const body = c.content || '';
-    const reply = c.ref_username
-      ? `<span class="dim">回复 ${esc(displayOf(c.ref_username, ''))}</span> ` : '';
-    const txt = body ? esc(body) : (emo || imgs ? '' : '<span class="dim">赞了这条动态</span>');
-    return `<div class="sns-comment"><b>${esc(displayOf(c.username, c.nickname))}</b>：${reply}${txt}${emo}${imgs}</div>`;
-  }).join('');
-  const more = hidden ? `<div class="sns-more-comments">还有 ${hidden} 条评论，点「详情」查看</div>` : '';
-  return html + more;
-}
-
 function emojiUrl(e) {
-  const q = new URLSearchParams({ account, emoji: JSON.stringify({ url: e.url || '', encrypt_url: e.encrypt_url || '', aes_key: e.aes_key || '' }) });
+  const q = new URLSearchParams({
+    account: store.account,
+    emoji: JSON.stringify({ url: e.url || '', encrypt_url: e.encrypt_url || '', aes_key: e.aes_key || '' }),
+  });
   return `/api/sns/emoji?${q}`;
 }
-
-function renderInter(p, compact) {
-  const likes = p.likes || [], comments = p.comments || [];
-  if (!likes.length && !comments.length) return '';
-  let html = '';
-  if (likes.length) {
-    const names = likes.map(x => esc(displayOf(x.username, x.nickname)))
-      .join('<span class="sep">，</span>');
-    html += `<div class="sns-likes"><span class="ic">❤</span>${names}</div>`;
-  }
-  if (comments.length) {
-    html += `<div class="sns-comments ${likes.length ? 'has-like' : ''}">`
-      + renderComments(comments, compact ? 20 : 0) + '</div>';
-  }
-  return `<div class="sns-inter">${html}</div>`;
-}
-
-function renderCard(card) {
-  if (!card || !card.kind) return '';
-  const linkOpen = (url, inner, cls) => {
-    const u = String(url || '').trim();
-    return u ? `<a class="${cls}" href="${attr(u)}" target="_blank" rel="noreferrer">${inner}</a>`
-      : `<div class="${cls}">${inner}</div>`;
-  };
-  if (card.kind === 'music') {
-    const m = card.music || {};
-    const d = fmtDur(m.duration_ms ? m.duration_ms / 1000 : 0);
-    return linkOpen(card.url,
-      `<div class="sns-card-body"><div class="sns-card-tag">🎵 音乐</div>`
-      + `<div class="sns-card-title">${esc(m.album || card.title || '音乐')}</div>`
-      + `<div class="sns-card-sub">${esc(m.singer || card.description || '')}${d ? ' · ' + d : ''}</div></div>`,
-      'sns-card sns-card--music');
-  }
-  if (card.kind === 'finder') {
-    const f = card.finder || {};
-    const d = fmtDur(card.duration);
-    const cover = (card.cover || '').trim();
-    const vid = ((f.video_url || '').trim() || (((f.media || [])[0] || {}).url || '')).trim();
-    const img = cover
-      ? `<img class="sns-card-cover sns-lb" loading="lazy" src="${esc(proxyUrl(cover))}"`
-        + ` alt="视频号封面"${vid ? ` data-live="${attr(proxyUrl(vid))}" title="点击播放"` : ''}`
-        + ` onerror="this.remove()">` : '';
-    return `<div class="sns-card sns-card--finder">${img}<div class="sns-card-body">`
-      + `<div class="sns-card-tag">📹 视频号</div>`
-      + `<div class="sns-card-title">${esc(f.nickname || '')}</div>`
-      + `<div class="sns-card-sub">${[esc(f.media_count ? f.media_count + ' 个作品' : ''), d].filter(Boolean).join(' · ')}</div>`
-      + `<div class="sns-card-desc">${esc(card.description || '')}</div></div></div>`;
-  }
-  if (card.kind === 'live') {
-    const lv = card.live || {};
-    const cover = (card.cover || '').trim();
-    const img = cover
-      ? `<img class="sns-card-cover" loading="lazy" src="${esc(proxyUrl(cover))}" alt="直播封面" onerror="this.remove()">` : '';
-    return `<div class="sns-card sns-card--live">${img}<div class="sns-card-body">`
-      + `<div class="sns-card-tag">📺 视频号直播</div>`
-      + `<div class="sns-card-title">${esc(lv.nickname || '')}</div>`
-      + `<div class="sns-card-desc">${esc(lv.desc || '')}</div></div></div>`;
-  }
-  if (card.kind === 'note') {
-    const nt = card.note || {};
-    return `<div class="sns-card sns-card--note"><div class="sns-card-body">`
-      + `<div class="sns-card-tag">📝 笔记</div>`
-      + `<div class="sns-card-desc">${esc(nt.text || card.title || '')}</div></div></div>`;
-  }
-  return linkOpen(card.url,
-    `<div class="sns-card-body"><div class="sns-card-tag">🔗 链接</div>`
-    + `<div class="sns-card-title">${esc(card.title || card.url || '')}</div>`
-    + `<div class="sns-card-sub">${esc(card.source || '')}</div>`
-    + `<div class="sns-card-desc">${esc(card.description || '')}</div></div>`,
-    'sns-card sns-card--link');
-}
-
-function proxyUrl(url) {
-  return `/api/sns/media?${new URLSearchParams({ account, url: url || '' })}`;
-}
-
 function fmtDur(sec) {
   const n = Math.floor(Number(sec) || 0);
   if (n <= 0) return '';
   return `${Math.floor(n / 60)}:${pad(n % 60)}`;
 }
 
-function postText(p) {
-  const text = esc(p.content_desc || '');
-  const card = renderCard(p.card);
-  const media = renderMedia(p.medias);
-  const textHtml = text
-    ? `<div class="sns-text">${text}</div>`
-    : (card || (p.medias || []).length ? '' : '');
-  return { textHtml, card, media };
+function toast(text) {
+  store.notice = text || '';
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { store.notice = ''; }, 2600);
 }
 
-function renderPost(p, compact = true) {
-  const uname = p.user_name || p.username || '';
-  const display = nameOf(uname);
-  const { textHtml, card, media } = postText(p);
-  const loc = p.location
-    ? `<div class="sns-loc">📍 ${esc(p.location.name || '')}${p.location.address ? ' · ' + esc(p.location.address) : ''}</div>` : '';
-  const inter = renderInter(p, compact);
-  const likes = (p.likes || []).length, comments = (p.comments || []).length;
-  return `<article class="sns-post" data-tid="${attr(String(p.tid))}" data-user="${attr(uname)}">
-    ${avaHtml(uname, display)}
-    <div class="sns-main">
-      <div class="sns-name">${esc(display)}</div>
-      ${textHtml}${card}${media}${loc}
-      <div class="sns-foot">
-        <span class="sns-time" title="${attr(fullTime(p.ts))}">${esc(relTime(p.ts))}</span>
-        ${compact ? '<span class="sns-detail-link" data-act="detail">详情</span>'
-                  : `<span class="sns-time">· 赞 ${likes} · 评论 ${comments}</span>`}
-        <span class="sns-ops">
-          <button class="sns-ops-btn" data-act="ops" title="更多操作">···</button>
-          <div class="sns-ops-menu" hidden>
-            <button data-act="detail">查看详情</button>
-            <button data-act="copy-text">复制文字</button>
-            <button data-act="copy-id">复制动态 ID</button>
-          </div>
-        </span>
-      </div>
-      ${inter}
-    </div>
-  </article>`;
-}
-
-/* ══ 详情 / 灯箱 ═══════════════════════════════════════════ */
-
-function openLightbox(src, isVideo) {
-  const box = el('sns-lightbox'), img = el('sns-lightbox-img'), vid = el('sns-lightbox-video');
-  if (isVideo) {
-    img.hidden = true; img.src = '';
-    vid.hidden = false; vid.src = src;
-    vid.play().catch(() => {});
-  } else {
-    vid.hidden = true; vid.pause(); vid.src = '';
-    img.hidden = false; img.src = src;
-  }
-  box.hidden = false;
-}
-
-function closeLightbox() {
-  el('sns-lightbox').hidden = true;
-  el('sns-lightbox-img').src = '';
-  const vid = el('sns-lightbox-video');
-  vid.pause(); vid.src = ''; vid.hidden = true;
-}
-
-async function openDetail(tid) {
-  const box = el('sns-modal');
-  el('sns-modal-body').innerHTML = '<div class="sns-loading">加载中…</div>';
-  box.hidden = false;
-  closePops();
-  try {
-    const d = await fetchJSON(`/api/sns/detail?account=${encodeURIComponent(account)}&tid=${encodeURIComponent(tid)}`);
-    el('sns-modal-body').innerHTML = renderPost(d.post, false);
-  } catch (e) {
-    el('sns-modal-body').innerHTML = `<div class="sns-empty">加载失败：${esc(e.message)}</div>`;
+/** 媒体加载失败：**必须可见**（以前是静默隐藏，用户只看到空白） */
+function onMediaErrorEl(el, isVideo) {
+  const cell = el.closest && el.closest('.sns-media-cell');
+  el.remove();
+  if (cell && !cell.querySelector('.sns-media-bad')) {
+    const bad = document.createElement('span');
+    bad.className = 'sns-media-bad';
+    bad.title = MEDIA_FAIL_HINT;
+    bad.textContent = (isVideo ? '视频' : '图片') + '加载失败';
+    cell.appendChild(bad);
   }
 }
 
-function closeDetail() { el('sns-modal').hidden = true; el('sns-modal-body').innerHTML = ''; }
+/* ══ 头像组件（首字母色块 + 有头像时才请求图片）══════════════ */
 
-/* ══ 账号 / 列表加载 ═══════════════════════════════════════ */
+const SnsAva = {
+  name: 'sns-ava',
+  props: { username: { type: String, default: '' }, display: { type: String, default: '' } },
+  computed: {
+    f() { return friendMap.value.get(this.username); },
+    initial() {
+      return String(this.display || this.username || '?').trim().slice(0, 1).toUpperCase() || '?';
+    },
+    hasAvatar() { return !!(this.f && this.f.has_avatar); },
+    src() { return avaUrl(this.username); },
+  },
+  template: `
+    <span class="ava"><span>{{ initial }}</span>
+      <img v-if="hasAvatar" :src="src" alt="" loading="lazy" @error="$event.target.remove()">
+    </span>`,
+};
 
-async function loadAccounts() {
-  const d = await fetchJSON('/api/sns/accounts');
-  const sel = el('sns-account');
-  sel.innerHTML = (d.accounts || []).map(a =>
-    `<option value="${attr(a.wxid)}">${esc(a.wxid)} · ${a.count || 0} 条</option>`).join('');
-  if (!d.accounts || !d.accounts.length) throw new Error('没有找到已解密的朋友圈数据库');
-  account = sel.value;
-  const a = d.accounts.find(x => x.wxid === account) || {};
-  setNotice(`本地朋友圈图片只包含微信已经下载过的资源；未下载的会尝试从 CDN 获取。`
-    + `数据库共 ${a.count || 0} 条动态。`);
-  renderMe();
-  load(true);
-  ensureFriends(true).then(() => { renderMe(); rerenderList(); });
-}
+/* ══ 动态卡片组件（正文/媒体/卡片/互动/操作菜单）══════════════ */
 
-/** 顶部封面上的“我”：昵称与头像（会被调用多次，必须幂等） */
-function renderMe() {
-  const clean = account.replace(/_[0-9a-f]{4}$/i, '');
-  const me = friends.find(f => f.username === account || f.username === clean);
-  const name = (me && me.display) || clean;
-  const nameEl = el('sns-me-name');
-  if (nameEl) nameEl.textContent = name;
-  const initialEl = el('sns-me-initial');
-  if (initialEl) initialEl.textContent = String(name).trim().slice(0, 1) || '我';
-
-  // 头像用绝对定位叠在首字母上，**不替换 innerHTML**：
-  // 首次加载后 #sns-me-initial 仍要在（renderMe 会被调用两次：
-  // 账号加载后 + 好友信息到达后，第二次再找它就找不到了）。
-  const box = el('sns-me-ava');
-  if (!box || box.querySelector('img')) return;
-  const img = new Image();
-  img.alt = '';
-  img.onerror = () => img.remove();
-  img.onload = () => { if (box && !box.querySelector('img')) box.appendChild(img); };
-  img.src = avaUrl(account);
-}
-
-/** 好友信息到达后，把已经渲染出来的列表补上昵称/头像（不重新请求） */
-function rerenderList() {
-  if (!el('sns-list').querySelector('.sns-post')) return;
-  el('sns-list').querySelectorAll('.sns-post').forEach(post => {
-    const uname = post.dataset.user;
-    const nameEl = post.querySelector('.sns-name');
-    if (nameEl) nameEl.textContent = nameOf(uname);
-    const ava = post.querySelector('.ava');
-    if (ava && !ava.querySelector('img')) {
-      const f = friendMap.get(uname);
-      if (f && f.has_avatar) {
-        const img = document.createElement('img');
-        img.loading = 'lazy';
-        img.onerror = () => img.remove();
-        img.src = avaUrl(uname);
-        ava.appendChild(img);
+const SnsPost = {
+  name: 'sns-post',
+  components: { 'sns-ava': SnsAva },
+  props: {
+    post: { type: Object, required: true },
+    compact: { type: Boolean, default: true },
+  },
+  computed: {
+    uname() { return this.post.user_name || this.post.username || ''; },
+    display() { return nameOf(this.uname); },
+    tid() { return String(this.post.tid); },
+    menuOpen() { return store.activeMenuTid === this.tid; },
+    items() { return (this.post.medias || []).filter(m => m.url && isCdnMedia(m.url)); },
+    gridCls() { return mediaCols(this.items.length); },
+    likes() { return this.post.likes || []; },
+    comments() { return this.post.comments || []; },
+    shownComments() { return this.compact ? this.comments.slice(-20) : this.comments; },
+    hiddenComments() { return this.compact ? Math.max(0, this.comments.length - 20) : 0; },
+    card() { return this.post.card || null; },
+    coverUrl() {
+      const raw = ((this.card || {}).cover || '').trim();
+      return raw ? proxyUrl(raw) : '';
+    },
+    finderVideoUrl() {
+      const c = this.card || {};
+      if (c.kind !== 'finder') return '';
+      const f = c.finder || {};
+      const vid = ((f.video_url || '').trim() || (((f.media || [])[0] || {}).url || '')).trim();
+      return vid ? proxyUrl(vid) : '';
+    },
+  },
+  methods: {
+    relTime, fullTime, mediaUrl, emojiUrl, displayOf, fmtDur,
+    mediaFail(ev, isVideo) { onMediaErrorEl(ev.target, isVideo); },
+    openMedia(ev, m) {
+      ev.preventDefault();
+      const lp = m.live_photo;
+      if (lp && lp.url) {
+        store.lightbox = { visible: true, src: mediaUrl(lp), video: true };
+      } else {
+        store.lightbox = { visible: true, src: mediaUrl(m), video: false };
       }
-    }
-  });
-  renderFriends();
-}
+    },
+    openCoverVideo(url) {
+      if (url) store.lightbox = { visible: true, src: url, video: true };
+    },
+    openDetail() {
+      store.activeMenuTid = null;
+      store.modal = { visible: true, post: null, error: '' };
+      fetchJSON(`/api/sns/detail?account=${encodeURIComponent(store.account)}&tid=${encodeURIComponent(this.tid)}`)
+        .then(d => { store.modal.post = d.post; })
+        .catch(e => { store.modal.error = e.message; });
+    },
+    copyText_() {
+      store.activeMenuTid = null;
+      copyText(this.post.content_desc || '')
+        .then(ok => toast(ok ? '已复制文字' : '复制失败'));
+    },
+    copyId() {
+      store.activeMenuTid = null;
+      copyText(this.tid).then(ok => toast(ok ? '已复制动态 ID' : '复制失败'));
+    },
+    toggleMenu(ev) {
+      ev.stopPropagation();
+      store.activeMenuTid = this.menuOpen ? null : this.tid;
+    },
+  },
+  template: `
+    <article class="sns-post">
+      <sns-ava :username="uname" :display="display"></sns-ava>
+      <div class="sns-main">
+        <div class="sns-name">{{ display }}</div>
+        <div v-if="post.content_desc" class="sns-text">{{ post.content_desc }}</div>
 
-async function load(reset = false) {
-  if (busy || !account) return;
-  busy = true;
-  if (reset) { before = null; el('sns-list').innerHTML = '<div class="sns-loading">加载中…</div>'; }
-  const qs = new URLSearchParams({ account, limit: '20' });
-  if (before) qs.set('before_tid', before);
-  if (filter.keyword) qs.set('keyword', filter.keyword);
-  if (filter.username) qs.set('username', filter.username);
-  if (filter.start) qs.set('start', String(filter.start));
-  if (filter.end) qs.set('end', String(filter.end));
-  try {
-    const d = await fetchJSON(`/api/sns/timeline?${qs}`);
-    const html = (d.timeline || []).map(p => renderPost(p)).join('');
-    if (reset) el('sns-list').innerHTML = html || '<div class="sns-empty">没有符合条件的动态</div>';
-    else el('sns-list').insertAdjacentHTML('beforeend', html);
-    before = d.next_before_tid || null;
-    el('sns-more').hidden = !d.has_more;
-    const n = (d.timeline || []).length;
-    el('sns-meta').textContent = `${n} 条${filter.rangeLabel && filter.rangeKey !== 'all' ? ' · ' + filter.rangeLabel : ''}`
-      + `${filter.username ? ' · ' + (nameOf(filter.username) || filter.username) : ''}`;
-  } catch (e) {
-    if (reset) el('sns-list').innerHTML = `<div class="sns-empty">${esc(e.message)}</div>`;
-    else toast(e.message);
-  } finally { busy = false; }
-}
+        <template v-if="card">
+          <a v-if="card.kind === 'music'" class="sns-card sns-card--music"
+             :href="card.url" target="_blank" rel="noreferrer">
+            <div class="sns-card-body"><div class="sns-card-tag">🎵 音乐</div>
+              <div class="sns-card-title">{{ (card.music && card.music.album) || card.title || '音乐' }}</div>
+              <div class="sns-card-sub">{{ ((card.music && card.music.singer) || card.description || '') + (card.music && card.music.duration_ms ? ' · ' + fmtDur(card.music.duration_ms / 1000) : '') }}</div></div>
+          </a>
+          <div v-else-if="card.kind === 'finder'" class="sns-card sns-card--finder">
+            <img v-if="coverUrl" class="sns-card-cover" loading="lazy" :src="coverUrl"
+                 alt="视频号封面"
+                 :title="finderVideoUrl ? '点击播放' : ''"
+                 @click="openCoverVideo(finderVideoUrl)"
+                 @error="$event.target.remove()">
+            <div class="sns-card-body">
+              <div class="sns-card-tag">📹 视频号</div>
+              <div class="sns-card-title">{{ card.finder && card.finder.nickname }}</div>
+              <div class="sns-card-sub">{{ [(card.finder && card.finder.media_count ? card.finder.media_count + ' 个作品' : ''), fmtDur(card.duration)].filter(Boolean).join(' · ') }}</div>
+              <div class="sns-card-desc">{{ card.description || '' }}</div></div>
+          </div>
+          <div v-else-if="card.kind === 'live'" class="sns-card sns-card--live">
+            <img v-if="coverUrl" class="sns-card-cover" loading="lazy" :src="coverUrl"
+                 alt="直播封面" @error="$event.target.remove()">
+            <div class="sns-card-body">
+              <div class="sns-card-tag">📺 视频号直播</div>
+              <div class="sns-card-title">{{ card.live && card.live.nickname }}</div>
+              <div class="sns-card-desc">{{ card.live && card.live.desc }}</div></div>
+          </div>
+          <div v-else-if="card.kind === 'note'" class="sns-card sns-card--note">
+            <div class="sns-card-body">
+              <div class="sns-card-tag">📝 笔记</div>
+              <div class="sns-card-desc">{{ (card.note && card.note.text) || card.title || '' }}</div></div>
+          </div>
+          <a v-else class="sns-card sns-card--link"
+             :href="card.url" target="_blank" rel="noreferrer">
+            <div class="sns-card-body"><div class="sns-card-tag">🔗 链接</div>
+              <div class="sns-card-title">{{ card.title || card.url || '' }}</div>
+              <div class="sns-card-sub">{{ card.source || '' }}</div>
+              <div class="sns-card-desc">{{ card.description || '' }}</div></div>
+          </a>
+        </template>
 
-/* ══ 导出 ═══════════════════════════════════════════════════ */
+        <div v-if="items.length" class="sns-media" :class="gridCls">
+          <span v-for="(m, i) in items" :key="i" class="sns-media-cell">
+            <video v-if="m.type === 6" class="sns-vid" controls preload="metadata"
+                   :src="mediaUrl(m)" @error="mediaFail($event, true)"></video>
+            <template v-else>
+              <img class="sns-lb" loading="lazy" :src="mediaUrl(m)" alt="朋友圈图片"
+                   :title="m.live_photo && m.live_photo.url ? '实况照片：点击播放' : ''"
+                   @click="openMedia($event, m)"
+                   @error="mediaFail($event, false)">
+              <span v-if="m.live_photo && m.live_photo.url" class="live-badge">实况</span>
+            </template>
+          </span>
+        </div>
 
-function updateExportScope() {
-  const parts = [];
-  parts.push(`时间：${filter.rangeKey === 'all' ? '全部' : (filter.rangeLabel || describeRange(filter.start, filter.end))}`);
-  parts.push(`发布者：${filter.username ? (nameOf(filter.username) || filter.username) : '全部'}`);
-  if (filter.keyword) parts.push(`关键词：${filter.keyword}`);
-  el('sns-export-scope').textContent = '导出范围 —— ' + parts.join(' · ');
-}
+        <div v-if="post.location" class="sns-loc">📍 {{ post.location.name || '' }}{{ post.location.address ? ' · ' + post.location.address : '' }}</div>
 
-async function doExport() {
-  const msg = el('sns-export-msg'), btn = el('sns-export');
-  const withMedia = el('sns-exp-media').checked;
-  if (withMedia && !window.confirm('下载媒体会逐张访问 CDN，可能耗时较久，确定继续？')) return;
-  btn.disabled = true;
-  msg.textContent = withMedia ? '导出中（含媒体）…' : '导出中…';
-  try {
-    const body = {
-      account, format: el('sns-fmt').value, media: withMedia,
-      concurrency: Number(el('sns-exp-conc').value) || 5,
-      keyword: filter.keyword || undefined,
-      username: filter.username || undefined,
-      start: filter.start || undefined,
-      end: filter.end || undefined,
-    };
-    const r = await fetch('/api/sns/export', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-    });
-    if (r.status === 409) throw new Error('已有任务在运行，请稍后再试');
-    if (!r.ok) {
-      const j = await r.json().catch(() => ({}));
-      throw new Error(j.error || '启动失败');
-    }
-    pollExport();
-  } catch (e) {
-    msg.textContent = '✗ ' + e.message;
-    btn.disabled = false;
-  }
-}
+        <div class="sns-foot">
+          <span class="sns-time" :title="fullTime(post.ts)">{{ relTime(post.ts) }}</span>
+          <span v-if="compact" class="sns-detail-link" @click="openDetail">详情</span>
+          <span v-else class="sns-time">· 赞 {{ likes.length }} · 评论 {{ comments.length }}</span>
+          <span class="sns-ops">
+            <button class="sns-ops-btn" title="更多操作" @click="toggleMenu">···</button>
+            <span class="sns-ops-menu" :hidden="!menuOpen">
+              <button @click="openDetail">查看详情</button>
+              <button @click="copyText_">复制文字</button>
+              <button @click="copyId">复制动态 ID</button>
+            </span>
+          </span>
+        </div>
 
-function pollExport() {
-  const msg = el('sns-export-msg'), btn = el('sns-export');
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(async () => {
-    let job;
-    try { job = await (await fetch('/api/job')).json(); }
-    catch (e) { return; }
-    const logs = job.logs || [];
-    const last = logs.length ? (logs[logs.length - 1].length >= 4
-      ? logs[logs.length - 1][3] : logs[logs.length - 1][1]) : '';
-    if (job.running) { msg.textContent = last ? `导出中… ${last}` : '导出中…'; return; }
-    clearInterval(pollTimer); pollTimer = null;
-    btn.disabled = false;
-    const rep = job.report || {};
-    if (job.ok && rep.kind === 'sns_export') {
-      const m = rep.media || {};
-      // 失败原因必须写出来：只显示「失败 N」等于没说
+        <div v-if="likes.length || comments.length" class="sns-inter">
+          <div v-if="likes.length" class="sns-likes"><span class="ic">❤</span><template
+            v-for="(x, i) in likes" :key="i"><span v-if="i" class="sep">，</span>{{ displayOf(x.username, x.nickname) }}</template></div>
+          <div v-if="comments.length" class="sns-comments" :class="{ 'has-like': likes.length }">
+            <div v-for="(c, i) in shownComments" :key="i" class="sns-comment">
+              <b>{{ displayOf(c.username, c.nickname) }}</b>：<span v-if="c.ref_username" class="dim">回复 {{ displayOf(c.ref_username, '') }} </span>{{ c.content || '' }}<template
+                v-for="(e, j) in (c.emojis || [])" :key="'e' + j"><img class="cm-emoji" loading="lazy" :src="emojiUrl(e)" alt="表情" @error="$event.target.remove()"></template><template
+                v-for="(im, j) in (c.images || []).filter(x => x.url)" :key="'i' + j"><img class="cm-img" loading="lazy" :src="mediaUrl(im)" alt="评论图片" @error="$event.target.remove()"></template>
+            </div>
+            <div v-if="hiddenComments" class="sns-more-comments">还有 {{ hiddenComments }} 条评论，点「详情」查看</div>
+          </div>
+        </div>
+      </div>
+    </article>`,
+};
+
+/* ══ 页面组件 ═════════════════════════════════════════════════ */
+
+let _app = null;
+let _pollTimer = null;
+let _docClick = null;
+let _keyDown = null;
+let _kwTimer = null;
+
+const SnsPage = {
+  components: { 'sns-post': SnsPost, 'sns-ava': SnsAva },
+  data() { return store; },
+  computed: {
+    meName() {
+      const clean = store.account.replace(/_[0-9a-f]{4}$/i, '');
+      const me = store.friends.find(f => f.username === store.account || f.username === clean);
+      return (me && me.display) || clean || '我';
+    },
+    meInitial() { return String(this.meName).trim().slice(0, 1) || '我'; },
+    userLabel() {
+      if (!store.username) return '全部发布者';
+      const f = friendMap.value.get(store.username);
+      return (f && f.display) || store.username;
+    },
+    rangeOn() { return !!(store.start || store.end); },
+    metaText() {
+      const n = store.timeline.length;
+      let s = `${n} 条`;
+      if (store.rangeKey !== 'all') s += ' · ' + store.rangeLabel;
+      if (store.username) s += ' · ' + this.userLabel;
+      return s;
+    },
+    quickRanges() { return QUICK_RANGES; },
+    calTitle() {
+      if (store.cal.jump === 'year') return '选择年份';
+      if (store.cal.jump === 'month') return '选择月份';
+      return `${store.cal.y}年${store.cal.m + 1}月 ▾`;
+    },
+    calCells() { return monthCells(store.cal.y, store.cal.m); },
+    jumpYears() {
+      const nowY = new Date().getFullYear();
+      const years = [];
+      for (let y = nowY; y >= nowY - 11; y--) years.push(y);
+      return years;
+    },
+    todayTs() {
+      const d = new Date();
+      return Math.floor(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() / 1000);
+    },
+    calHint() {
+      if (store.cal.jump) return '选择月份后再点日期微调';
+      if (!store.draft.start) return '点击日期选择开始';
+      return store.draft.end
+        ? this.describeRange(store.draft.start, store.draft.end)
+        : `${this.describeRange(store.draft.start, null)} → 选择结束日期`;
+    },
+    sortedFriends() {
+      return sortFriends(store.friends.filter(f => matchFriend(f, store.userQuery)), store.userSort);
+    },
+    userHint() {
+      if (!store.friends.length) return store.friendsLoaded ? '' : '加载中…';
+      return `共 ${store.friends.length} 位发布者${store.userQuery ? ` · 匹配 ${this.sortedFriends.length}` : ''}`;
+    },
+    exportScopeText() {
+      const parts = [];
+      parts.push(`时间：${store.rangeKey === 'all' ? '全部' : store.rangeLabel}`);
+      parts.push(`发布者：${store.username ? this.userLabel : '全部'}`);
+      if (store.keyword) parts.push(`关键词：${store.keyword}`);
+      return '导出范围 —— ' + parts.join(' · ');
+    },
+    exportExtra() {
+      const m = (store.exportResult && store.exportResult.media) || {};
+      if (!m.total) return '';
       const why = (m.fail && m.reasons)
         ? '：' + Object.keys(m.reasons).map(k => `${reasonText(k)} ×${m.reasons[k]}`).join('、')
         : '';
-      const extra = m.total ? `，媒体 ${m.ok}/${m.total}（失败 ${m.fail}${why}）` : '';
-      msg.innerHTML = `✓ 已导出 ${rep.count} 条${extra} · `
-        + `<a href="/api/sns/export/download?path=${encodeURIComponent(rep.file)}">下载</a> · `
-        + `<a href="#" onclick="SX.openPath('${esc(rep.export_dir)}');return false">打开目录</a>`;
-    } else {
-      msg.textContent = '✗ ' + (job.error || last || '导出失败');
-    }
-  }, 800);
-}
+      return `，媒体 ${m.ok}/${m.total}（失败 ${m.fail}${why}）`;
+    },
+  },
+  watch: {
+    kwInput(v) {
+      clearTimeout(_kwTimer);
+      _kwTimer = setTimeout(() => {
+        store.keyword = v;
+        this.load(true);
+      }, 350);
+    },
+    // 账号是「挂载后」才拉到的：这里重载本人头像，否则首屏那次必然失败且不再重试
+    account() { this.preloadMeAvatar(); },
+  },
+  methods: {
+    avaUrl,
+    preloadMeAvatar() {
+      store.meAvaOk = false;
+      if (!store.account) return;
+      const img = new Image();
+      img.onload = () => { store.meAvaOk = true; };
+      img.src = avaUrl(store.account);
+    },
+    togglePop(id) {
+      const show = !store.pops[id];
+      store.pops.range = store.pops.user = store.pops.export = false;
+      store.pops[id] = show;
+      if (show && id === 'user') this.ensureFriends();
+      if (show && id === 'range') this.openRange();
+    },
+    describeRange(start, end) {
+      const f = t => {
+        const d = new Date(t * 1000);
+        return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+      };
+      if (start && end) return start === end ? f(start) : `${f(start)} - ${f(end)}`;
+      if (start) return `${f(start)} 起`;
+      if (end) return `至 ${f(end)}`;
+      return '全部时间';
+    },
 
-/* ══ 事件 ═══════════════════════════════════════════════════ */
+    /* ── 时间范围 ── */
+    openRange() {
+      store.draft = { start: store.start, end: store.end };
+      const d = new Date((store.start || nowSec()) * 1000);
+      store.cal = { y: d.getFullYear(), m: d.getMonth(), jump: null };
+    },
+    selectRange(key) {
+      const r = rangeFromKey(key);
+      if (!r) return;
+      store.draft = { start: r.start, end: r.end };
+      const d = new Date((r.start || nowSec()) * 1000);
+      store.cal = { y: d.getFullYear(), m: d.getMonth(), jump: null };
+      this.applyRange(r.start, r.end, key, r.label);
+    },
+    applyRange(start, end, key, label) {
+      store.start = start;
+      store.end = end;
+      store.rangeKey = key || 'custom';
+      store.rangeLabel = label || this.describeRange(start, end);
+      store.pops.range = false;
+      this.load(true);
+    },
+    shiftMonth(delta) {
+      const d = new Date(store.cal.y, store.cal.m + delta, 1);
+      store.cal.y = d.getFullYear();
+      store.cal.m = d.getMonth();
+      store.cal.jump = null;
+    },
+    cycleJump() {
+      store.cal.jump = store.cal.jump === 'year' ? 'month' : (store.cal.jump === 'month' ? null : 'year');
+    },
+    calCellClass(c) {
+      const cls = [];
+      if (c.out) cls.push('out');
+      if (c.ts === this.todayTs) cls.push('today');
+      if (c.ts === store.draft.start || c.ts === store.draft.end) cls.push('edge');
+      else {
+        const lo = Math.min(store.draft.start || Infinity, store.draft.end || Infinity);
+        const hi = Math.max(store.draft.start || -Infinity, store.draft.end || -Infinity);
+        if (c.ts > lo && c.ts < hi) cls.push('in-range');
+      }
+      return cls;
+    },
+    pickDay(c) {
+      const ts = c.ts;
+      if (!store.draft.start || store.draft.end) store.draft = { start: ts, end: null };
+      else if (ts >= store.draft.start) store.draft.end = ts;
+      else store.draft = { start: ts, end: null };
+    },
+    clearRange() { this.applyRange(null, null, 'all', '全部时间'); },
+    confirmRange() {
+      if (store.draft.start) {
+        const end = store.draft.end || store.draft.start;
+        this.applyRange(store.draft.start, end, 'custom', this.describeRange(store.draft.start, end));
+      }
+    },
 
-function onDocClick(ev) {
-  // 浮层外点击关闭
-  const inPop = ev.target.closest('.sns-pop');
-  const onTrigger = ev.target.closest('#sns-range-btn, #sns-user-btn, #sns-export-toggle');
-  if (!inPop && !onTrigger) closePops();
+    /* ── 发布者 ── */
+    async ensureFriends(force) {
+      if (store.friendsLoaded && !force) return;
+      if (store.friendsLoading) return;
+      store.friendsLoading = true;
+      try {
+        const d = await fetchJSON(`/api/sns/friends?account=${encodeURIComponent(store.account)}&limit=1000`);
+        store.friends = d.friends || [];
+        store.friendsLoaded = true;
+      } catch (e) {
+        toast('发布者加载失败：' + e.message);
+      } finally {
+        store.friendsLoading = false;
+      }
+    },
+    applyUser(username) {
+      store.username = username || '';
+      store.pops.user = false;
+      this.load(true);
+    },
 
-  if (ev.target.closest('[data-close]')) {
-    const id = ev.target.closest('[data-close]').dataset.close;
-    el(id).hidden = true;
-    return;
-  }
-  if (ev.target.closest('#sns-range-btn')) { toggleRangePanel(); return; }
-  if (ev.target.closest('#sns-user-btn')) { togglePop('sns-user-panel'); renderFriends(); return; }
-  if (ev.target.closest('#sns-export-toggle')) { togglePop('sns-export-panel'); return; }
+    /* ── 列表加载 ── */
+    async load(reset) {
+      if (store.loading || !store.account) return;
+      store.loading = true;
+      if (reset) {
+        store.before = null;
+        store.timeline = [];
+        store.emptyText = '没有符合条件的动态';
+      }
+      const qs = new URLSearchParams({ account: store.account, limit: '20' });
+      if (store.before) qs.set('before_tid', store.before);
+      if (store.keyword) qs.set('keyword', store.keyword);
+      if (store.username) qs.set('username', store.username);
+      if (store.start) qs.set('start', String(store.start));
+      if (store.end) qs.set('end', String(store.end));
+      try {
+        const d = await fetchJSON(`/api/sns/timeline?${qs}`);
+        const rows = d.timeline || [];
+        store.timeline = reset ? rows : store.timeline.concat(rows);
+        store.before = d.next_before_tid || null;
+        store.hasMore = !!d.has_more;
+      } catch (e) {
+        if (reset) store.emptyText = e.message;
+        else toast(e.message);
+      } finally {
+        store.loading = false;
+      }
+    },
+    loadMore() { this.load(false); },
+    refresh() {
+      store.friendsLoaded = false;
+      this.ensureFriends(true);
+      this.load(true);
+    },
+    clearKeyword() {
+      store.kwInput = '';
+      store.keyword = '';
+      this.load(true);
+    },
+    onAccountChange() {
+      store.before = null;
+      store.friendsLoaded = false;
+      store.friends = [];
+      store.meAvaOk = false;
+      this.applyUser('');
+      this.ensureFriends(true);
+    },
 
-  const quick = ev.target.closest('#sns-quick button');
-  if (quick) { selectRange(quick.dataset.range, true); return; }
-  // 注意：日历/确定/清除都在面板内，必须排在「面板整体 return」之前
-  if (ev.target.closest('#cal-ok')) {
-    if (draft.start) {
-      const end = draft.end || draft.start;
-      applyRange(draft.start, end, 'custom', describeRange(draft.start, end));
-      markQuick('custom');
-    }
-    return;
-  }
-  if (ev.target.closest('#cal-clear')) {
-    draft = { start: null, end: null };
-    markQuick('all');
-    applyRange(null, null, 'all', '全部时间');
-    return;
-  }
-  if (ev.target.closest('#sns-range-panel')) {
-    if (ev.target.closest('#cal-grid') || ev.target.closest('#cal-title')) onCalClick(ev);
-    return;
-  }
+    /* ── 弹层 / 灯箱 ── */
+    closeModal() { store.modal.visible = false; },
+    closePops() { store.pops.range = store.pops.user = store.pops.export = false; },
 
-  const urow = ev.target.closest('.sns-user-row');
-  if (urow) { applyUser(urow.dataset.user || ''); return; }
-  if (ev.target.closest('#sns-user-clear')) { applyUser(''); return; }
+    /* ── 导出 ── */
+    async doExport() {
+      if (store.exportMedia && !window.confirm('下载媒体会逐张访问 CDN，可能耗时较久，确定继续？')) return;
+      store.exportState = 'running';
+      store.exportProgress = '';
+      store.exportError = '';
+      store.exportResult = null;
+      try {
+        const body = {
+          account: store.account, format: store.exportFmt, media: store.exportMedia,
+          concurrency: Number(store.exportConc) || 5,
+          keyword: store.keyword || undefined,
+          username: store.username || undefined,
+          start: store.start || undefined,
+          end: store.end || undefined,
+        };
+        const r = await fetch('/api/sns/export', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+        });
+        if (r.status === 409) throw new Error('已有任务在运行，请稍后再试');
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          throw new Error(j.error || '启动失败');
+        }
+        this.pollExport();
+      } catch (e) {
+        store.exportState = 'error';
+        store.exportError = e.message;
+      }
+    },
+    pollExport() {
+      if (_pollTimer) clearInterval(_pollTimer);
+      _pollTimer = setInterval(async () => {
+        let job;
+        try { job = await (await fetch('/api/job')).json(); }
+        catch (e) { return; }
+        const logs = job.logs || [];
+        const last = logs.length ? (logs[logs.length - 1].length >= 4
+          ? logs[logs.length - 1][3] : logs[logs.length - 1][1]) : '';
+        if (job.running) { store.exportProgress = last || ''; return; }
+        clearInterval(_pollTimer); _pollTimer = null;
+        const rep = job.report || {};
+        if (job.ok && rep.kind === 'sns_export') {
+          store.exportState = 'ok';
+          store.exportResult = rep;
+        } else {
+          store.exportState = 'error';
+          store.exportError = job.error || last || '导出失败';
+        }
+      }, 800);
+    },
+    openExportDir() {
+      const dir = store.exportResult && store.exportResult.export_dir;
+      if (dir) window.SX.openPath(dir);
+    },
+  },
+  mounted() {
+    // 本人头像：加载成功才显示（避免破图闪一下）
+    this.preloadMeAvatar();
+  },
+};
 
-  // 动态上的操作
-  const actBtn = ev.target.closest('[data-act]');
-  if (actBtn) {
-    const act = actBtn.dataset.act;
-    const post = actBtn.closest('.sns-post');
-    if (act === 'ops') {
-      ev.preventDefault();
-      const menu = actBtn.parentElement.querySelector('.sns-ops-menu');
-      const wasHidden = menu.hidden;
-      document.querySelectorAll('.sns-ops-menu').forEach(m => { m.hidden = true; });
-      menu.hidden = !wasHidden;
+/* ══ 生命周期 ═════════════════════════════════════════════════ */
+
+export async function init(view) {
+  // 全局事件：点外面关弹层 / Esc 关弹层与灯箱 / 菜单互斥
+  _docClick = ev => {
+    // [data-pop] 是三个弹层触发器（时间范围 / 发布者 / 导出）——
+    // 漏掉任何一个，点它会先开、再被这里立刻关掉，表现为「点了没反应」
+    if (ev.target.closest('.sns-pop') || ev.target.closest('[data-pop]')) return;
+    store.pops.range = store.pops.user = store.pops.export = false;
+    if (!ev.target.closest('.sns-ops')) store.activeMenuTid = null;
+  };
+  _keyDown = ev => {
+    if (ev.key !== 'Escape') return;
+    if (store.pops.range || store.pops.user || store.pops.export) {
+      store.pops.range = store.pops.user = store.pops.export = false;
       return;
     }
-    document.querySelectorAll('.sns-ops-menu').forEach(m => { m.hidden = true; });
-    if (!post) return;
-    const tid = post.dataset.tid;
-    if (act === 'detail') { openDetail(tid); return; }
-    if (act === 'copy-text') {
-      const text = post.querySelector('.sns-text');
-      copyText(text ? text.textContent : '').then(ok => toast(ok ? '已复制文字' : '复制失败'));
-      return;
-    }
-    if (act === 'copy-id') { copyText(String(tid)).then(ok => toast(ok ? '已复制动态 ID' : '复制失败')); return; }
+    if (store.lightbox.visible) { store.lightbox.visible = false; return; }
+    if (store.modal.visible) store.modal.visible = false;
+  };
+  document.addEventListener('click', _docClick);
+  document.addEventListener('keydown', _keyDown);
+
+  _app = Vue.createApp(SnsPage);
+  const vm = _app.mount(view);
+
+  // 首屏数据
+  try {
+    const d = await fetchJSON('/api/sns/accounts');
+    store.accounts = d.accounts || [];
+    if (!store.accounts.length) throw new Error('没有找到已解密的朋友圈数据库');
+    store.account = store.accounts[0].wxid;
+    const a = store.accounts[0];
+    store.notice = `本地朋友圈图片只包含微信已经下载过的资源；未下载的会尝试从 CDN 获取。数据库共 ${a.count || 0} 条动态。`;
+  } catch (e) {
+    store.notice = e.message;
+    store.emptyText = e.message;
+    return;
   }
-
-  const img = ev.target.closest('img.sns-lb');
-  if (img && img.src) {
-    ev.preventDefault();
-    const live = img.dataset.live;
-    if (live) openLightbox(live, true);
-    else openLightbox(img.src, false);
-  }
-}
-
-function toggleRangePanel() {
-  const p = el('sns-range-panel');
-  const show = p.hidden;
-  closePops(show ? 'sns-range-panel' : null);
-  if (show) openRangePanel();
-  else p.hidden = true;
-}
-
-function onKey(ev) {
-  if (ev.key !== 'Escape') return;
-  if (POPS.some(id => !el(id).hidden)) { closePops(); return; }
-  if (!el('sns-lightbox').hidden) { closeLightbox(); return; }
-  if (!el('sns-modal').hidden) closeDetail();
-}
-
-function onKeywordInput() {
-  const v = el('sns-keyword').value.trim();
-  el('sns-keyword-clear').hidden = !v;
-  clearTimeout(onKeywordInput._t);
-  onKeywordInput._t = setTimeout(() => {
-    filter.keyword = v;
-    load(true);
-    updateExportScope();
-  }, 350);
-}
-
-/* ══ 生命周期 ═══════════════════════════════════════════════ */
-
-export async function init() {
-  if (inited) return;
-  inited = true;
-  try { await loadAccounts(); }
-  catch (e) { setNotice(e.message); el('sns-list').innerHTML = ''; }
-
-  el('sns-account').addEventListener('change', async () => {
-    account = el('sns-account').value;
-    before = null;
-    usersLoaded = false;
-    friends = [];
-    friendMap.clear();
-    renderMe();
-    applyUser('');                 // 内部会 load(true) + 刷新导出范围
-    ensureFriends(true).then(() => { renderMe(); rerenderList(); });
-  });
-  el('sns-refresh').addEventListener('click', () => { usersLoaded = false; ensureFriends(true); load(true); });
-  el('sns-more').addEventListener('click', () => load(false));
-  el('sns-export').addEventListener('click', doExport);
-  el('sns-keyword').addEventListener('input', onKeywordInput);
-  el('sns-keyword-clear').addEventListener('click', () => {
-    el('sns-keyword').value = '';
-    el('sns-keyword-clear').hidden = true;
-    filter.keyword = '';
-    load(true);
-  });
-  el('sns-user-search').addEventListener('input', () => {
-    userQuery = el('sns-user-search').value;
-    renderFriends();
-  });
-  el('sns-user-sort').addEventListener('change', () => {
-    userSort = el('sns-user-sort').value;
-    renderFriends();
-  });
-  el('sns-modal-close').addEventListener('click', closeDetail);
-  el('sns-modal-mask').addEventListener('click', closeDetail);
-  el('sns-lightbox').addEventListener('click', closeLightbox);
-
-  document.addEventListener('click', onDocClick);
-  document.addEventListener('keydown', onKey);
-  // 资源加载错误不冒泡，但能在捕获阶段拿到
-  document.addEventListener('error', onMediaError, true);
+  store.timeline = [];
+  store.before = null;
+  await Promise.all([vm.load(true), vm.ensureFriends(true)]);
 }
 
 export function destroy() {
-  inited = false;
-  document.removeEventListener('click', onDocClick);
-  document.removeEventListener('keydown', onKey);
-  document.removeEventListener('error', onMediaError, true);
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  closeDetail();
-  closeLightbox();
-  closePops();
-  clearTimeout(onKeywordInput._t);
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  if (_docClick) { document.removeEventListener('click', _docClick); _docClick = null; }
+  if (_keyDown) { document.removeEventListener('keydown', _keyDown); _keyDown = null; }
+  clearTimeout(_kwTimer);
+  store.lightbox.visible = false;
+  store.modal.visible = false;
+  store.activeMenuTid = null;
+  if (_app) { try { _app.unmount(); } catch (e) { /* 忽略 */ } _app = null; }
 }

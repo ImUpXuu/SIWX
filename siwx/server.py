@@ -506,6 +506,19 @@ def pages(filename: str):
     return send_from_directory(UI_DIR / "pages", filename)
 
 
+@app.get("/vendor/<path:filename>")
+def vendor(filename: str):
+    """前端第三方库（如 vue.global.prod.js）：只读 + 路径逃逸防护。"""
+    root = UI_DIR / "vendor"
+    try:
+        (root / filename).resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        abort(404)
+    if not (root / filename).is_file():
+        abort(404)
+    return send_from_directory(root, filename)
+
+
 @app.get("/plugin-pages/<plugin>/<path:filename>")
 def plugin_pages(plugin: str, filename: str):
     """插件页面资源：plugins/<plugin>/ui/<filename>（只读，路径逃逸防护）。"""
