@@ -500,6 +500,12 @@ def common_js():
     return send_from_directory(UI_DIR, "common.js", mimetype="text/javascript")
 
 
+@app.get("/widgets.js")
+def widgets_js():
+    """自绘控件（下拉/日期/菜单）：被 pages/*.js 以 ESM 静态 import 引用。"""
+    return send_from_directory(UI_DIR, "widgets.js", mimetype="text/javascript")
+
+
 @app.get("/pages/<path:filename>")
 def pages(filename: str):
     """模块化页面资源：pages/<name>.html / .js / .css"""

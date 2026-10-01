@@ -13,8 +13,6 @@
 .mcp-top { padding: 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
 #m-account, #m-search { width: 100%; }
 #m-sessions { flex: 1; overflow-y: auto; }
-#m-sessions::-webkit-scrollbar, .mcp-side::-webkit-scrollbar { width: 8px; height: 8px; }
-#m-sessions::-webkit-scrollbar-thumb, .mcp-side::-webkit-scrollbar-thumb { background: var(--text); border: 2px solid var(--bg); border-radius: 999px; }
 .sess {
   position: relative;
   padding: 12px 12px 12px 62px;
@@ -37,7 +35,7 @@
   display: block; font-size: 13px; font-weight: 700; color: var(--text);
   line-height: 18px; min-height: 18px;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-  margin: 0 0 4px 0; padding: 0 74px 0 0;
+  margin: 0 0 4px 0; padding: 0 86px 0 0;
 }
 .sess .prev {
   display: block; font-size: 12px; color: var(--muted);

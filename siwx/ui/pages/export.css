@@ -19,8 +19,6 @@
 }
 .e-selall input { accent-color: var(--text); }
 #e-sessions { flex: 1; overflow-y: auto; }
-#e-sessions::-webkit-scrollbar, .e-side::-webkit-scrollbar { width: 8px; height: 8px; }
-#e-sessions::-webkit-scrollbar-thumb, .e-side::-webkit-scrollbar-thumb { background: var(--text); border: 2px solid var(--bg); border-radius: 999px; }
 .e-sess {
   position: relative;
   display: flex; align-items: center; gap: 10px;
@@ -39,10 +37,19 @@
 }
 .e-sess.sel input[type=checkbox] { accent-color: var(--bg); }
 .e-body { min-width: 0; flex: 1; }
+/* 聊天页多选范围提示条 */
+.e-range-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 12.5px; line-height: 1.6;
+  border: 1px dashed var(--line); border-radius: var(--radius-sm);
+  background: var(--card-alt); padding: 9px 12px; margin-bottom: 14px;
+}
+.e-range-banner b { font-weight: 700; }
+.e-range-banner .mini-btn { flex: none; }
 .e-sess .name {
   display: block; font-size: 13px; font-weight: 700; color: inherit;
   line-height: 18px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-  padding-right: 68px;
+  padding-right: 86px;
 }
 .e-sess .prev {
   display: block; font-size: 12px; color: var(--muted);

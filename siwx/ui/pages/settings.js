@@ -1,7 +1,12 @@
 /* 设置页 —— 版本与更新 / 缓存总览 / 清除 / 重新运行引导 */
+import { createDropdown } from '/widgets.js?v=2026100203';
+
 const { esc, fetchJSON, go, resetSetup, copyText } = window.SX;
 
 function el(id) { return id ? document.getElementById(id) : null; }
+
+let logLevelDrop = null;
+const plgChoiceDrop = new Map();   // 挂载元素 → choice 类插件设置的下拉实例
 
 async function loadOverview() {
   const box = el('s-overview');
@@ -130,10 +135,10 @@ function pluginControl(plugin, it) {
               data-type="bool" id="${id}"${val ? ' checked' : ''}> ${val ? '已开启' : '已关闭'}</label>`;
   }
   if (it.type === 'choice') {
-    const opts = (it.choices || []).map(c =>
-      `<option value="${esc(c)}"${String(c) === String(val) ? ' selected' : ''}>${esc(c)}</option>`).join('');
-    return `<select class="f-input" id="${id}" data-plg="${esc(plugin)}" data-key="${esc(it.key)}"
-              data-type="choice">${opts}</select>`;
+    // 先渲染占位挂载点，loadPluginSettings 渲染完 innerHTML 后统一水合成自绘下拉
+    return `<div class="f-input sxw-mount" id="${id}" data-plg="${esc(plugin)}" data-key="${esc(it.key)}"
+              data-type="choice" data-choices="${esc(JSON.stringify(it.choices || []))}"
+              data-value="${esc(val ?? '')}" style="width:auto;min-width:150px"></div>`;
   }
   if (it.type === 'int' || it.type === 'float') {
     const step = it.type === 'float' ? ' step="any"' : '';
@@ -157,6 +162,10 @@ function readPluginValues(plugin) {
   document.querySelectorAll(`[data-plg="${CSS.escape(plugin)}"]`).forEach(inp => {
     const t = inp.dataset.type || 'str';
     if (t === 'bool') out[inp.dataset.key] = inp.checked;
+    else if (t === 'choice') {
+      const drop = plgChoiceDrop.get(inp);
+      out[inp.dataset.key] = drop ? drop.value : (inp.dataset.value ?? '');
+    }
     else if (t === 'int') out[inp.dataset.key] = parseInt(inp.value, 10);
     else if (t === 'float') out[inp.dataset.key] = parseFloat(inp.value);
     else out[inp.dataset.key] = inp.value;
@@ -219,6 +228,23 @@ async function loadPluginSettings() {
       }).join('')}
     </div>`;
 
+  // choice 类插件配置水合为自绘下拉
+  box.querySelectorAll('.sxw-mount[data-type="choice"]').forEach(mount => {
+    let choices = [];
+    try { choices = JSON.parse(mount.dataset.choices || '[]'); } catch (e) { /* 忽略 */ }
+    const drop = createDropdown({
+      options: choices.map(c => ({ value: c, label: c })),
+      value: mount.dataset.value || null,
+      label: mount.dataset.key,
+    });
+    plgChoiceDrop.set(mount, drop);
+    mount.appendChild(drop.el);
+    drop.onChange = () => {
+      const st = box.querySelector(`[data-plg-status="${CSS.escape(mount.dataset.plg)}"]`);
+      if (st) st.textContent = '';
+    };
+  });
+
   // 绑定保存
   box.querySelectorAll('[data-plg-save]').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -238,6 +264,7 @@ async function loadPluginSettings() {
           if (!inp) return;
           const t = inp.dataset.type;
           if (t === 'bool') { inp.checked = !!v; }
+          else if (t === 'choice') { const drop = plgChoiceDrop.get(inp); if (drop) drop.value = v; }
           else if (t === 'int' || t === 'float') { inp.value = v != null ? v : ''; }
           else { inp.value = v != null ? v : ''; }
         });
@@ -307,20 +334,29 @@ export async function init() {
   });
 
   // ── 日志模式 ──────────────────────────────────────────
+  logLevelDrop = createDropdown({
+    options: [
+      { value: 'rough', label: '粗略（默认）' },
+      { value: 'detailed', label: '详细' },
+    ],
+    value: 'rough',
+    label: '日志模式',
+  });
+  el('s-log-level').appendChild(logLevelDrop.el);
+  logLevelDrop.onChange = async (v) => {
+    await fetchJSON('/api/logs/settings', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ level: v }),
+    });
+    window.alert(`日志模式已切换为: ${v === 'detailed' ? '详细' : '粗略'}`);
+  };
+
   async function loadLogSettings() {
     try {
       const s = await fetchJSON('/api/logs/settings');
-      el('s-log-level').value = s.level || 'rough';
+      logLevelDrop.value = s.level || 'rough';
     } catch (e) { /* ignore */ }
   }
-
-  el('s-log-level').addEventListener('change', async (e) => {
-    await fetchJSON('/api/logs/settings', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ level: e.target.value }),
-    });
-    window.alert(`日志模式已切换为: ${e.target.value === 'detailed' ? '详细' : '粗略'}`);
-  });
 
   // ── 脱敏日志导出 ──────────────────────────────────────
   el('s-export-log').addEventListener('click', async () => {

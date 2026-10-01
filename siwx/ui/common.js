@@ -16,6 +16,24 @@
     const p = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   }
+  /* 会话列表用的智能短时间（微信风格）：今天 → HH:MM，昨天 → 昨天，
+     一周内 → 周X，今年 → MM-DD，更早 → YYYY/MM/DD。
+     会话行右侧只预留了窄窄一列，全长 "YYYY-MM-DD HH:MM" 会把标题
+     挤得与时间戳重叠——这里是治本的一招。 */
+  function fmtListTs(t) {
+    if (!t) return '';
+    const d = new Date(Number(t) * 1000);
+    if (Number.isNaN(d.getTime())) return '';
+    const now = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    const dayStart = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((dayStart(now) - dayStart(d)) / 86400000);
+    if (days <= 0) return `${p(d.getHours())}:${p(d.getMinutes())}`;
+    if (days === 1) return '昨天';
+    if (days < 7) return '周' + '日一二三四五六'[d.getDay()];
+    if (d.getFullYear() === now.getFullYear()) return `${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())}`;
+  }
   async function fetchJSON(url, opts) {
     const r = await fetch(url, opts);
     const j = await r.json().catch(() => ({}));
@@ -186,7 +204,7 @@
     return ok;
   }
 
-  window.SX = { esc, timeStr, fmtTs, fetchJSON, startJob, renderLog, go,
+  window.SX = { esc, timeStr, fmtTs, fmtListTs, fetchJSON, startJob, renderLog, go,
                 setupDone, setSetupDone, resetSetup, imgFallback, openPath,
                 renderNodes, copyText };
 })();

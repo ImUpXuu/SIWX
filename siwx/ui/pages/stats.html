@@ -2,24 +2,17 @@
   <div class="st-bar">
     <div class="st-bar-main">
       <div class="st-filter st-filter-account">
-        <label class="st-label" for="st-account">统计账号</label>
-        <select id="st-account"></select>
+        <label class="st-label">统计账号</label>
+        <div id="st-account"></div>
       </div>
       <div class="st-filter st-filter-range">
-        <label class="st-label" for="st-range">时间范围</label>
+        <label class="st-label">时间范围</label>
         <div class="st-range-row">
-          <select id="st-range">
-            <option value="all">全部时间</option>
-            <option value="12">最近 12 个月</option>
-            <option value="6">最近 6 个月</option>
-            <option value="3">最近 3 个月</option>
-            <option value="1">最近 1 个月</option>
-            <option value="custom">自定义日期</option>
-          </select>
+          <div id="st-range"></div>
           <span id="st-custom" class="st-custom hidden">
-            <input type="date" id="st-start" title="开始日期">
+            <span id="st-start"></span>
             <span class="st-date-sep">至</span>
-            <input type="date" id="st-end" title="结束日期">
+            <span id="st-end"></span>
           </span>
         </div>
       </div>

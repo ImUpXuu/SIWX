@@ -1,5 +1,7 @@
 /* 聊天查看 —— 微信风格气泡 + 时间轴 + 消息选择/复制 */
-const { esc, fetchJSON, fmtTs } = window.SX;
+import { createDropdown, openMenu, closeMenu } from '/widgets.js?v=2026100203';
+
+const { esc, fetchJSON, fmtTs, fmtListTs } = window.SX;
 
 let account = null;
 let sessions = [];
@@ -14,11 +16,14 @@ let timelineDayCache = new Map();
 let selectionMode = false;
 let selectedKeys = new Set();
 let rangeAnchorKey = null;
+let accDrop = null;
+let bottomFollow = null;
 
 function el(id) { return document.getElementById(id); }
 
 async function init() {
-  const sel = el('c-account');
+  accDrop = createDropdown({ options: [], placeholder: '选择账号', label: '微信账号' });
+  el('c-account').appendChild(accDrop.el);
   try {
     const { accounts } = await fetchJSON('/api/chat/accounts');
     if (!accounts.length) {
@@ -26,15 +31,14 @@ async function init() {
         '<div class="c-empty">还没有解密产物 — 请先在"引导设置"完成解密</div>';
       return;
     }
-    sel.innerHTML = accounts.map(a =>
-      `<option value="${esc(a.wxid)}">${esc(a.wxid)}</option>`).join('');
-    account = accounts[0].wxid;
-    sel.addEventListener('change', () => {
-      account = sel.value;
+    accDrop.options = accounts.map(a => ({ value: a.wxid, label: a.wxid }));
+    account = accDrop.value;
+    accDrop.onChange = (v) => {
+      account = v;
       currentChat = null;
       resetChatView();
       loadSessions();
-    });
+    };
     await loadSessions();
   } catch (e) {
     el('c-sessions').innerHTML = `<div class="c-empty">${esc(e.message)}</div>`;
@@ -47,7 +51,7 @@ async function init() {
     btn.disabled = true;
     el('c-sessions').innerHTML = '<div class="c-loading">增量同步中…</div>';
     try {
-      const acc = el('c-account')?.value || account;
+      const acc = accDrop?.value || account;
       const r = await fetch('/api/run', {
         method: 'POST', headers: {'content-type': 'application/json'},
         body: JSON.stringify({ mode: 'sync', export_opts: { account: acc } }),
@@ -82,16 +86,31 @@ async function init() {
     el('c-timeline').classList.toggle('pinned');
   });
 
-  // 跳转导出页并预选当前会话
+  // 跳转导出页并预选当前会话；若处于多选状态，把所选范围一并带过去
   el('c-export').addEventListener('click', () => {
     if (!currentChat) { window.alert('先在左侧打开一个会话'); return; }
-    sessionStorage.setItem('siwx-export-preset', JSON.stringify({
-      account, chat: currentChat.username, display: currentChat.display,
-    }));
+    const preset = { account, chat: currentChat.username, display: currentChat.display };
+    if (selectionMode && selectedKeys.size) {
+      const tss = [...selectedKeys]
+        .map(k => messageByKey(k)).filter(Boolean)
+        .map(m => m.ts || 0).filter(Boolean);
+      if (tss.length) {
+        const day = (ts) => {
+          const d = new Date(ts * 1000);
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+        preset.range = {
+          start: day(Math.min(...tss)),
+          end: day(Math.max(...tss)),
+          count: selectedKeys.size,
+        };
+      }
+    }
+    sessionStorage.setItem('siwx-export-preset', JSON.stringify(preset));
     location.hash = '#/export';
   });
 
-  // 消息区事件委托：复制单条、选择/范围选择
+  // 消息区事件委托：复制单条、选择/范围选择、多选范围菜单（右键 / 长按）
   el('c-msgs').addEventListener('click', async (ev) => {
     const copyBtn = ev.target.closest('.m-copy');
     if (copyBtn) {
@@ -105,6 +124,28 @@ async function init() {
     if (!row || !selectionMode) return;
     toggleMessageSelection(row.dataset.key, ev.shiftKey);
   });
+  el('c-msgs').addEventListener('contextmenu', (ev) => {
+    if (!selectionMode) return;
+    const row = ev.target.closest('.m-row[data-key]');
+    if (!row) return;
+    ev.preventDefault();
+    openRangeMenu(row.dataset.key, ev.clientX, ev.clientY);
+  });
+  // 触屏长按 500ms = 右键
+  let pressTimer = null;
+  el('c-msgs').addEventListener('touchstart', (ev) => {
+    if (!selectionMode) return;
+    const row = ev.target.closest('.m-row[data-key]');
+    if (!row) return;
+    const touch = ev.touches[0];
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      openRangeMenu(row.dataset.key, touch.clientX, touch.clientY);
+    }, 500);
+  }, { passive: true });
+  const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+  el('c-msgs').addEventListener('touchmove', cancelPress, { passive: true });
+  el('c-msgs').addEventListener('touchend', cancelPress);
 
   // 滚动到顶部自动加载更早消息
   el('c-msgs').addEventListener('scroll', async () => {
@@ -174,7 +215,7 @@ function sessionRow(s, extra = '') {
       <div class="ava"><span>${esc(initials)}</span>${avatarImg(s.username)}</div>
       <span class="name">${esc(s.display)}</span>
       <span class="prev">${esc(s.preview || '点击查看详情')}</span>
-      <span class="tm">${fmtTs(s.last_time)}</span>
+      <span class="tm">${fmtListTs(s.last_time)}</span>
       <span class="tag">${off ? '公众号' : (isGrp ? '群聊' : '')}</span>
     </div>`;
 }
@@ -194,7 +235,7 @@ function renderSessions(kw) {
         <div class="ava"><span>公</span></div>
         <span class="name">公众号</span>
         <span class="prev">${official.length} 个公众号会话 · 点击${open ? '收起' : '展开'}</span>
-        <span class="tm">${fmtTs(latest)}</span>
+        <span class="tm">${fmtListTs(latest)}</span>
         <span class="tag">${open ? '收起' : '展开'}</span>
       </div>`);
     if (open) lines.push(...official.map(s => sessionRow(s, 'sess-official')));
@@ -227,7 +268,57 @@ async function openChat(s) {
   el('c-msgs').innerHTML = '<div class="c-loading">加载消息…</div>';
   el('c-select').disabled = false;
   el('c-stats').disabled = false;
-  await Promise.all([loadMessages(true), loadTimeline()]);
+  await Promise.all([loadMessages(true, { stick: true }), loadTimeline()]);
+}
+
+/** 让消息区立即回到底部。
+ *  #c-msgs 有 scroll-behavior:smooth，直接赋值 scrollTop 会被 CSS
+ *  拖成一场漫长的平滑滚动——看起来就是"没跳到底部"。这里临时
+ *  关掉平滑行为瞬时贴底。 */
+function jumpToBottom(box) {
+  const prev = box.style.scrollBehavior;
+  box.style.scrollBehavior = 'auto';
+  box.scrollTop = box.scrollHeight;
+  box.style.scrollBehavior = prev;
+}
+
+/** 打开会话后的"贴底跟随"：图片懒加载就位后内容高度还会持续增长，
+ *  每次都把视口按回底部；用户一旦明显向上滚动（距底超过 2/3 视口）
+ *  或发出滚轮/触摸手势，立即停止跟随让位给用户。 */
+function startBottomFollow(box) {
+  stopBottomFollow();
+  let following = true;
+  let pinning = false;
+  const pin = () => {
+    if (!following) return;
+    pinning = true;
+    jumpToBottom(box);
+    requestAnimationFrame(() => { pinning = false; });
+  };
+  const onScroll = () => {
+    if (!following || pinning) return;
+    const dist = box.scrollHeight - box.scrollTop - box.clientHeight;
+    if (dist > box.clientHeight * 0.66) stopBottomFollow();
+  };
+  const onLoad = (ev) => { if (ev.target && ev.target.tagName === 'IMG') pin(); };
+  const onGesture = () => stopBottomFollow();
+  box.addEventListener('scroll', onScroll);
+  box.addEventListener('load', onLoad, true);   // load 不冒泡，捕获阶段接
+  box.addEventListener('wheel', onGesture, { passive: true });
+  box.addEventListener('touchstart', onGesture, { passive: true });
+  bottomFollow = {
+    stop() {
+      following = false;
+      box.removeEventListener('scroll', onScroll);
+      box.removeEventListener('load', onLoad, true);
+      box.removeEventListener('wheel', onGesture);
+      box.removeEventListener('touchstart', onGesture);
+    },
+  };
+}
+
+function stopBottomFollow() {
+  if (bottomFollow) { bottomFollow.stop(); bottomFollow = null; }
 }
 
 async function loadMessages(fresh, opts = {}) {
@@ -246,7 +337,14 @@ async function loadMessages(fresh, opts = {}) {
     rangeAnchorKey = null;
     loadedMessages = data.messages.slice();
     box.innerHTML = renderMessageList(loadedMessages) || '<div class="c-empty">这个会话没有消息</div>';
-    box.scrollTo({ top: box.scrollHeight, behavior: opts.smooth ? 'smooth' : 'auto' });
+    if (opts.stick) {
+      startBottomFollow(box);
+      jumpToBottom(box);
+      // 首屏图片尚未就位时高度还会变，下一帧再校准一次
+      requestAnimationFrame(() => { if (bottomFollow) jumpToBottom(box); });
+    } else {
+      stopBottomFollow();
+    }
   } else {
     loadedMessages = mergeMessages(data.messages, loadedMessages);
     box.insertAdjacentHTML('afterbegin', renderMessageList(data.messages, true));
@@ -504,6 +602,48 @@ function refreshSelectionUI() {
     btn.textContent = n ? `复制所选 ${n}` : '复制所选';
     btn.disabled = !n;
   }
+  // 多选状态下把导出按钮变成「导出所选」，让范围联动可见
+  const ex = el('c-export');
+  if (ex) ex.textContent = (selectionMode && n) ? `导出所选 ${n}` : '导出';
+}
+
+/* ── 多选范围菜单（微信式「选择以上 / 以下」）────────────────── */
+function rangeSelect(key, dir, add) {
+  const idx = loadedMessages.findIndex(m => msgKey(m) === key);
+  if (idx < 0) return;
+  const lo = dir === 'above' ? 0 : idx;
+  const hi = dir === 'above' ? idx : loadedMessages.length - 1;
+  for (let i = lo; i <= hi; i++) {
+    const k = msgKey(loadedMessages[i]);
+    if (add) selectedKeys.add(k);
+    else selectedKeys.delete(k);
+  }
+  rangeAnchorKey = key;
+  refreshSelectionUI();
+}
+
+function openRangeMenu(key, x, y) {
+  const idx = loadedMessages.findIndex(m => msgKey(m) === key);
+  if (idx < 0) return;
+  const picked = selectedKeys.has(key);
+  const items = [
+    { label: picked ? '取消选择这条' : '选择这条', onClick: () => toggleMessageSelection(key, false) },
+    { label: '选择以上（含这条）', disabled: idx === 0, onClick: () => rangeSelect(key, 'above', true) },
+    { label: '选择以下（含这条）', disabled: idx === loadedMessages.length - 1, onClick: () => rangeSelect(key, 'below', true) },
+    { label: '取消以上', disabled: idx === 0, onClick: () => rangeSelect(key, 'above', false) },
+    { label: '取消以下', disabled: idx === loadedMessages.length - 1, onClick: () => rangeSelect(key, 'below', false) },
+    { label: `全选已载入（${loadedMessages.length} 条）`, onClick: () => {
+        loadedMessages.forEach(m => selectedKeys.add(msgKey(m)));
+        refreshSelectionUI();
+      } },
+  ];
+  if (selectedKeys.size) {
+    items.push({ label: '清空已选', onClick: () => { selectedKeys.clear(); rangeAnchorKey = null; refreshSelectionUI(); } });
+  }
+  if (hasMore) {
+    items.push({ note: '更早的消息还没载入，范围仅对已载入部分生效；向上滚动可加载更早消息。' });
+  }
+  openMenu(items, x, y);
 }
 
 async function copySelectedMessages() {
@@ -600,5 +740,8 @@ function renderStats(d) {
     </div>`;
 }
 
-export function destroy() { /* 无常驻定时器 */ }
+export function destroy() {
+  stopBottomFollow();
+  closeMenu();
+}
 export { init };

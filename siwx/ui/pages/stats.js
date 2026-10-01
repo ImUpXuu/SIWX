@@ -1,4 +1,6 @@
 /* 聊天统计页 —— 所有图表用内联 SVG 手绘，零外部依赖，沿用黑白描边风格 */
+import { createDropdown, createDatePicker } from '/widgets.js?v=2026100203';
+
 const { esc, fmtTs, fetchJSON } = window.SX;
 
 function el(id) { return document.getElementById(id); }
@@ -7,6 +9,10 @@ function nf(n) { return (Number(n) || 0).toLocaleString('zh-CN'); }
 let account = null;
 let lastData = null;
 let busy = false;
+let accDrop = null;
+let rangeDrop = null;
+let startPick = null;
+let endPick = null;
 
 /* ── SVG 小工具 ─────────────────────────────────────────── */
 function svg(w, h, inner, cls) {
@@ -14,9 +20,8 @@ function svg(w, h, inner, cls) {
     preserveAspectRatio="xMidYMid meet" role="img">${inner}</svg>`;
 }
 
-/** 灰阶调色板：主色用实心黑，其余用不同密度的描边/灰阶区分 */
-const SHADES = ['#111111', '#3d3d3d', '#6b6b6b', '#949494', '#b5b5b5',
-                '#cfcfcf', '#e2e2e2', '#f0f0f0'];
+/* 灰阶调色板改由 CSS 类（.st-shade-N，见 stats.css）承载：
+   浅色/深色主题各有一套值，切换主题时无需重绘图表 */
 
 /* 动画工具：用 CSS 变量把目标值交给样式表，由 CSS transition 补间。
    直接写死属性会让动画被"瞬移"掉 —— 浏览器不会对首次渲染的 SVG
@@ -54,8 +59,8 @@ function donut(groups) {
     // 每段留 1.5px 视觉间隙，避免同色相邻糊成一片
     const frac = g.count / total;
     const len = Math.max(0, frac * C - 1.5);
-    const seg = `<circle class="st-arc" cx="${cx}" cy="${cy}" r="${r}" fill="none"
-      stroke="${SHADES[i % SHADES.length]}" stroke-width="${sw}"
+    const seg = `<circle class="st-arc st-shade-${i % 8}" cx="${cx}" cy="${cy}" r="${r}" fill="none"
+      stroke-width="${sw}"
       stroke-dasharray="${len} ${C - len}"
       stroke-dashoffset="${-offset}"
       data-i="${i}"
@@ -75,7 +80,7 @@ function donut(groups) {
     <div class="st-donut">${svg(size, size, arcs + hole + txt)}</div>
     <div class="st-legend">${groups.map((g, i) => `
       <div class="st-leg" style="--i:${i}">
-        <span class="sw" style="background:${SHADES[i % SHADES.length]}"></span>
+        <span class="sw st-shade-${i % 8}"></span>
         <span class="nm">${esc(g.label)}</span>
         <span class="ct">${nf(g.count)}</span>
         <span class="pc">${(g.count / total * 100).toFixed(1)}%</span>
@@ -360,12 +365,10 @@ function rangeStart(months) {
  *  返回 {start, end}，两者都是 "YYYY-MM-DD" 或 null。
  *  后端会用日级聚合缓存过滤整页统计，不只是裁剪月度图。 */
 function currentRange() {
-  const sel = el('st-range');
-  const v = sel ? sel.value : 'all';
+  const v = rangeDrop ? rangeDrop.value : 'all';
   if (v === 'custom') {
-    const s = el('st-start'), e = el('st-end');
-    let start = s && s.value ? s.value : null;
-    let end = e && e.value ? e.value : null;
+    let start = startPick && startPick.value ? startPick.value : null;
+    let end = endPick && endPick.value ? endPick.value : null;
     if (start && end && start > end) { const t = start; start = end; end = t; }
     return { start, end };
   }
@@ -423,27 +426,45 @@ async function load(force) {
   }
 }
 
-/** 自定义范围的两个日期框，随下拉框切换显隐 */
+/** 自定义范围：范围下拉切到「自定义日期」时显示两个自绘日期框 */
 function syncCustomVisible() {
-  const sel = el('st-range');
+  const on = rangeDrop ? rangeDrop.value === 'custom' : false;
   const box = el('st-custom');
-  if (!sel || !box) return false;
-  const on = sel.value === 'custom';
+  if (!box) return false;
   box.classList.toggle('hidden', !on);
   if (on) {
-    const s = el('st-start'), e = el('st-end');
     const today = new Date();
-    if (e && !e.value) e.value = dateStr(today);
-    if (s && !s.value) {
+    if (endPick && !endPick.value) endPick.value = dateStr(today);
+    if (startPick && !startPick.value) {
       const d = new Date(today.getTime());
       d.setMonth(d.getMonth() - 1);
-      s.value = dateStr(d);
+      startPick.value = dateStr(d);
     }
   }
   return on;
 }
 
 async function init() {
+  accDrop = createDropdown({ options: [], placeholder: '选择账号', label: '统计账号' });
+  el('st-account').appendChild(accDrop.el);
+  rangeDrop = createDropdown({
+    options: [
+      { value: 'all', label: '全部时间' },
+      { value: '12', label: '最近 12 个月' },
+      { value: '6', label: '最近 6 个月' },
+      { value: '3', label: '最近 3 个月' },
+      { value: '1', label: '最近 1 个月' },
+      { value: 'custom', label: '自定义日期' },
+    ],
+    value: 'all',
+    label: '时间范围',
+  });
+  el('st-range').appendChild(rangeDrop.el);
+  startPick = createDatePicker({ placeholder: '开始日期', label: '开始日期' });
+  el('st-start').appendChild(startPick.el);
+  endPick = createDatePicker({ placeholder: '结束日期', label: '结束日期' });
+  el('st-end').appendChild(endPick.el);
+
   const rf = el('st-refresh');
   if (rf) rf.disabled = true;
   const body = el('st-body');
@@ -455,31 +476,24 @@ async function init() {
         + '请先在「引导设置」完成密钥提取与解密，再回来看统计。</div>');
       return;
     }
-    const sel = el('st-account');
-    if (!sel) return;                     // 页面已切走
-    sel.innerHTML = accounts.map(a =>
-      `<option value="${esc(a.wxid)}">${esc(a.wxid)}（${a.shards} 分片）</option>`).join('');
-    account = sel.value;
-
-    sel.addEventListener('change', () => {
-      account = sel.value;
+    accDrop.options = accounts.map(a => ({
+      value: a.wxid, label: `${a.wxid}（${a.shards} 分片）`,
+    }));
+    account = accDrop.value;
+    accDrop.onChange = () => {
+      account = accDrop.value;
       lastData = null;
       load(false);
-    });
+    };
 
-    const rsel = el('st-range');
-    if (!rsel) return;
-    rsel.addEventListener('change', () => {
+    rangeDrop.onChange = () => {
       syncCustomVisible();
       // 切到自定义时会自动填好「最近 1 个月」的起止日期，因此可以立即刷新，
       // 用户再改两个日期框时也会自动刷新。
       load(false);
-    });
-
-    ['st-start', 'st-end'].forEach(id => {
-      const n = el(id);
-      if (n) n.addEventListener('change', () => load(false));
-    });
+    };
+    startPick.onChange = () => load(false);
+    endPick.onChange = () => load(false);
 
     if (rf) rf.addEventListener('click', () => load(true));
 

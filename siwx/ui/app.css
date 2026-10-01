@@ -1,6 +1,7 @@
 /* stories-in-wx — black / white outline UI
    全局层：tokens / 基础 / 壳布局 / 共享组件；页面私有样式在 pages/*.css */
 :root {
+  color-scheme: light;
   --bg: #ffffff;
   --card: #ffffff;
   --card-alt: #f7f7f7;
@@ -29,26 +30,46 @@
   --space-4: 16px;
   --space-5: 20px;
   --space-6: 24px;
+  /* 页面级派生 token：浅色与深色各自声明，页面样式一律引用变量 */
+  --chat-canvas: #f5f5f5;            /* 聊天消息区底色 */
+  --overlay-glass: rgba(255, 255, 255, .95);  /* 悬浮面板（时间轴等）玻璃底 */
+  --chip-bg: rgba(0, 0, 0, .06);     /* 系统消息等中性小底色 */
 }
 [data-theme="dark"] {
-  --bg: #ffffff;
-  --card: #ffffff;
-  --card-alt: #f7f7f7;
-  --card-warm: #ffffff;
-  --line: #111111;
-  --line-soft: #d8d8d8;
-  --line-strong: #111111;
-  --text: #111111;
-  --muted: #5f5f5f;
-  --blue: #111111;
-  --blue-light: #111111;
-  --blue-deep: #000000;
+  color-scheme: dark;
+  --bg: #131313;
+  --card: #1b1b1b;
+  --card-alt: #242424;
+  --card-warm: #1b1b1b;
+  --line: #e8e8e8;
+  --line-soft: #3a3a3a;
+  --line-strong: #e8e8e8;
+  --text: #ececec;
+  --muted: #9a9a9a;
+  --blue: #ececec;
+  --blue-light: #ececec;
+  --blue-deep: #ffffff;
   --shadow: none;
   --shadow-md: none;
+  --chat-canvas: #0e0e0e;
+  --overlay-glass: rgba(27, 27, 27, .96);
+  --chip-bg: rgba(255, 255, 255, .09);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
-html { background: var(--bg); }
+html {
+  background: var(--bg);
+  scrollbar-width: thin;                       /* Firefox */
+  scrollbar-color: var(--line-soft) transparent;
+}
+/* 全局统一细滚动条：此前只有个别列表自定义过，主窗口/弹层仍是系统默认，
+   粗细混用很扎眼。这里统一 8px 圆头，颜色跟随主题变量。 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line-soft); border-radius: 999px; border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 body {
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   color: var(--text);
@@ -69,6 +90,8 @@ textarea:focus-visible, [tabindex]:focus-visible {
 .mono { font-family: "SF Mono", Consolas, "Cascadia Code", monospace; }
 .dim { color: var(--muted); }
 .hidden { display: none !important; }
+/* 未被页面样式接管链接（如设置页「关于」）不再裸奔浏览器默认蓝 */
+a { color: var(--text); text-underline-offset: 2px; }
 /* Vue 挂载前隐藏模板（避免 v-if 元素闪一下）*/
 [v-cloak] { display: none !important; }
 
@@ -99,6 +122,7 @@ textarea:focus-visible, [tabindex]:focus-visible {
 .menu a:hover { background: var(--card-alt); border-color: var(--line); }
 .menu a.active { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
 .menu .ico { font-size: 15px; width: 18px; text-align: center; filter: grayscale(1); }
+.menu .ico svg { width: 17px; height: 17px; display: block; margin: 0 auto; }
 /* 插件菜单项：与内置项样式完全一致，仅靠角标区分来源 */
 .nav-badge {
   margin-left: auto; flex: none; font-size: 10px; font-weight: 700; line-height: 1;
@@ -161,7 +185,7 @@ textarea:focus-visible, [tabindex]:focus-visible {
 }
 .btn:hover:not(:disabled) { background: var(--text); color: var(--bg); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
-.btn:disabled { opacity: .42; cursor: not-allowed; background: #f5f5f5; color: #777; border-style: dashed; }
+.btn:disabled { opacity: .42; cursor: not-allowed; background: var(--card-alt); color: var(--muted); border-style: dashed; }
 .btn-primary { background: var(--text); color: var(--bg); border-color: var(--text); }
 .btn-primary:hover:not(:disabled) { background: var(--card); color: var(--text); }
 .btn-danger { background: var(--card); color: var(--text); border-color: var(--line); }
@@ -183,8 +207,6 @@ textarea:focus-visible, [tabindex]:focus-visible {
   font-family: "SF Mono", Consolas, "Cascadia Code", monospace;
   font-size: 12px; line-height: 1.75;
 }
-.console::-webkit-scrollbar { width: 8px; height: 8px; }
-.console::-webkit-scrollbar-thumb { background: var(--text); border-radius: 999px; border: 2px solid var(--bg); }
 .log-line { white-space: pre-wrap; word-break: break-word; border-bottom: 1px solid var(--line-soft); padding: 2px 0; }
 .log-line:last-child { border-bottom: none; }
 .log-line .t { color: var(--muted); margin-right: 8px; }
@@ -210,8 +232,105 @@ input, select, textarea {
   min-height: 38px; padding: 8px 10px; outline: none;
 }
 input:hover, select:hover, textarea:hover { background: var(--card-alt); }
-input:disabled, select:disabled, textarea:disabled { opacity: .55; cursor: not-allowed; background: #f5f5f5; }
+input:disabled, select:disabled, textarea:disabled { opacity: .55; cursor: not-allowed; background: var(--card-alt); }
 input[type="checkbox"] { accent-color: var(--text); min-height: auto; }
+
+/* ── 自绘控件（widgets.js）：下拉 / 日期 / 弹出菜单 ─────────────
+ * 替代原生 <select> / <input type="date">：原生控件无法跟随黑白描边
+ * 设计与主题切换，弹出的系统面板也不受控。颜色全部走 CSS 变量。 */
+.sxw-dd, .sxw-date { position: relative; display: block; }
+.sxw-dd-btn, .sxw-date-btn {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  min-height: 38px; padding: 8px 12px; cursor: pointer; text-align: left;
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font: inherit; font-size: 13.5px;
+  transition: background .12s ease, color .12s ease;
+}
+.sxw-dd-btn:hover, .sxw-date-btn:hover { background: var(--card-alt); }
+.sxw-dd.open .sxw-dd-btn, .sxw-date.open .sxw-date-btn { background: var(--text); color: var(--bg); }
+.sxw-dd.open .sxw-dd-caret { transform: rotate(180deg); }
+.sxw-dd-txt, .sxw-date-txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sxw-dd-txt.is-empty, .sxw-date-txt.is-empty { color: var(--muted); }
+.sxw-dd.open .sxw-dd-txt.is-empty, .sxw-date.open .sxw-date-txt.is-empty { color: var(--bg); }
+.sxw-dd-caret { margin-left: auto; flex: none; font-size: 10px; opacity: .7; transition: transform .15s ease; }
+.sxw-date-ico { flex: none; display: inline-flex; }
+.sxw-date-ico svg { width: 15px; height: 15px; display: block; opacity: .75; }
+.sxw-pop {
+  display: none;                     /* 仅在 .open 时显示，未打开时不可见也不占位 */
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 80;
+  min-width: max(100%, 210px); max-height: 320px; overflow-y: auto;
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .14);
+  padding: 6px;
+}
+.sxw-dd.open > .sxw-pop, .sxw-date.open > .sxw-pop { display: block; animation: sxwPop .14s ease both; }
+@keyframes sxwPop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.sxw-opt {
+  padding: 8px 10px; border-radius: var(--radius-sm); font-size: 13.5px;
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sxw-opt:hover, .sxw-opt.focus { background: var(--card-alt); }
+.sxw-opt.on { background: var(--text); color: var(--bg); font-weight: 700; }
+/* 日历弹层 */
+.sxw-cal { width: 258px; min-width: 258px; max-height: none; padding: 10px; user-select: none; }
+.sxw-cal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.sxw-cal-title { font-size: 13.5px; font-weight: 700; }
+.sxw-cal-nav {
+  width: 26px; height: 26px; flex: none; cursor: pointer;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--card); color: var(--text); font: inherit; font-size: 13px; line-height: 1;
+}
+.sxw-cal-nav:hover { background: var(--text); color: var(--bg); }
+.sxw-cal-week {
+  display: grid; grid-template-columns: repeat(7, 1fr);
+  font-size: 11px; color: var(--muted); text-align: center; margin-bottom: 2px;
+}
+.sxw-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.sxw-cal-day {
+  height: 30px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; position: relative;
+}
+.sxw-cal-day:hover { background: var(--card-alt); }
+.sxw-cal-day.out { color: var(--muted); opacity: .45; }
+.sxw-cal-day.today::after {
+  content: ''; position: absolute; left: 50%; bottom: 3px; width: 4px; height: 4px;
+  margin-left: -2px; border-radius: 50%; background: var(--muted);
+}
+.sxw-cal-day.sel { background: var(--text); color: var(--bg); font-weight: 700; }
+.sxw-cal-day.sel.today::after { background: var(--bg); }
+.sxw-cal-foot {
+  display: flex; justify-content: space-between; gap: 8px;
+  margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line-soft);
+}
+.sxw-cal-link {
+  border: 0; background: transparent; color: var(--muted);
+  font: inherit; font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 6px;
+}
+.sxw-cal-link:hover { color: var(--text); background: var(--card-alt); }
+/* 轻量弹出菜单（widgets.openMenu，右键 / 长按触发） */
+.sxw-menu {
+  position: fixed; z-index: 85; min-width: 172px; padding: 6px;
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .18);
+}
+.sxw-menu button {
+  display: block; width: 100%; text-align: left; padding: 8px 10px;
+  border: 0; background: transparent; color: var(--text);
+  font: inherit; font-size: 13px; border-radius: var(--radius-sm);
+  cursor: pointer; white-space: nowrap;
+}
+.sxw-menu button:hover:not(:disabled) { background: var(--card-alt); }
+.sxw-menu button:disabled { opacity: .45; cursor: not-allowed; }
+.sxw-menu-note {
+  padding: 6px 10px 4px; font-size: 11px; color: var(--muted);
+  border-top: 1px dashed var(--line-soft); margin-top: 4px; line-height: 1.5;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sxw-dd.open .sxw-pop, .sxw-date.open .sxw-pop { animation: none; }
+}
 
 /* ── 免责声明弹层（壳层组件，由 app.js 注入）──────────── */
 .disc-overlay {
@@ -243,8 +362,6 @@ input[type="checkbox"] { accent-color: var(--text); min-height: auto; }
   display: flex; justify-content: flex-end; gap: 10px;
   padding: 16px 24px 20px; border-top: 1px solid var(--line-soft);
 }
-.disc-overlay::-webkit-scrollbar { width: 8px; }
-.disc-overlay::-webkit-scrollbar-thumb { background: var(--text); border-radius: 999px; border: 2px solid var(--bg); }
 
 /* ── 切页过渡（app.js navigate 触发）──────────────────────
  * 支持时走 View Transitions API（整页快照淡出/淡入 + 轻微位移）；
