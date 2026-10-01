@@ -99,6 +99,11 @@
     return { html: `${dir}.html`, css: `${dir}.css`, js: `${dir}.js` };
   }
 
+  /** 用户开了「减少动态效果」时全部动画降级为直接切换 */
+  function prefersReducedMotion() {
+    return matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
   async function navigate() {
     if (overlayOpen) return;                 // 免责声明弹层打开期间冻结导航
     let name = currentPageName();
@@ -109,19 +114,39 @@
     markMenu(name);
     const view = document.getElementById('view');
     const base = pageBase(name);
+    // 先把新页面取回来再切换：旧实现 fetch 后直接 innerHTML，
+    // 取页期间旧内容还在，塞入瞬间白屏——这是「切页生硬」的来源之一
+    let html;
     try {
       const res = await fetch(base.html);
       if (!res.ok) throw new Error(`页面加载失败 (${res.status})`);
-      view.innerHTML = await res.text();
+      html = await res.text();
     } catch (e) {
       view.innerHTML = `<div class="card"><h2>页面加载失败</h2><p class="dim">${e.message}</p></div>`;
       return;
     }
     ensureCss(base.css);
-    if (current && current.mod && current.mod.destroy) {
-      try { current.mod.destroy(); } catch (e) { /* 忽略 */ }
+    const doSwap = () => {
+      if (current && current.mod && current.mod.destroy) {
+        try { current.mod.destroy(); } catch (e) { /* 忽略 */ }
+      }
+      current = null;
+      view.innerHTML = html;
+    };
+    // 切页过渡：View Transitions API（Chrome/Edge 原生，零依赖）；
+    // 不支持 / 用户要求减少动态效果时，降级为 CSS 淡入
+    if (document.startViewTransition && !prefersReducedMotion()) {
+      try {
+        await document.startViewTransition(doSwap).updateCallbackDone;
+      } catch (e) {
+        doSwap();
+      }
+    } else {
+      doSwap();
+      view.classList.remove('view-enter');
+      void view.offsetWidth;                 // 强制 reflow 重启动画
+      view.classList.add('view-enter');
     }
-    current = null;
     try {
       const mod = await import(`${base.js}?v=${Date.now()}`);
       current = { name, mod };
