@@ -1,12 +1,12 @@
 {
-  "version": "5.0.4",
-  "date": "2026-09-30 14:38:31",
-  "notes": "v5.0.4\n\n修复朋友圈 CDN 媒体拉取问题，并为「图挂了」提供完整留痕：\n\n- 修复视频密钥取错：`<url key=0>` 是占位值，真密钥在 `<enc key>`，此前朋友圈视频 100% 拉不下来；修复后视频恢复正常下载解密。\n- 修复报错方向：域名回退只对 qpic 图片生效；「已下载但认不出格式」不再被后续域名 400 覆盖。\n- `/api/sns/media` 增加微信 CDN 域名白名单（含 tc.qq.com / c2c.wechat.com），外链卡片直接拒绝，同时堵住任意 URL 代理（SSRF）。\n- 失败全链路留痕：每次失败写 `logs/siwx.log`（运行日志页可见，URL 去 token），导出报告带失败原因分布。\n- 前端：媒体加载失败改为可见占位条，不再静默隐藏；导出完成提示列出失败原因。\n\n注：自己发布的旧图有约 58% 在 CDN 侧已不存在（HTTP 404），属微信侧事实，代码只能如实报错。\n\n全量测试 265 通过 / 1 跳过。",
+  "version": "5.0.5",
+  "date": "2026-10-01 00:37:39",
+  "notes": "v5.0.5\n\n**UI 重构第一步：引入 Vue 3（零构建链），朋友圈页全面 Vue 化，切页有了过渡动画。**\n\n- **Vue 3 全局构建版**（vue.global.prod.js，~158KB，含运行时编译器）：零构建、零 node 依赖，源码用户 `clone → pip install → python run.py` 三步不变，PyInstaller 打包配置无需修改。\n- **朋友圈页 Vue 化**：响应式状态集中管理、组件化渲染（动态卡片 / 头像），好友昵称与头像到达后自动刷新，不再需要手动补渲染。\n- **切页过渡动画**：View Transitions API（Chrome/Edge 原生，零依赖）+ 其他浏览器降级淡入，尊重系统「减少动态效果」设置。\n\n- **导出按钮点击无反应**：弹层触发器白名单漏了导出按钮，点击后被全局点击处理器立即关闭；已修复，且按钮显示「导出」文字。\n- **本人头像不显示**：账号晚于页面挂载到达，首次预加载必然失败且不再重试；现在账号变更后自动重载。\n\n全量测试 265 通过 / 1 跳过。",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.4/stories-in-wx-v5.0.4-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.4/stories-in-wx-v5.0.4-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/stories-in-wx-v5.0.5-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/stories-in-wx-v5.0.5-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.4/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
