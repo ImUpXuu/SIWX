@@ -13,6 +13,20 @@
   --wx-link: #576b95;
   --wx-inter: #f7f7f7;
   --wx-live: #fa5151;
+  /* 交互态 / 占位 / 提示等派生色：一并收进色板，暗色主题统一在此覆盖 */
+  --wx-line-strong: #c8ccd4;
+  --wx-hover: #f0f0f0;
+  --wx-clear: #dcdcdc;
+  --wx-badge: #dfe3e8;
+  --wx-bad-bg: #f2f2f2;
+  --wx-bad-line: #d0d0d0;
+  --wx-bad-fg: #999999;
+  --wx-ops: #eaeaea;
+  --wx-ops-hover: #dedede;
+  --wx-warn-bg: #fff8e6;
+  --wx-warn-border: #f2e2b8;
+  --wx-warn-fg: #8a6d1f;
+  --wx-range: #f2f5fa;
   max-width: 720px;
   margin: 0 auto;
   display: flex;
@@ -40,7 +54,7 @@
 .sns-hero-ava {
   width: 66px; height: 66px; border-radius: 8px; overflow: hidden; flex: none;
   position: relative;
-  border: 3px solid var(--wx-bg); background: #d8dde3; color: #fff;
+  border: 3px solid var(--wx-bg); background: var(--wx-badge); color: #fff;
   display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700;
 }
 .sns-hero-ava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -49,18 +63,18 @@
 .sns-bar { display: flex; flex-direction: column; gap: 8px; }
 .sns-search {
   position: relative; display: flex; align-items: center;
-  background: #fff; border: 1px solid var(--wx-line); border-radius: 8px; height: 40px;
+  background: var(--wx-card); border: 1px solid var(--wx-line); border-radius: 8px; height: 40px;
 }
-.sns-search:focus-within { border-color: #c8ccd4; }
+.sns-search:focus-within { border-color: var(--wx-line-strong); }
 .sns-search-icon { position: absolute; left: 12px; font-size: 13px; opacity: .5; pointer-events: none; }
 .sns-search input {
   flex: 1; height: 100%; border: 0; background: transparent; outline: none;
   padding: 0 34px 0 34px; font-size: 14px; color: var(--wx-text);
 }
-.sns-search input::placeholder { color: #b8b8b8; }
+.sns-search input::placeholder { color: var(--wx-muted); }
 .sns-search-clear {
   position: absolute; right: 8px; width: 22px; height: 22px; border-radius: 50%;
-  border: 0; background: #dcdcdc; color: #fff; font-size: 11px; line-height: 1; cursor: pointer;
+  border: 0; background: var(--wx-clear); color: #fff; font-size: 11px; line-height: 1; cursor: pointer;
 }
 .sns-search-sm { height: 34px; }
 .sns-search-sm input { font-size: 13px; padding-left: 32px; }
@@ -70,10 +84,10 @@
 .sns-chip {
   display: inline-flex; align-items: center; gap: 6px; max-width: 260px;
   height: 32px; padding: 0 12px; border: 1px solid var(--wx-line); border-radius: 16px;
-  background: #fff; color: var(--wx-text); font-size: 13px; cursor: pointer; white-space: nowrap;
+  background: var(--wx-card); color: var(--wx-text); font-size: 13px; cursor: pointer; white-space: nowrap;
 }
-.sns-chip:hover { border-color: #c8ccd4; }
-.sns-chip.on { border-color: var(--wx-link); color: var(--wx-link); background: #f2f5fa; }
+.sns-chip:hover { border-color: var(--wx-line-strong); }
+.sns-chip.on { border-color: var(--wx-link); color: var(--wx-link); background: var(--wx-range); }
 .sns-chip-icon { font-size: 12px; opacity: .7; }
 .sns-chip-caret { font-size: 9px; color: var(--wx-muted); }
 .sns-chip span:not(.sns-chip-caret):not(.sns-chip-icon):not(.sns-chip-ava) {
@@ -81,7 +95,7 @@
 }
 .sns-chip-ava {
   width: 20px; height: 20px; border-radius: 4px; flex: none; overflow: hidden;
-  background: #dfe3e8; color: #fff; font-size: 11px; font-weight: 700;
+  background: var(--wx-badge); color: #fff; font-size: 11px; font-weight: 700;
   display: inline-flex; align-items: center; justify-content: center;
 }
 .sns-chip-ava img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -89,13 +103,13 @@
 .sns-chip-ava[hidden] { display: none; }
 .sns-account {
   height: 32px; min-width: 120px; max-width: 220px; padding: 0 8px; font-size: 12.5px;
-  border: 1px solid var(--wx-line); border-radius: 16px; background: #fff; color: var(--wx-text);
+  border: 1px solid var(--wx-line); border-radius: 16px; background: var(--wx-card); color: var(--wx-text);
 }
 .sns-icon-btn {
   width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--wx-line);
-  background: #fff; color: var(--wx-text); font-size: 14px; cursor: pointer; line-height: 1;
+  background: var(--wx-card); color: var(--wx-text); font-size: 14px; cursor: pointer; line-height: 1;
 }
-.sns-icon-btn:hover { border-color: #c8ccd4; }
+.sns-icon-btn:hover { border-color: var(--wx-line-strong); }
 /* 导出按钮要显示文字：覆盖 .sns-icon-btn 的圆形固定尺寸 */
 .sns-icon-btn.sns-export-toggle {
   width: auto; height: 32px; border-radius: 16px; padding: 0 12px;
@@ -103,14 +117,14 @@
 }
 .sns-meta { font-size: 12px; color: var(--wx-sub); }
 .sns-notice {
-  padding: 8px 12px; border-radius: 6px; background: #fff8e6; border: 1px solid #f2e2b8;
-  color: #8a6d1f; font-size: 12.5px; line-height: 1.6;
+  padding: 8px 12px; border-radius: 6px; background: var(--wx-warn-bg); border: 1px solid var(--wx-warn-border);
+  color: var(--wx-warn-fg); font-size: 12.5px; line-height: 1.6;
 }
 
 /* ── 浮层（时间范围 / 发布者 / 导出）───────────────────── */
 .sns-pop {
   position: absolute; z-index: 30; top: 96px; left: 0; width: 340px; max-width: 92vw;
-  background: #fff; border: 1px solid var(--wx-line); border-radius: 10px;
+  background: var(--wx-card); border: 1px solid var(--wx-line); border-radius: 10px;
   box-shadow: 0 12px 32px rgba(0,0,0,.16); padding: 12px;
 }
 .sns-pop[hidden] { display: none; }
@@ -122,7 +136,7 @@
   width: 24px; height: 24px; border: 0; border-radius: 50%; background: transparent;
   color: var(--wx-muted); font-size: 12px; cursor: pointer;
 }
-.sns-pop-close:hover { background: #f0f0f0; color: var(--wx-text); }
+.sns-pop-close:hover { background: var(--wx-hover); color: var(--wx-text); }
 .sns-pop-foot {
   display: flex; align-items: center; gap: 8px; margin-top: 10px;
   padding-top: 10px; border-top: 1px solid var(--wx-line-soft);
@@ -133,10 +147,10 @@
 .sns-quick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .sns-quick button {
   height: 26px; padding: 0 10px; border-radius: 13px; border: 1px solid var(--wx-line);
-  background: #fff; color: var(--wx-sub); font-size: 12px; cursor: pointer;
+  background: var(--wx-card); color: var(--wx-sub); font-size: 12px; cursor: pointer;
 }
-.sns-quick button:hover { border-color: #c8ccd4; color: var(--wx-text); }
-.sns-quick button.on { background: #f2f5fa; border-color: var(--wx-link); color: var(--wx-link); }
+.sns-quick button:hover { border-color: var(--wx-line-strong); color: var(--wx-text); }
+.sns-quick button.on { background: var(--wx-range); border-color: var(--wx-link); color: var(--wx-link); }
 
 /* 日历 */
 .sns-cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
@@ -144,12 +158,12 @@
   border: 0; background: transparent; font-size: 14px; font-weight: 700; color: var(--wx-text);
   cursor: pointer; padding: 2px 8px; border-radius: 4px;
 }
-.sns-cal-title:hover { background: #f0f0f0; }
+.sns-cal-title:hover { background: var(--wx-hover); }
 .sns-cal-nav {
   width: 26px; height: 26px; border: 1px solid var(--wx-line); border-radius: 50%;
-  background: #fff; color: var(--wx-sub); cursor: pointer;
+  background: var(--wx-card); color: var(--wx-sub); cursor: pointer;
 }
-.sns-cal-nav:hover { border-color: #c8ccd4; color: var(--wx-text); }
+.sns-cal-nav:hover { border-color: var(--wx-line-strong); color: var(--wx-text); }
 .sns-cal-week {
   display: grid; grid-template-columns: repeat(7, 1fr); font-size: 11px;
   color: var(--wx-muted); text-align: center; margin-bottom: 2px;
@@ -160,14 +174,14 @@
   height: 32px; border: 0; border-radius: 4px; background: transparent; cursor: pointer;
   font-size: 13px; color: var(--wx-text); position: relative;
 }
-.sns-cal-grid button.out { color: #d0d0d0; }
-.sns-cal-grid button:hover { background: #f0f0f0; }
+.sns-cal-grid button.out { color: var(--wx-bad-line); }
+.sns-cal-grid button:hover { background: var(--wx-hover); }
 .sns-cal-grid button.today::after {
   content: ''; position: absolute; left: 50%; bottom: 3px; width: 4px; height: 4px;
   margin-left: -2px; border-radius: 50%; background: var(--wx-link);
 }
 .sns-cal-grid button.sel { background: var(--wx-link); color: #fff; }
-.sns-cal-grid button.in-range { background: #e9edf5; }
+.sns-cal-grid button.in-range { background: var(--wx-range); }
 .sns-cal-grid button.edge { background: var(--wx-link); color: #fff; }
 
 /* 发布者面板 */
@@ -175,18 +189,18 @@
 .sns-user-tools .sns-search { flex: 1; }
 .sns-user-sort {
   height: 34px; max-width: 150px; border: 1px solid var(--wx-line); border-radius: 8px;
-  background: #fff; font-size: 12.5px; color: var(--wx-text); padding: 0 6px;
+  background: var(--wx-card); font-size: 12.5px; color: var(--wx-text); padding: 0 6px;
 }
 .sns-user-list { max-height: 320px; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
 .sns-user-row {
   display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 6px;
   cursor: pointer; border: 0; background: transparent; width: 100%; text-align: left;
 }
-.sns-user-row:hover { background: #f5f5f5; }
-.sns-user-row.on { background: #f2f5fa; }
+.sns-user-row:hover { background: var(--wx-hover); }
+.sns-user-row.on { background: var(--wx-range); }
 .sns-user-row .ava {
   width: 34px; height: 34px; border-radius: 5px; flex: none; overflow: hidden;
-  background: #dfe3e8; color: #fff; font-size: 13px; font-weight: 700;
+  background: var(--wx-badge); color: #fff; font-size: 13px; font-weight: 700;
   display: flex; align-items: center; justify-content: center; position: relative;
 }
 .sns-user-row .ava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -200,7 +214,7 @@
 .sns-export { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .sns-export select {
   height: 32px; border: 1px solid var(--wx-line); border-radius: 6px;
-  background: #fff; font-size: 13px; padding: 0 6px;
+  background: var(--wx-card); font-size: 13px; padding: 0 6px;
 }
 .sns-export .f-chk { font-size: 12.5px; color: var(--wx-sub); display: inline-flex; align-items: center; gap: 5px; }
 .sns-export .sns-conc { font-size: 12.5px; color: var(--wx-sub); display: inline-flex; align-items: center; gap: 5px; }
@@ -220,9 +234,9 @@
 .sns-btn-primary:disabled { opacity: .45; cursor: not-allowed; }
 .sns-btn-ghost {
   height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--wx-line);
-  background: #fff; color: var(--wx-sub); font-size: 12.5px; cursor: pointer;
+  background: var(--wx-card); color: var(--wx-sub); font-size: 12.5px; cursor: pointer;
 }
-.sns-btn-ghost:hover { border-color: #c8ccd4; color: var(--wx-text); }
+.sns-btn-ghost:hover { border-color: var(--wx-line-strong); color: var(--wx-text); }
 
 /* ── 动态列表（微信式）────────────────────────────────── */
 .sns-list {
@@ -236,7 +250,7 @@
 .sns-post:last-child { border-bottom: 0; }
 .sns-post .ava {
   width: 42px; height: 42px; border-radius: 6px; flex: none; overflow: hidden;
-  background: #dfe3e8; color: #fff; font-size: 15px; font-weight: 700;
+  background: var(--wx-badge); color: #fff; font-size: 15px; font-weight: 700;
   display: flex; align-items: center; justify-content: center; position: relative;
 }
 .sns-post .ava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -256,7 +270,7 @@
 .sns-media-cell { position: relative; display: block; }
 .sns-media-cell img, .sns-media-cell video {
   width: 100%; height: 100%; aspect-ratio: 1; object-fit: cover; display: block;
-  border-radius: 3px; background: #f0f0f0; cursor: zoom-in;
+  border-radius: 3px; background: var(--wx-hover); cursor: zoom-in;
 }
 .sns-media--1 .sns-media-cell img,
 .sns-media--1 .sns-media-cell video {
@@ -272,8 +286,8 @@
 .sns-media-cell .sns-media-bad {
   display: flex; align-items: center; justify-content: center; text-align: center;
   width: 100%; aspect-ratio: 1; padding: 6px; box-sizing: border-box;
-  border-radius: 3px; background: #f2f2f2; border: 1px dashed #d0d0d0;
-  color: #999; font-size: 11px; line-height: 1.35; cursor: help;
+  border-radius: 3px; background: var(--wx-bad-bg); border: 1px dashed var(--wx-bad-line);
+  color: var(--wx-bad-fg); font-size: 11px; line-height: 1.35; cursor: help;
 }
 .sns-media--1 .sns-media-cell .sns-media-bad {
   width: 160px; height: 160px; aspect-ratio: auto;
@@ -289,7 +303,7 @@
 .sns-likes .ic { color: var(--wx-live); margin-right: 4px; }
 .sns-likes .sep { color: var(--wx-link); }
 .sns-comments { padding: 2px 8px 6px; }
-.sns-comments.has-like { border-top: 1px solid #e9e9e9; padding-top: 5px; }
+.sns-comments.has-like { border-top: 1px solid var(--wx-line-soft); padding-top: 5px; }
 .sns-comment { font-size: 13px; line-height: 1.55; color: var(--wx-text); word-break: break-word; }
 .sns-comment + .sns-comment { margin-top: 2px; }
 .sns-comment b { color: var(--wx-link); font-weight: 600; }
@@ -307,9 +321,9 @@
   padding: 8px 10px; border-radius: 4px; background: var(--wx-inter);
   color: var(--wx-text); text-decoration: none;
 }
-a.sns-card:hover { background: #f0f0f0; }
+a.sns-card:hover { background: var(--wx-hover); }
 .sns-card-cover {
-  width: 60px; height: 60px; flex: none; object-fit: cover; border-radius: 3px; background: #e8e8e8;
+  width: 60px; height: 60px; flex: none; object-fit: cover; border-radius: 3px; background: var(--wx-badge);
 }
 .sns-card-body { min-width: 0; flex: 1; }
 .sns-card-tag { font-size: 11px; color: var(--wx-muted); }
@@ -329,12 +343,12 @@ a.sns-card:hover { background: #f0f0f0; }
 .sns-ops { margin-left: auto; position: relative; }
 .sns-ops-btn {
   width: 28px; height: 18px; border-radius: 3px; border: 0; cursor: pointer;
-  background: #eaeaea; color: var(--wx-link); font-size: 12px; line-height: 1; letter-spacing: 1px;
+  background: var(--wx-ops); color: var(--wx-link); font-size: 12px; line-height: 1; letter-spacing: 1px;
 }
-.sns-ops-btn:hover { background: #dedede; }
+.sns-ops-btn:hover { background: var(--wx-ops-hover); }
 .sns-ops-menu {
   position: absolute; right: 0; top: 22px; z-index: 20; min-width: 132px; padding: 4px 0;
-  background: #fff; border: 1px solid var(--wx-line); border-radius: 6px;
+  background: var(--wx-card); border: 1px solid var(--wx-line); border-radius: 6px;
   box-shadow: 0 6px 20px rgba(0,0,0,.14);
 }
 .sns-ops-menu[hidden] { display: none; }
@@ -342,15 +356,15 @@ a.sns-card:hover { background: #f0f0f0; }
   display: block; width: 100%; padding: 7px 12px; border: 0; background: transparent;
   text-align: left; font-size: 13px; color: var(--wx-text); cursor: pointer; white-space: nowrap;
 }
-.sns-ops-menu button:hover { background: #f5f5f5; }
+.sns-ops-menu button:hover { background: var(--wx-hover); }
 
 .sns-loading, .sns-empty { padding: 40px 0; text-align: center; color: var(--wx-muted); font-size: 13px; }
 .sns-more {
   align-self: center; margin: 4px 0 12px; height: 34px; padding: 0 22px;
-  border: 1px solid var(--wx-line); border-radius: 17px; background: #fff;
+  border: 1px solid var(--wx-line); border-radius: 17px; background: var(--wx-card);
   color: var(--wx-sub); font-size: 13px; cursor: pointer;
 }
-.sns-more:hover { border-color: #c8ccd4; color: var(--wx-text); }
+.sns-more:hover { border-color: var(--wx-line-strong); color: var(--wx-text); }
 
 /* ── 详情弹层 ─────────────────────────────────────────── */
 .sns-modal { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; }
@@ -387,4 +401,38 @@ a.sns-card:hover { background: #f0f0f0; }
   .sns-media--3, .sns-media--n { grid-template-columns: repeat(3, 1fr); }
   .sns-media--1 .sns-media-cell img { max-width: 200px; }
   .sns-account { max-width: 140px; }
+}
+
+/* ── 暗色主题：宿主 [data-theme="dark"] 时整页换深色墨水 ─────────
+   页面所有规则都引用 --wx-* 变量，这里只需覆盖变量本身。
+   链接蓝提亮到 8aa6d3 一档，保证深底上的可读性；其余灰阶整体反转。 */
+html[data-theme="dark"] .sns-page {
+  --wx-bg: #131313;
+  --wx-card: #1e1e1e;
+  --wx-line: #333333;
+  --wx-line-soft: #2a2a2a;
+  --wx-text: #e8e8e8;
+  --wx-muted: #6f6f6f;
+  --wx-sub: #9a9a9a;
+  --wx-link: #8aa6d3;
+  --wx-inter: #242424;
+  --wx-live: #fa5151;
+  --wx-line-strong: #4a4a4a;
+  --wx-hover: #2a2a2a;
+  --wx-clear: #454545;
+  --wx-badge: #383838;
+  --wx-bad-bg: #242424;
+  --wx-bad-line: #454545;
+  --wx-bad-fg: #8a8a8a;
+  --wx-ops: #333333;
+  --wx-ops-hover: #404040;
+  --wx-warn-bg: #322b17;
+  --wx-warn-border: #4d421f;
+  --wx-warn-fg: #d3b662;
+  --wx-range: #2d3850;
+}
+/* 暗色下链接蓝已提亮，实心按钮若沿用会和白字对比不足，压回一档 */
+html[data-theme="dark"] .sns-btn-primary {
+  background: #4a6499;
+  border-color: #4a6499;
 }

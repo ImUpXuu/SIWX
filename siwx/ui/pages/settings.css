@@ -17,6 +17,8 @@
 }
 .ov-row:first-child { border-top: none; }
 .ov-row .dim { word-break: break-word; }
+/* 版本号/状态徽章独占一行中间列时会被 grid 拉伸成整条黑带，收回到内容宽度 */
+.ov-row .pill, .ov-row .badge { justify-self: start; }
 
 /* ── 插件设置块 ───────────────────────────────── */
 .plg-block {

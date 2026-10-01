@@ -1,11 +1,14 @@
 /* MCP 配置页 —— 左侧会话列表 + 右侧配置/工具开关 + 调用日志 */
-const { esc, fetchJSON, fmtTs } = window.SX;
+import { createDropdown } from '/widgets.js?v=2026100203';
+
+const { esc, fetchJSON, fmtTs, fmtListTs } = window.SX;
 
 function el(id) { return document.getElementById(id); }
 
 let account = null;
 let sessions = [];
 let pollTimer = null;
+let accDrop = null;
 
 async function loadSessions() {
   if (!account) return;
@@ -26,18 +29,20 @@ function renderSessions(kw) {
       <div class="ava">${esc(initials)}</div>
       <span class="name">${esc(s.display)}</span>
       <span class="prev">${esc(s.preview || '')}</span>
-      <span class="tm">${fmtTs(s.last_time)}</span>
+      <span class="tm">${fmtListTs(s.last_time)}</span>
     </div>`;
   }).join('') : '<div class="c-empty">没有匹配的会话</div>';
 }
 
 async function load() {
+  accDrop = createDropdown({ options: [], placeholder: '选择账号', label: '微信账号' });
+  el('m-account').appendChild(accDrop.el);
+  accDrop.onChange = (v) => { account = v; loadSessions(); };
   try {
     const { accounts } = await fetchJSON('/api/chat/accounts');
-    el('m-account').innerHTML = accounts.map(a =>
-      `<option value="${esc(a.wxid)}">${esc(a.wxid)}</option>`).join('');
+    accDrop.options = accounts.map(a => ({ value: a.wxid, label: a.wxid }));
     if (accounts.length) {
-      account = accounts[0].wxid;
+      account = accDrop.value;
       await loadSessions();
     } else {
       el('m-sessions').innerHTML = '<div class="c-empty">无解密产物</div>';
@@ -45,7 +50,6 @@ async function load() {
   } catch (e) {
     el('m-sessions').innerHTML = `<div class="c-empty">${esc(e.message)}</div>`;
   }
-  el('m-account').addEventListener('change', () => { account = el('m-account').value; loadSessions(); });
   el('m-search').addEventListener('input', () => renderSessions(el('m-search').value));
 
   try {

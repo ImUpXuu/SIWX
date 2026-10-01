@@ -7,7 +7,7 @@
  */
 (function () {
   const PAGES_BUILTIN = ['guide', 'chat', 'sns', 'stats', 'export', 'mcp', 'logs', 'settings'];
-  const UI_VERSION = '2026092501';
+  const UI_VERSION = '2026100203';
   // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
   const DISCLAIMER_VERSION = '20260925';
 
@@ -134,10 +134,15 @@
       view.innerHTML = html;
     };
     // 切页过渡：View Transitions API（Chrome/Edge 原生，零依赖）；
-    // 不支持 / 用户要求减少动态效果时，降级为 CSS 淡入
+    // 不支持 / 用户要求减少动态效果时，降级为 CSS 淡入。
+    // ready/finished 的 abort 拒绝（快速连续切页时发生）是预期内的，单独吞掉，
+    // 避免以 unhandledrejection 的形式污染控制台。
     if (document.startViewTransition && !prefersReducedMotion()) {
       try {
-        await document.startViewTransition(doSwap).updateCallbackDone;
+        const vt = document.startViewTransition(doSwap);
+        vt.ready?.catch?.(() => {});
+        vt.finished?.catch?.(() => {});
+        await vt.updateCallbackDone;
       } catch (e) {
         doSwap();
       }
