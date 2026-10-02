@@ -14,7 +14,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-from siwx import media, voice
+from siwx import logger, media, voice
 from siwx.api_chat import (
     KIND_MAP, SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
     _parse_appmsg, _parse_refer, _sender_map, _fmt, owner_base, shards_for,
@@ -68,9 +68,15 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
     if t == 57:
         quote = _parse_refer(text)
     if t == 49:
-        title, url, des = _parse_appmsg(text)
-        if title or url:
-            link = {"title": title or "链接", "url": url, "desc": des}
+        if "<refermsg>" in text:
+            # 微信 5.0 库里引用消息外层是 49，引用信息在内层 <refermsg>；
+            # 必须走引用分支并跳过 link 卡片，否则"谁引用了什么"全部丢失
+            # （实测全量导出 31437 条内层 57 的引用消息外层全部为 49）。
+            quote = _parse_refer(text)
+        else:
+            title, url, des = _parse_appmsg(text)
+            if title or url:
+                link = {"title": title or "链接", "url": url, "desc": des}
 
     return {
         "localId": local_id,
@@ -104,8 +110,9 @@ def count_messages(acc, chat):
                     f'SELECT COUNT(*) FROM [{table}]').fetchone()[0]
             finally:
                 conn.close()
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            logger.warn("export", f"[export] 分片打开失败，该分片消息可能缺失: "
+                                  f"{Path(db).name}: {e}")
     return total
 
 

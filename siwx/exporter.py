@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from siwx import media, voice
+from siwx import logger, media, voice
 from siwx import paths as _paths
 from siwx.api_chat import _contact_names
 from siwx.export_stream import (
@@ -99,6 +99,39 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
     return count, first_ts, last_ts, senders, images, voices
 
 
+def _attach_media(msg: dict, media_map: dict) -> None:
+    """按消息类型回填 mediaFile，防跨分片 local_id 撞号错挂。
+
+    导出管线只产出图片(3/47)与语音(34)两类媒体文件，而媒体映射以 localId
+    为键；多分片会话中各分片的 local_id 独立编号会撞号——文本/链接/系统
+    消息一旦撞上键，就会被挂上属于其它消息的图片（实测某会话 885 条）。
+    图片槽位与语音槽位也互斥，防图片/语音之间串型。
+    已知残留：同为图片的两条消息跨分片撞号时仍会共享同一张图，彻底解决
+    需要把映射键升级为 (md5, localId, ts) 组合键。"""
+    t = msg.get("localType")
+    if t not in (3, 47, 34):
+        return
+    mf = media_map.get(msg.get("localId"))
+    if not mf:
+        return
+    if (t == 34) != ("/voice_" in mf):
+        return
+    msg["mediaFile"] = mf
+
+
+def _log_media_failures(kind: str, failures: list, total: int) -> None:
+    """聚合记录媒体失败（原因分布），终结导出失败全静默的盲区。"""
+    if not failures:
+        return
+    reasons = {}
+    for r in failures:
+        reasons[r] = reasons.get(r, 0) + 1
+    top = "; ".join(f"{k} ×{v}" for k, v in
+                    sorted(reasons.items(), key=lambda kv: -kv[1])[:3])
+    logger.warn("export",
+                f"[export] {kind}处理失败 {len(failures)}/{total}: {top}")
+
+
 def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=None):
     """并行解密媒体图片。CPU 密集型 AES → 多进程池。"""
     dest.mkdir(parents=True, exist_ok=True)
@@ -124,41 +157,49 @@ def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=N
     from multiprocessing import Pool
 
     media_map = {}
+    failures = []
     with Pool(n) as pool:
         for i, result in enumerate(pool.imap_unordered(_decrypt_one, tasks)):
-            local_id, rel_path, ok = result
+            local_id, rel_path, ok, reason = result
             if ok:
                 media_map[local_id] = rel_path
+            else:
+                failures.append(reason)
             if (i + 1) % 10 == 0 and progress:
                 progress(0, f"媒体 {i + 1}/{len(images)}")
+    _log_media_failures("图片", failures, len(images))
     return media_map
 
 
 def _decrypt_media_serial(acc_out_dir, account, chat, images, dest, progress=None):
     """串行解密（单核兜底）。"""
     media_map = {}
+    failures = []
     for i, (md5, bubble_md5, local_id, ts) in enumerate(images):
         fn = f"{i:04d}_{(md5 or 'img')[:12]}.jpg"
         dst = dest / fn
-        out = _try_decrypt(acc_out_dir, account, chat, md5, bubble_md5,
-                           local_id, ts, dst)
+        out, reason = _try_decrypt(acc_out_dir, account, chat, md5, bubble_md5,
+                                   local_id, ts, dst)
         if out:
             media_map[local_id] = f"media/{out.name}"
+        else:
+            failures.append(reason)
         if (i + 1) % 10 == 0 and progress:
             progress(0, f"媒体 {i + 1}/{len(images)}")
+    _log_media_failures("图片", failures, len(images))
     return media_map
 
 
 def _decrypt_one(task):
-    """单张图片解密（子进程入口）。返回实际落盘文件名。"""
+    """单张图片解密（子进程入口）。返回 (local_id, 相对路径, 是否成功, 失败原因)。"""
     acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst = task
-    out = _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts,
-                       Path(dst))
-    return (local_id, f"media/{out.name}" if out else "", out is not None)
+    out, reason = _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id,
+                               ts, Path(dst))
+    return (local_id, f"media/{out.name}" if out else "", out is not None, reason)
 
 
 def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
-    """尝试解密单张图片。成功返回实际写出的 Path，失败返回 None。
+    """尝试解密单张图片。成功返回 (实际写出的 Path, "")，失败返回 (None, 原因)。
 
     Bug 修复：实际扩展名由图片内容决定（png/gif/jpg），必须把改写后的路径返回给
     调用方。原实现只返回 True/False，调用方却拿传入的 `.jpg` 占位名去拼 media
@@ -174,45 +215,51 @@ def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
             ext = "png" if "png" in ctype else ("gif" if "gif" in ctype else "jpg")
             dst = Path(dst).with_suffix(f".{ext}")
             dst.write_bytes(body)
-            return dst
-    except Exception:
-        pass
-    return None
+            return dst, ""
+        return None, "未找到源文件或解密为空"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _export_voice_media(acc_out_dir, account, chat, voices, dest, progress=None):
     """导出语音媒体：优先 WAV，缺少解码器时保留 SILK。"""
     dest.mkdir(parents=True, exist_ok=True)
     media_map = {}
+    failures = []
     for i, (local_id, svr_id, ts) in enumerate(voices):
-        out = _try_export_voice(acc_out_dir, chat, local_id, svr_id, ts,
-                                dest / f"voice_{i:04d}_{local_id or 'msg'}")
+        out, reason = _try_export_voice(acc_out_dir, chat, local_id, svr_id, ts,
+                                        dest / f"voice_{i:04d}_{local_id or 'msg'}")
         if out:
             media_map[local_id] = f"media/{out.name}"
+        else:
+            failures.append(reason)
         if (i + 1) % 10 == 0 and progress:
             progress(0, f"语音 {i + 1}/{len(voices)}")
+    _log_media_failures("语音", failures, len(voices))
     return media_map
 
 
 def _try_export_voice(acc_dir, chat, local_id, svr_id, ts, dst_base):
-    """读取并尝试转码一条语音。成功返回实际写出的 Path，失败返回 None。"""
+    """读取并尝试转码一条语音。成功返回 (实际写出的 Path, "")，失败返回 (None, 原因)。
+
+    转码失败不算失败：无本地解码器时保留清理后的 SILK 原文，供用户后续转换。"""
     try:
         body, info = voice.get_voice(Path(acc_dir), chat=chat or "",
                                      local_id=local_id or 0,
                                      svr_id=int(svr_id or 0), ts=ts or 0)
         if body is None:
-            return None
+            return None, "语音数据未找到"
         wav, meta = voice.transcode_voice(body, "wav")
         if wav is not None:
             dst = Path(dst_base).with_suffix(".wav")
             dst.write_bytes(wav)
-            return dst
+            return dst, ""
         # 无本地解码器时不阻塞导出，保留清理后的 SILK 原文，供用户后续转换。
         dst = Path(dst_base).with_suffix(".silk")
         dst.write_bytes(body)
-        return dst
-    except Exception:
-        return None
+        return dst, ""
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
@@ -297,7 +344,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
     def export_stream_with_media():
         for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
-            msg["mediaFile"] = media_map.get(msg["localId"])
+            _attach_media(msg, media_map)
             yield msg
 
     # ── 传入缓存的 names，避免重复加载 ───────────────────
@@ -325,6 +372,10 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         raise ValueError(f"未知格式: {fmt}")
 
     progress(88, f"写入完成: {written} 条")
+    if count and written != count:
+        logger.warn("export",
+                    f"[export] 条数对账不一致: 采集 {count} 条 vs 实际写出 "
+                    f"{written} 条（可能有分片读取失败、消息缺失，详见上方日志）")
 
     # ── 插件：导出后处理（before_zip）─────────────────────
     # 必须在打包 zip **之前**运行：zip 一旦生成会 rmtree 掉 export_dir，
@@ -452,7 +503,7 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
     first_ts = last_ts = 0
     # 复用外部传入的联系人缓存，避免重复读 contact.db。
     for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
-        msg["mediaFile"] = media_map.get(msg["localId"])
+        _attach_media(msg, media_map)
         batch.append(msg)
         count += 1
         ts = msg.get("createTime", 0) or 0
@@ -505,7 +556,7 @@ def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, n
     lines.append("")
     count = 0
     for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
-        msg["mediaFile"] = media_map.get(msg["localId"])
+        _attach_media(msg, media_map)
         count += 1
         lines.append("[[messages]]")
         lines.append(f"localId = {msg['localId']}")
@@ -541,7 +592,7 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
                   session["firstTimestamp"], session["lastTimestamp"]))
     count = 0
     for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
-        msg["mediaFile"] = media_map.get(msg["localId"])
+        _attach_media(msg, media_map)
         count += 1
         conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                      (msg["localId"], msg["createTime"],
@@ -567,7 +618,7 @@ def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, med
     ws.append(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
     count = 0
     for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
-        msg["mediaFile"] = media_map.get(msg["localId"])
+        _attach_media(msg, media_map)
         count += 1
         ws.append([msg["localId"],
                    datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),

@@ -673,6 +673,16 @@ def _log_item_text(item) -> str:
     return str(item[3] if len(item) >= 4 else item[1])
 
 
+def _desensitize_item(item):
+    """对单条日志条目的文本部分脱敏。
+
+    重建列表而非原地改：环形缓冲 / 文件缓冲与这里共享同一批 entry 对象，
+    原地改会把脱敏写回底层缓冲（污染 export_logs 的 desensitize=0 通道）。"""
+    if len(item) >= 4:
+        return [item[0], item[1], item[2], log.desensitize_msg(str(item[3]))]
+    return [item[0], log.desensitize_msg(str(item[1]))]
+
+
 @app.get("/api/logs")
 def api_logs():
     """返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）。"""
@@ -695,6 +705,9 @@ def api_logs():
             continue
         seen.add(key)
         merged.append(item)
+    # 日志页统一脱敏：账号标识（含 wxalias_xxx 类自定义微信号）、密钥、路径
+    # 不随截图/粘贴外泄。导出日志另有 desensitize=0 通道可拿原文。
+    merged = [_desensitize_item(item) for item in merged]
     return jsonify({"logs": merged[-limit:], "level": log.get_level().value})
 
 
@@ -710,6 +723,9 @@ def api_log_settings_save():
     data = request.get_json(silent=True) or {}
     level = data.get("level", "rough")
     log.set_level(log.LogLevel.DETAILED if level == "detailed" else log.LogLevel.ROUGH)
+    # 级别切换必须同时作用于 siwx.log：此前文件日志恒 DEBUG，UI 里切换等于没切
+    logging.getLogger("siwx").setLevel(
+        logging.DEBUG if level == "detailed" else logging.INFO)
     return jsonify({"level": log.get_level().value})
 
 

@@ -305,12 +305,22 @@ def _fmt(ltype: int, text: str) -> str:
     if t == 57:
         # 引用消息：用户回复文本在 <title>，被引用部分由 quote 字段单独承载
         m = re.search(r"<title>(.*?)</title>", text, re.S)
-        return m.group(1).strip() if m else (text or "[引用]")
+        if m:
+            return _xml_text(m.group(1)) or "[引用]"
+        return text or "[引用]"
     if t in (10000, 10002):
         return text or "[系统消息]"
     if t == 49:
+        if "<refermsg>" in text:
+            # 引用消息（外层 49、内层 57）：与 t==57 同口径，只取回复文本，
+            # 不带 "[链接]" 前缀；CDATA 由 _xml_text 一并剥离
+            m = re.search(r"<title>(.*?)</title>", text, re.S)
+            return (_xml_text(m.group(1)) if m else None) or "[引用]"
         m = re.search(r"<title>(.*?)</title>", text, re.S)
-        return f"[链接] {m.group(1).strip()}" if m else "[链接]"
+        if m:
+            # 剥离 CDATA 包装，避免 content 出现 <![CDATA[...]]> 原文
+            return f"[链接] {_xml_text(m.group(1))}".rstrip()
+        return "[链接]"
     return FALLBACK_LABEL.get(t, f"[类型{t}]")
 
 
@@ -555,12 +565,17 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
         if t == 57:
             quote = _parse_refer(text)
         if t == 49:
-            title, url, des = _parse_appmsg(text)
-            if title or url:
-                link = {"title": title or "链接", "url": url, "desc": des}
+            if "<refermsg>" in text:
+                # 微信 5.0 库里引用消息外层是 49（与 export_stream._enrich_row
+                # 同口径），走引用分支并跳过 link 卡片
+                quote = _parse_refer(text)
+            else:
+                title, url, des = _parse_appmsg(text)
+                if title or url:
+                    link = {"title": title or "链接", "url": url, "desc": des}
 
         kind = KIND_MAP.get(t, "text")
-        if t == 57:
+        if t == 57 or (t == 49 and quote):
             kind = "quote"
         elif t == 49 and link and link.get("url"):
             kind = "link"
@@ -697,12 +712,17 @@ def messages():
         if t == 57:
             quote = _parse_refer(text)
         if t == 49:
-            title, url, des = _parse_appmsg(text)
-            if title or url:
-                link = {"title": title or "链接", "url": url, "desc": des}
+            if "<refermsg>" in text:
+                # 微信 5.0 库里引用消息外层是 49（与 export_stream._enrich_row
+                # 同口径），走引用分支并跳过 link 卡片
+                quote = _parse_refer(text)
+            else:
+                title, url, des = _parse_appmsg(text)
+                if title or url:
+                    link = {"title": title or "链接", "url": url, "desc": des}
 
         kind = KIND_MAP.get(t, "text")
-        if t == 57:
+        if t == 57 or (t == 49 and quote):
             kind = "quote"
         elif t == 49 and link and link.get("url"):
             kind = "link"

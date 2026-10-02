@@ -318,7 +318,7 @@ _HTML_RENDERER = r"""
     html += '<div class="msg-bubble">';
     if (isGroup && !msg.isSend) html += '<div class="msg-sender">'+esc(name)+'</div>';
     html += '<div class="bubble-body">';
-    if (msg.quote) html += '<div class="msg-quote"><div class="qn">'+esc(msg.quote.sender)+'</div>'+esc(msg.quote.content)+'</div>';
+    if (msg.quote) html += '<div class="msg-quote"><div class="qn">'+esc(msg.quote.sender || msg.quote.displayname || '')+'</div>'+esc(msg.quote.content)+'</div>';
     html += renderContent(msg);
     html += '<div class="msg-time">'+fmtTime(msg.timestamp)+'</div>';
     html += '</div></div></div>';
@@ -357,9 +357,14 @@ _HTML_RENDERER = r"""
       return '<div class="wx-card"><div class="wx-card-left">📍</div><div class="wx-card-right"><div class="wx-card-title">'+esc(content.replace(/^\[位置\]\s*/,''))+'</div><div class="wx-card-sub">位置共享</div></div></div>';
     // 链接 / 小程序 / 文件
     if (t === 49) {
-      var title = xmlVal(raw, 'title') || content;
-      var url = xmlVal(raw, 'url');
-      var des = xmlVal(raw, 'des');
+      // 引用消息（外层 49、内层 57）：正文走纯文本，引用块由 .msg-quote 呈现，
+      // 不再落入链接卡片分支（此前被错挂图片时整卡被顶掉）
+      if (msg.quote) return esc(content) || '<em style="opacity:.5">引用</em>';
+      // 优先复用预解析的 link 字段（单一数据源），rawContent 仅作旧数据兜底
+      var lk = msg.link || {};
+      var title = lk.title || xmlVal(raw, 'title') || content;
+      var url = lk.url || xmlVal(raw, 'url');
+      var des = lk.desc || xmlVal(raw, 'des');
       var html = '<div class="wx-card"><div class="wx-card-left">🔗</div><div class="wx-card-right">';
       html += '<div class="wx-card-title">'+esc(title)+'</div>';
       if (des) html += '<div class="wx-card-sub">'+esc(des.substring(0,80))+'</div>';
