@@ -21,12 +21,16 @@
       "db_dir": "C:/Users/.../db_storage",
       "db_count": 32,
       "keys_cached": 30,
-      "total_salts": 32
+      "total_salts": 32,
+      "manual": false
     }
   ],
-  "stored_salts": 32
+  "stored_salts": 32,
+  "conflicts": []
 }
 ```
+
+`manual`：是否为手动添加的数据目录；`conflicts`：同名账号冲突列表（多个 db_dir 共用 `output/<wxid>/`，解密会互相覆盖）。
 
 ---
 
@@ -37,8 +41,8 @@
 ```json
 // 请求
 {
-  "mode": "auto",          // "keys" / "decrypt" / "auto" / "sync" / "export"
-  "db_dir": null,          // 可选，指定单账号
+  "mode": "auto",          // "keys" / "decrypt" / "auto" / "sync" / "export" / "sns_export"
+  "db_dir": null,          // 可选，指定单账号（sns_export 忽略此参数）
   "out_dir": null,         // 可选，默认 ./output
   "no_cache": false,
   "workers": null,
@@ -63,11 +67,50 @@
 {"error": "已有任务在运行"}, 409
 ```
 
+`mode=sns_export` 时 `export_opts` 传朋友圈导出参数，见 [POST /api/sns/export](#post-api_snsexport)；该模式只依赖已解密产物，不做全盘扫描。
+
+---
+
+### `GET /api/job`
+
+**当前任务状态**（前端每 800ms 轮询，展示进度与最后一条日志）。
+
+```json
+// 响应
+{
+  "running": true,
+  "done": false,
+  "ok": false,
+  "mode": "sns_export",
+  "logs": ["[sns] 12/40 媒体 ..."],
+  "report": null
+}
+```
+
+`done=true` 后 `report` 携带本次任务的报告对象（聊天导出 / 朋友圈导出形状不同）。
+
+---
+
+### `POST /api/discover/validate`
+
+**验证并保存手动输入的微信存储路径**（引导页"找不到账号"时使用）。
+
+```json
+// 请求
+{"path": "D:/xwechat_files/wxid_xxx_1234"}
+
+// 响应：校验结果对象（合法则持久化，下次启动直接识别）
+```
+
 ---
 
 ### `GET /api/logs`
 
-**环形日志缓冲**。
+**合并日志流**：文件日志（siwx.log tail）+ 环形任务日志 + MCP 调用日志 + 结构化日志，按时间排序去重。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `limit` | 返回条数（最大 5000） | 2000 |
 
 ```json
 // 响应
@@ -75,9 +118,36 @@
   "logs": [
     [1725600000000, "[cipher] 扫描完成"],
     [1725600000100, "…"]
-  ]
+  ],
+  "level": "rough"
 }
 ```
+
+历史版本曾把浏览器探测 / 旧资源 404 记录成 ERROR，该类噪音行已过滤不返回。
+
+---
+
+### `GET /api/logs/settings` / `POST /api/logs/settings`
+
+**读取 / 设置日志模式**（粗略 `rough` / 详细 `detailed`）。
+
+```json
+// POST 请求
+{"level": "detailed"}
+// 响应
+{"level": "detailed"}
+```
+
+---
+
+### `GET /api/logs/export`
+
+**导出脱敏日志**（text/plain 附件，文件名 `siwx_log.txt`）。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `start` / `end` | 时间范围（unix 秒） | 不限 |
+| `desensitize` | 是否脱敏（`1`/`0`） | `1` |
 
 ---
 
@@ -161,6 +231,58 @@
 
 ---
 
+### `GET /api/chat/timeline?account=&chat=&month=`
+
+**单个会话时间轴**：默认只按月聚合（快），展开某月时传 `month` 查该月的日期分布。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `account` | 账号 wxid | 必填 |
+| `chat` | 会话 username | 必填 |
+| `month` | 月份（`YYYY-MM`），传则返回按日聚合 | 不传 |
+
+```json
+// 响应（不传 month；传 month 时 "months" 换成 "days"，并附 "month" 字段）
+{
+  "account": "wxid_xxx",
+  "chat": "wxid_yyy",
+  "total": 1234,
+  "ts_min": 1700000000,
+  "ts_max": 1725600000,
+  "months": [
+    {"month": "2026-09", "count": 320, "first_ts": 1725148800, "last_ts": 1725600000}
+  ]
+}
+```
+
+非法 `month` 返回 400；账号未解密返回 404。
+
+---
+
+### `GET /api/chat/stats?account=&chat=`
+
+**单个会话统计**（聊天页右上角弹窗）。
+
+```json
+// 响应
+{
+  "account": "wxid_xxx",
+  "chat": "wxid_yyy",
+  "display": "张三",
+  "total": 1234,
+  "sent": 620,
+  "received": 614,
+  "first_ts": 1700000000,
+  "last_ts": 1725600000,
+  "active_days": 210,
+  "busiest_day": {"day": "2026-09-06", "count": 45},
+  "busiest_hour": 21,
+  "types": [{"type": 1, "label": "文本", "count": 900}]
+}
+```
+
+---
+
 ### `GET /api/chat/avatar?account=&username=`
 
 **联系人头像**（明文 JPEG）。
@@ -216,7 +338,246 @@
 
 ---
 
+## 朋友圈（SNS）
+
+> 朋友圈媒体与聊天图片是**两套完全独立的加密体系**（ISAAC64 vs AES-ECB+XOR），接口形状也不同。原理见 [module-sns.md](./module-sns.md)。
+
+### `GET /api/sns/accounts`
+
+**有朋友圈数据的账号列表**（扫 `output/<账号>/sns/sns.db`）。
+
+```json
+// 响应
+{"accounts": [{"wxid": "wxid_xxx", "count": 5684}]}
+```
+
+---
+
+### `GET /api/sns/timeline?account=&before_tid=&limit=&keyword=&username=&start=&end=`
+
+**时间线**（游标分页，按 tid 倒序）。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `account` | 账号 wxid | 必填 |
+| `before_tid` | 上一页最后一条的 tid，加载更早 | 不传 |
+| `limit` | 每页条数（最大 100） | 20 |
+| `keyword` | 关键词（匹配正文 + 卡片字段 + 媒体描述 + 位置） | 不传 |
+| `username` | 发布者过滤（SQL 下推） | 不传 |
+| `start` / `end` | 时间范围（unix 秒或 `YYYY-MM-DD`，end 补到 23:59:59） | 不传 |
+
+```json
+// 响应
+{
+  "timeline": [ { "tid": 123, "ts_ms": 1725600000000, "ts": 1725600000,
+                  "user_name": "wxid_yyy", "contentDesc": "…",
+                  "card": {…}, "medias": […], "likes": […], "comments": […] } ],
+  "next_before_tid": 122,
+  "has_more": true
+}
+```
+
+实现要点：发布者与时间范围下推到 SQL（tid 内含毫秒时间戳）；关键词需逐条解析 XML（无法下推），设 `KEYWORD_MAX_SCAN=5000` 上限兜底；`card` 统一走 `sns.public_card()` 形状（与导出一致）。`GET /api/sns/search` 复用本接口。
+
+---
+
+### `GET /api/sns/detail?account=&tid=`
+
+**单条动态完整详情**（不截断评论；列表流只显示最近 20 条）。
+
+```
+200: {"post": {…同 timeline 单条，含完整 likes/comments…}}
+404: 动态不存在 ｜ 400: tid 无效 ｜ 422: XML 无法解析
+```
+
+---
+
+### `GET /api/sns/media?account=&url=&key=&token=`
+
+**代理下载朋友圈媒体**（图片 / 视频 / 实况），带磁盘缓存（`output/<账号>/sns_media/`）。
+
+| 参数 | 说明 |
+|---|---|
+| `url` | 动态 XML 里的媒体 URL（**必须是微信 CDN 域名**） |
+| `key` / `token` | XML 里的 `key` 属性 / `token` 属性（ISAAC64 种子与下载凭据） |
+
+```
+200: 媒体字节流（响应头 X-SIWX-SNS-Encrypted / X-SIWX-SNS-Cached）
+400: 非 CDN 地址（reason=not-cdn，防任意 URL 代理）
+404/400/502: CDN 侧失败（附 reason / hosts_tried，失败已落 logs/siwx.log）
+```
+
+---
+
+### `GET /api/sns/emoji?account=&emoji=`
+
+**按需获取评论表情**（明文 `url` 优先——实测表情直链无需解密；`encrypt_url + aes_key` 仅备用）。
+
+| 参数 | 说明 |
+|---|---|
+| `emoji` | JSON 对象（含 `url` 或 `encrypt_url`，来自动态 XML 的 `sns_emoji_data` 结构化节点） |
+
+```
+200: 表情字节流（响应头 X-SIWX-SNS-Via: plain/cache）
+400: 缺参 / JSON 非法 ｜ 502: 下载失败
+```
+
+注意：表情域名（`vweixinf.tc.qq.com` 等）不同于朋友圈图床（`mmsns.qpic.cn`），不适用 CDN 域名回退。
+
+---
+
+### `GET /api/sns/friends?account=&limit=&names=`
+
+**发布者聚合列表**（纯 SQL GROUP BY，实测 ~111ms vs 全量解析 1230ms）。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `account` | 账号 wxid | 必填 |
+| `limit` | 条数（最大 2000） | 200 |
+| `names` | `0` 时不解析联系人备注/昵称 | `1` |
+
+```json
+// 响应
+{"friends": [{"username": "wxid_yyy", "count": 120, "display": "张三", "has_avatar": true}],
+ "total": 113}
+```
+
+`has_avatar` 由后端批量查 head_image.db 得出（避免前端逐个请求刷 404）；排序在前端做（拼音依赖浏览器 `Intl.Collator`）。
+
+---
+
+### `GET /api/sns/stats?account=`
+
+**朋友圈统计**（动态总数、类型分布等，来自 `sns.timeline_stats()`）。
+
+---
+
+### `GET /api/sns/formats`
+
+**可用导出格式**。`{"formats": ["json", "markdown", "txt", "html"]}`。
+
+---
+
+### `POST /api/sns/export`
+
+**启动朋友圈导出任务**（异步，走任务槽，前端轮询 `GET /api/job`；已有任务时 409）。
+
+```json
+// 请求
+{
+  "account": "wxid_xxx",       // 必填
+  "format": "json",            // json / markdown / txt / html，默认 json
+  "media": true,               // 是否一并导出媒体
+  "images": true, "videos": true, "livephotos": true,
+  "concurrency": 5,            // CDN 并发路数（自动钳制）
+  "keyword": null,             // 可选过滤
+  "username": null, "usernames": null,
+  "start": null, "end": null,  // unix 秒
+  "limit": null
+}
+
+// 响应
+{"started": true}
+// 或
+{"error": "已有任务在运行"}, 409 ｜ {"error": "账号或朋友圈数据库不存在"}, 404 ｜ 非法格式 400
+```
+
+导出产物落在 `paths.exports_root()`，媒体命名 `<tid>_<index>.<ext>`、实况视频 `<tid>_<i>_live.mp4`。
+
+---
+
+### `GET /api/sns/export/download?path=`
+
+**下载导出产物**。`relative_to(exports_root)` 越界校验：越界 403、不存在 404、缺参 400。
+
+---
+
+## 聊天统计（全账号）
+
+### `GET /api/stats/accounts`
+
+**可统计的账号列表**（有 `message/*.db` 分片的账号）。
+
+```json
+// 响应
+{"accounts": [{"wxid": "wxid_xxx", "shards": 3, "cached": true}]}
+```
+
+---
+
+### `GET /api/stats/overview?account=&start=&end=&refresh=`
+
+**统计概览**：总量、类型分布、月度趋势、活跃度、私聊发送者排行。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `account` | 账号 wxid | 必填 |
+| `start` / `end` | `YYYY-MM` 或 `YYYY-MM-DD`（填反自动对调） | 不限 |
+| `refresh` | `1` 时强制重算（否则走签名缓存） | 0 |
+
+统计失败返回 500 但不拖垮面板；账号无产物返回 404。
+
+---
+
+### `GET /api/stats/types?account=`
+
+**完整类型分布**（未归并，供明细表）：`{"total": 1234, "types": {…}}`。
+
+---
+
+### `POST /api/stats/refresh`
+
+**清统计缓存并重算**。`{"account": "wxid_xxx"}`（缺省清全部）→ `{"ok": true, …}`。
+
+---
+
+## 自动更新
+
+### `GET /api/update/check`
+
+**检查新版本**（响应禁止缓存，避免显示旧判断）。
+
+```json
+// 响应
+{
+  "has_update": true,
+  "current": "5.0.5",
+  "remote": "5.0.6",
+  "frozen": true,
+  "platform": "windows",
+  "update_available": true    // has_update && frozen（源码运行不提供一键更新）
+}
+```
+
+---
+
+### `POST /api/update/do`
+
+**执行更新**（仅 frozen 打包产物有意义）。请求体可空（重新拉取远程版本信息）。
+
+---
+
+### `GET /api/update/current`
+
+**当前版本信息**：`{"version": "5.0.5", "frozen": false, "platform": "windows"}`。
+
+---
+
 ## 导出
+
+### `GET /api/export/formats`
+
+**可用导出格式** = 内置 8 种 + 插件贡献（插件追加在内置之后，内置同名额优先）。
+
+```json
+// 响应
+{"formats": [
+  {"fmt": "json", "label": "JSON", "ext": "json", "owner": ""},
+  {"fmt": "demo", "label": "Demo 格式", "ext": "demo", "owner": "demo_stats"}
+]}
+```
+
+---
 
 ### `GET /api/export/list`
 
@@ -296,6 +657,20 @@
 
 ---
 
+### `GET /api/settings/env`
+
+**环境信息**（供「复制环境信息」按钮与 bug 报告）。
+
+```json
+// 响应
+{
+  "info": {…结构化环境信息…},
+  "text": "…已对路径中的用户名打码，可直接粘贴到公开 issue…"
+}
+```
+
+---
+
 ### `GET /api/settings/auto-sync`
 
 **读取自动刷新数据库配置**。
@@ -347,7 +722,7 @@
 
 ### `GET /api/mcp/info`
 
-**MCP 配置信息**：启动命令、客户端 JSON 配置、工具开关列表。
+**MCP 配置信息**：启动命令、客户端 JSON 配置、工具开关列表（**11 个内置**：6 聊天 + 5 朋友圈，另加插件贡献）。
 
 ```json
 // 响应
@@ -356,12 +731,17 @@
   "client_config": "{ \"mcpServers\": { ... } }",
   "config_path": "C:/Users/.../stories-in-wx/mcp_config.json",
   "tools": [
-    {"name": "get_status", "description": "获取运行状态", "enabled": true},
-    {"name": "list_accounts", "description": "列出已解密的账号", "enabled": true},
-    {"name": "list_sessions", "description": "列出某账号的全部会话", "enabled": true},
-    {"name": "get_messages", "description": "读取某会话的消息", "enabled": true},
-    {"name": "search_messages", "description": "按关键词搜索消息", "enabled": true},
-    {"name": "export_chat", "description": "导出某会话聊天记录", "enabled": true}
+    {"name": "get_status", "description": "获取运行状态", "owner": "", "enabled": true},
+    {"name": "list_accounts", "description": "列出已解密的账号", "owner": "", "enabled": true},
+    {"name": "list_sessions", "description": "列出某账号的全部会话", "owner": "", "enabled": true},
+    {"name": "get_messages", "description": "读取某会话的消息", "owner": "", "enabled": true},
+    {"name": "search_messages", "description": "按关键词搜索消息", "owner": "", "enabled": true},
+    {"name": "export_chat", "description": "导出某会话聊天记录", "owner": "", "enabled": true},
+    {"name": "list_sns_accounts", "description": "列出有朋友圈数据的账号", "owner": "", "enabled": true},
+    {"name": "get_sns_timeline", "description": "读取朋友圈时间线", "owner": "", "enabled": true},
+    {"name": "get_sns_detail", "description": "读取单条朋友圈动态详情", "owner": "", "enabled": true},
+    {"name": "get_sns_friends", "description": "按发布者聚合朋友圈动态", "owner": "", "enabled": true},
+    {"name": "export_sns", "description": "导出朋友圈到文件", "owner": "", "enabled": true}
   ]
 }
 ```
@@ -383,6 +763,17 @@
 | 字段 | 说明 |
 |---|---|
 | `tools` | `{工具名: 是否启用}`，未列出的工具保持原状 |
+
+---
+
+### `GET /api/mcp/logs?limit=`
+
+**MCP 调用日志**（最近 N 行，默认 200，最大 2000）。
+
+```json
+// 响应
+{"logs": ["2026-09-06 20:00:00 [INFO] …"], "path": "C:/.../mcp_server.log", "total": 12}
+```
 
 ---
 
@@ -526,5 +917,10 @@
 |---|---|
 | 200 | 成功 |
 | 400 | 参数错误 |
+| 403 | 路径越界（下载限制在 exports 根内） |
 | 404 | 资源不存在 |
 | 409 | 冲突（已有任务运行） |
+| 415 | 语音转码不可用（附 `fallback: "silk"`） |
+| 422 | 动态 XML 无法解析 |
+| 500 | 服务端错误（如统计失败） |
+| 502 | 上游失败（朋友圈 CDN / 表情下载） |

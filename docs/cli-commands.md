@@ -13,6 +13,7 @@ python run.py keys list                # 查看密钥库（打码）
 python run.py decrypt [--db-dir X] [--out DIR]
 python run.py serve [--port 8787]      # Web 控制台
 python run.py mcp                      # MCP 服务器（stdio, 供 AI 客户端接入）
+python run.py doctor                   # 打印环境信息（提 issue 时粘贴）
 ```
 
 **裸跑（双击 exe）**: 默认启动 Web 控制台。
@@ -169,7 +170,7 @@ python run.py mcp
 
 **说明**:
 - 协议: newline-delimited JSON-RPC 2.0（MCP 2024-11-05）
-- 工具: `get_status` / `list_accounts` / `list_sessions` / `get_messages` / `search_messages` / `export_chat`
+- 工具: **11 个内置**（6 聊天：`get_status` / `list_accounts` / `list_sessions` / `get_messages` / `search_messages` / `export_chat`；5 朋友圈：`list_sns_accounts` / `get_sns_timeline` / `get_sns_detail` / `get_sns_friends` / `export_sns`）
 - 客户端配置: 启动 Web 控制台 → MCP 页 → 复制配置 JSON
 
 **示例**:
@@ -188,15 +189,36 @@ echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' | python run.p
 
 ---
 
+## doctor — 环境信息
+
+```
+python run.py doctor
+```
+
+**流程**: 采集运行环境并打印（版本、Python、平台、微信状态、数据目录、密钥库等）。
+
+**参数**: 无。
+
+**说明**:
+- 输出中路径里的用户名已打码，可直接粘贴到公开 issue
+- Web 控制台等价入口：**设置 → 环境信息 → 📋 复制环境信息**（`GET /api/settings/env`）
+
+**示例**:
+```bash
+python run.py doctor
+```
+
+---
+
 ## 平台检查
 
 ```python
-if os.name != "nt":
-    print("stories-in-wx 依赖 Windows 平台接口...")
+if platform.system() not in ("Windows", "Darwin"):
+    print("stories-in-wx 仅支持 Windows 和 macOS。")
     return 1
 ```
 
-非 Windows 平台直接退出（macOS 版本仅为构建产物占位）。
+Windows 完整支持（config_cipher / memscan 策略）；macOS 支持 WeChat 4.1.80+（LLDB 断点捕获密钥，见 [MACOS_SUPPORT.md](../MACOS_SUPPORT.md)）；其他平台直接退出。
 
 ---
 

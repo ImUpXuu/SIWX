@@ -13,13 +13,14 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from siwx import __version__, paths
+from siwx import __version__, paths, sns
 from siwx.api_chat import (
     _contact_names, _decode_content, build_messages, message_tables_by_shard,
 )
@@ -267,6 +268,259 @@ def tool_export_chat(args) -> str:
     return _json(res)
 
 
+# ── 朋友圈（SNS）工具实现 ────────────────────────────────────────
+#
+# 与 api_sns.py 同源但独立于 flask：直接复用 sns.py 的非 flask 函数
+# （parse_ts_arg / ts_to_tid_bounds / parse_timeline / search_text /
+#  public_card / iter_authors / timeline_stats）。
+#
+# 设计红线（与聊天工具一致）：AI 客户端拿不到 CDN 媒体（MCP 返回纯文本），
+# 所以**所有形状都去掉 URL** —— 长 token 对 AI 只是无意义噪音。
+
+SNS_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
+SNS_KEYWORD_SCAN = 5000     # 关键词搜索最多解析的 XML 条数（实测 0.19ms/条，全库 5684 条约 1s）
+
+
+def _sns_db(account: str) -> Path:
+    """校验账号名并返回其 sns.db 路径；无效抛 ValueError。
+
+    与 api_sns._account_dir 同一条正则：account 只作为 output/<account>/
+    的单个路径组件使用，`../..` / `a\\b` 一律拒绝（路径穿越防护）。
+    """
+    if not account or not SNS_ACCOUNT_RE.fullmatch(account):
+        raise ValueError(f"账号名非法: {account!r}")
+    db = paths.out_root() / account / "sns" / "sns.db"
+    if not db.is_file():
+        raise ValueError(f"账号不存在或没有朋友圈数据库: {account}")
+    return db
+
+
+def _sns_ts(args: dict, key: str, end: bool = False):
+    """解析 start / end 参数（unix 秒或 YYYY-MM-DD）；end 传纯日期补到当日 23:59:59，
+    否则「今天到某天」会少掉一整天（与 api_sns._ts_arg 同规则）。"""
+    v = args.get(key)
+    if v in (None, ""):
+        return None
+    ts = sns.parse_ts_arg(v)
+    if ts is None:
+        return None
+    if end and isinstance(v, str) and re.fullmatch(r"\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*", v):
+        ts += 86399
+    return ts
+
+
+def _slim_card(card: dict | None) -> dict | None:
+    """public_card 统一形状再去掉 CDN URL（AI 取不了媒体，URL 只浪费 token）。"""
+    out = sns.public_card(card)
+    if not out:
+        return None
+    for k in ("url", "cover"):
+        out.pop(k, None)
+    f = out.get("finder")
+    if f:
+        for k in ("avatar", "video_url", "media"):
+            f.pop(k, None)
+    return out
+
+
+def _slim_post(feed: dict) -> dict:
+    """feed → 精简形状（tid/ts/正文/卡片/位置/互动计数）。
+
+    评论与点赞正文**不在此返回**（timeline 一页 20 条 × 全量评论会淹没 token），
+    完整互动见 get_sns_detail。
+    """
+    medias = feed.get("medias") or []
+    loc = feed.get("location")
+    return {
+        "tid": feed.get("tid"),
+        "ts": feed.get("ts"),
+        "user_name": feed.get("user_name"),
+        "kind": feed.get("content_kind"),
+        "content_desc": feed.get("content_desc") or "",
+        "card": _slim_card(feed.get("card")),
+        "media_count": len(medias),
+        "has_live_photo": any(m.get("live_photo") for m in medias),
+        "location": (loc.get("name") or loc.get("address") or "") if loc else "",
+        "like_count": len(feed.get("likes") or []),
+        "comment_count": len(feed.get("comments") or []),
+    }
+
+
+def _detail_post(feed: dict) -> dict:
+    """feed → 完整详情（评论带正文，点赞只列人；URL 同样省略）。"""
+    out = _slim_post(feed)
+    out["comments"] = [
+        {"username": c.get("username"), "nickname": c.get("nickname"),
+         "content": c.get("content") or "", "ts": c.get("create_time"),
+         "reply_to": c.get("ref_username") or "",
+         "has_emoji": bool(c.get("emojis")),
+         "image_count": len(c.get("images") or [])}
+        for c in (feed.get("comments") or [])]
+    out["likes"] = [l.get("nickname") or l.get("username") or ""
+                    for l in (feed.get("likes") or [])]
+    return out
+
+
+def tool_list_sns_accounts(_args) -> str:
+    out = []
+    root = paths.out_root()
+    if root.is_dir():
+        for d in sorted(root.iterdir()):
+            db = d / "sns" / "sns.db"
+            if db.is_file():
+                try:
+                    st = sns.timeline_stats(db)
+                except Exception:
+                    st = {"count": 0}
+                out.append({"wxid": d.name, **st})
+    return _json({"accounts": out,
+                  "note": "count 为动态总数; newest 为最新动态 unix 秒"})
+
+
+def tool_get_sns_timeline(args) -> str:
+    account = args.get("account", "")
+    db = _sns_db(account)
+    limit = min(int(args.get("limit", 20) or 20), 100)
+    before = args.get("before_tid")
+    keyword = (str(args.get("keyword") or "")).strip().lower()
+    user = (str(args.get("username") or "")).strip()
+    start_ts = _sns_ts(args, "start")
+    end_ts = _sns_ts(args, "end", end=True)
+
+    # 发布者与时间范围下推 SQL（tid 内含毫秒时间戳，见 sns.ts_to_tid_bounds）；
+    # 关键词需逐条解析 XML，命中 limit 即停 + 扫描上限兜底（与 api_sns.timeline 同策略）。
+    where, qargs = [], []
+    if user:
+        where.append("user_name = ?")
+        qargs.append(user)
+    if before not in (None, ""):
+        try:
+            where.append("tid < ?")
+            qargs.append(int(before))
+        except (TypeError, ValueError):
+            raise ValueError("before_tid 无效（应为上次返回的 tid 整数）")
+    lo, hi = sns.ts_to_tid_bounds(start_ts, end_ts)
+    if lo is not None and hi is not None and (lo >= 0) != (hi >= 0):
+        lo = hi = None          # 跨 2004-11 正负分界（SNS 不可能）→ 回退 Python 过滤
+    if lo is not None:
+        where.append("tid >= ?")
+        qargs.append(lo)
+    if hi is not None:
+        where.append("tid <= ?")
+        qargs.append(hi)
+    sql = ("SELECT tid, user_name, content FROM SnsTimeLine"
+           + (" WHERE " + " AND ".join(where) if where else "")
+           + " ORDER BY tid DESC LIMIT ?")
+    qargs.append(SNS_KEYWORD_SCAN if keyword else limit)
+
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.text_factory = bytes
+    rows, scanned = [], 0
+    try:
+        for tid, who, content in con.execute(sql, qargs):
+            scanned += 1
+            if keyword and scanned > SNS_KEYWORD_SCAN:
+                break
+            feed = sns.parse_timeline(content)
+            if feed is None:
+                continue
+            ts_sec = sns.sns_id_to_seconds(tid)
+            if start_ts is not None and ts_sec < start_ts:
+                continue
+            if end_ts is not None and ts_sec > end_ts:
+                continue
+            feed.update(tid=tid, ts=ts_sec,
+                        user_name=(who or b"").decode("utf-8", "replace")
+                        if isinstance(who, bytes) else (who or ""))
+            if keyword and keyword not in sns.search_text(feed):
+                continue
+            rows.append(_slim_post(feed))
+            if len(rows) >= limit:
+                break
+    finally:
+        con.close()
+    return _json({
+        "account": account, "total": len(rows), "scanned": scanned,
+        "next_before_tid": rows[-1]["tid"] if rows else None,
+        "has_more": len(rows) >= limit,
+        "note": "tid 可作 before_tid 游标加载更早; SQLite 中 tid 为有符号 int64，可能是负数，原样传回即可",
+        "posts": rows,
+    })
+
+
+def tool_get_sns_detail(args) -> str:
+    account = args.get("account", "")
+    db = _sns_db(account)
+    try:
+        tid = int(args.get("tid", ""))
+    except (TypeError, ValueError):
+        raise ValueError("tid 无效（应为整数，来自 get_sns_timeline）")
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.text_factory = bytes
+    try:
+        row = con.execute("SELECT tid, user_name, content FROM SnsTimeLine WHERE tid=?",
+                          (tid,)).fetchone()
+    finally:
+        con.close()
+    if not row:
+        raise ValueError(f"动态不存在: {tid}")
+    feed = sns.parse_timeline(row[2])
+    if feed is None:
+        raise ValueError(f"动态 XML 无法解析: {tid}")
+    feed.update(tid=tid, ts=sns.sns_id_to_seconds(tid),
+                user_name=(row[1] or b"").decode("utf-8", "replace")
+                if isinstance(row[1], bytes) else (row[1] or ""))
+    return _json(_detail_post(feed))
+
+
+def tool_get_sns_friends(args) -> str:
+    account = args.get("account", "")
+    db = _sns_db(account)
+    limit = min(int(args.get("limit", 200) or 200), 2000)
+    rows = sns.iter_authors(db, limit=limit)
+    # 备注解析失败不影响列表（与 api_sns.friends 一致）
+    try:
+        names = _contact_names(paths.out_root() / account)
+        for r in rows:
+            r["display"] = names.get(r["username"]) or r["username"]
+    except Exception:  # noqa: BLE001
+        pass
+    for r in rows:
+        r.setdefault("display", r["username"])
+    return _json({"account": account, "total": len(rows),
+                  "note": "count 为该发布者的动态数; username 可用于 get_sns_timeline 的 username 过滤",
+                  "friends": rows})
+
+
+def tool_export_sns(args) -> str:
+    from siwx import sns_export
+    account = args.get("account", "")
+    db = _sns_db(account)
+    fmt = args.get("format", "json")
+    if fmt not in sns_export.FORMATS:
+        raise ValueError(f"不支持的格式: {fmt}（可用: {'/'.join(sns_export.FORMATS)}）")
+    usernames = args.get("username") or args.get("usernames")
+    if isinstance(usernames, str):
+        usernames = [usernames]
+    limit = args.get("limit")
+    try:
+        limit = int(limit) if limit not in (None, "") else None
+    except (TypeError, ValueError):
+        limit = None
+    keyword = str(args.get("keyword") or "").strip() or None
+    res = sns_export.run_sns_export(
+        db, account, fmt=fmt,
+        export_root=paths.exports_root(),
+        usernames=usernames,
+        start=_sns_ts(args, "start"),
+        end=_sns_ts(args, "end", end=True),
+        want_media=bool(args.get("media", False)),
+        limit=limit,
+        keyword=keyword,
+    )
+    return _json(res)
+
+
 TOOLS = [
     {"name": "get_status",
      "description": "获取运行状态：微信是否在线、已解密账号列表、密钥库条数",
@@ -305,6 +559,44 @@ TOOLS = [
                          "media": {"type": "boolean", "description": "是否解密图片，默认 false"},
                          "voice": {"type": "boolean", "description": "是否导出语音，默认 false"},
                          "avatars": {"type": "boolean", "description": "是否提取头像，默认 false"}}}},
+    {"name": "list_sns_accounts",
+     "description": "列出有朋友圈数据的账号（动态总数、最新动态时间）",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "get_sns_timeline",
+     "description": "读取朋友圈时间线（最新 N 条，支持关键词/发布者/时间范围过滤与游标分页）",
+     "inputSchema": {"type": "object", "required": ["account"],
+                     "properties": {
+                         "account": {"type": "string", "description": "账号 wxid"},
+                         "limit": {"type": "integer", "description": "条数上限，默认 20，最大 100"},
+                         "before_tid": {"type": "integer", "description": "上一页最后一条的 tid，加载更早的动态"},
+                         "keyword": {"type": "string", "description": "关键词（匹配正文/卡片标题/歌手/视频号昵称/位置/媒体描述）"},
+                         "username": {"type": "string", "description": "只看某位好友的动态（username 来自 get_sns_friends）"},
+                         "start": {"type": "string", "description": "开始时间（unix 秒或 YYYY-MM-DD）"},
+                         "end": {"type": "string", "description": "结束时间（unix 秒或 YYYY-MM-DD，纯日期补到当日末）"}}}},
+    {"name": "get_sns_detail",
+     "description": "读取单条朋友圈动态的完整详情（不截断评论；点赞/评论/表情齐全）",
+     "inputSchema": {"type": "object", "required": ["account", "tid"],
+                     "properties": {
+                         "account": {"type": "string", "description": "账号 wxid"},
+                         "tid": {"type": "integer", "description": "动态 tid，来自 get_sns_timeline"}}}},
+    {"name": "get_sns_friends",
+     "description": "按发布者聚合朋友圈动态（谁发了多少条，按数量降序，含备注昵称）",
+     "inputSchema": {"type": "object", "required": ["account"],
+                     "properties": {
+                         "account": {"type": "string", "description": "账号 wxid"},
+                         "limit": {"type": "integer", "description": "条数上限，默认 200，最大 2000"}}}},
+    {"name": "export_sns",
+     "description": "导出朋友圈到文件（json/markdown/txt/html），可选一并从 CDN 下载媒体，返回路径",
+     "inputSchema": {"type": "object", "required": ["account"],
+                     "properties": {
+                         "account": {"type": "string", "description": "账号 wxid"},
+                         "format": {"type": "string", "description": "json/markdown/txt/html，默认 json"},
+                         "keyword": {"type": "string", "description": "可选过滤关键词"},
+                         "username": {"type": "string", "description": "可选过滤发布者"},
+                         "start": {"type": "string", "description": "开始时间（unix 秒或 YYYY-MM-DD）"},
+                         "end": {"type": "string", "description": "结束时间（unix 秒或 YYYY-MM-DD）"},
+                         "limit": {"type": "integer", "description": "最多导出条数"},
+                         "media": {"type": "boolean", "description": "是否从 CDN 下载媒体（较慢），默认 false"}}}},
 ]
 
 _HANDLERS = {
@@ -314,6 +606,11 @@ _HANDLERS = {
     "get_messages": tool_get_messages,
     "search_messages": tool_search_messages,
     "export_chat": tool_export_chat,
+    "list_sns_accounts": tool_list_sns_accounts,
+    "get_sns_timeline": tool_get_sns_timeline,
+    "get_sns_detail": tool_get_sns_detail,
+    "get_sns_friends": tool_get_sns_friends,
+    "export_sns": tool_export_sns,
 }
 
 

@@ -1148,5 +1148,162 @@ class TestSnsCdnDiagnosis(unittest.TestCase):
             tmp.cleanup()
 
 
+class TestSnsMcp(unittest.TestCase):
+    """MCP 层：直接调用 mcp_server 的 SNS 工具处理函数（不经 HTTP）。"""
+
+    def setUp(self):
+        import tempfile
+        from siwx import paths
+        self._tmp = tempfile.TemporaryDirectory(prefix="siwx_sns_mcp_",
+                                                ignore_cleanup_errors=True)
+        self._old_root = os.environ.get("SIWX_ROOT")
+        os.environ["SIWX_ROOT"] = self._tmp.name
+        paths._PATH_CACHE.clear()
+        self.acc = "wxid_mcp_test"
+        db = Path(self._tmp.name) / "output" / self.acc / "sns" / "sns.db"
+        base = (1700000000 * 1000) << 23
+        _make_sns_db(db, [(_to_signed64(base + 2), "wxid_a", "hello world"),
+                          (_to_signed64(base + 1), "wxid_b", "第二条动态"),
+                          (_to_signed64(base + 3), "wxid_a", "第三条 hello again")])
+        self.base = base
+
+    def tearDown(self):
+        from siwx import paths
+        if self._old_root is None:
+            os.environ.pop("SIWX_ROOT", None)
+        else:
+            os.environ["SIWX_ROOT"] = self._old_root
+        paths._PATH_CACHE.clear()
+        self._tmp.cleanup()
+
+    def _tool(self, name, args):
+        import json as _json
+        from siwx import mcp_server as M
+        return _json.loads(getattr(M, f"tool_{name}")(args))
+
+    def test_sns_tools_registered(self):
+        from siwx import mcp_server as M
+        names = {t["name"] for t in M.TOOLS}
+        for n in ("list_sns_accounts", "get_sns_timeline", "get_sns_detail",
+                  "get_sns_friends", "export_sns"):
+            self.assertIn(n, names)
+            self.assertIn(n, M._HANDLERS)
+
+    def test_list_sns_accounts(self):
+        d = self._tool("list_sns_accounts", {})
+        self.assertEqual([a["wxid"] for a in d["accounts"]], [self.acc])
+        self.assertEqual(d["accounts"][0]["count"], 3)
+
+    def test_timeline_paging_and_filters(self):
+        d = self._tool("get_sns_timeline", {"account": self.acc, "limit": 2})
+        self.assertEqual(d["total"], 2)
+        self.assertTrue(d["has_more"])
+        self.assertIsNotNone(d["next_before_tid"])
+        # 游标翻页：before_tid 之后的更早动态
+        d2 = self._tool("get_sns_timeline",
+                        {"account": self.acc, "limit": 10,
+                         "before_tid": d["next_before_tid"]})
+        self.assertEqual(d2["total"], 1)
+
+        # 关键词（含多词命中：hello 在两条里）
+        d3 = self._tool("get_sns_timeline",
+                        {"account": self.acc, "keyword": "hello"})
+        self.assertEqual(d3["total"], 2)
+
+        # 发布者过滤
+        d4 = self._tool("get_sns_timeline",
+                        {"account": self.acc, "username": "wxid_b"})
+        self.assertEqual(d4["total"], 1)
+        self.assertEqual(d4["posts"][0]["user_name"], "wxid_b")
+
+        # 时间范围（合成库三条动态同秒，范围应全命中）
+        newest = self._tool("get_sns_timeline", {"account": self.acc, "limit": 1})
+        ts = newest["posts"][0]["ts"]
+        d5 = self._tool("get_sns_timeline",
+                        {"account": self.acc, "start": ts, "end": ts})
+        self.assertEqual(d5["total"], 3)
+        # 下一秒起应为空
+        d6 = self._tool("get_sns_timeline",
+                        {"account": self.acc, "start": ts + 1})
+        self.assertEqual(d6["total"], 0)
+
+    def test_timeline_slim_shape_strips_urls(self):
+        """精简形状：不得携带 CDN URL（AI 客户端取不了媒体）。"""
+        d = self._tool("get_sns_timeline", {"account": self.acc})
+        blob = _to_json_text(d)
+        self.assertNotIn("http", blob)
+        # 精简形状应带互动计数与卡片键
+        p = d["posts"][0]
+        for k in ("tid", "ts", "user_name", "kind", "content_desc",
+                  "media_count", "like_count", "comment_count"):
+            self.assertIn(k, p)
+
+    def test_detail_full_comments(self):
+        import json as _json
+        # 用带评论/点赞的库（复用 TestSnsInteraction 的 _EMOJI_XML）
+        from siwx import paths
+        db = (Path(self._tmp.name) / "output" / "wxid_mcp_detail" / "sns" / "sns.db")
+        base = (1700000000 * 1000) << 23
+        _make_sns_db_raw(db, [(_to_signed64(base + 9), "wxid_a", _EMOJI_XML)])
+        old_acc = self.acc
+        d = self._tool("get_sns_detail",
+                       {"account": "wxid_mcp_detail", "tid": _to_signed64(base + 9)})
+        self.assertEqual(d["comment_count"], 1)
+        self.assertEqual(d["comments"][0]["content"], "哈哈")
+        self.assertEqual(d["comments"][0]["nickname"], "小明")
+        self.assertTrue(d["comments"][0]["has_emoji"])
+        self.assertEqual(d["comments"][0]["image_count"], 1)
+        self.assertEqual(d["like_count"], 1)
+        self.assertIn("小红", d["likes"])
+        # URL 不得出现在详情里
+        self.assertNotIn("http", _to_json_text(d))
+
+    def test_friends_aggregation(self):
+        d = self._tool("get_sns_friends", {"account": self.acc})
+        self.assertEqual(d["total"], 2)
+        top = d["friends"][0]        # 按动态数降序：wxid_a 有 2 条
+        self.assertEqual(top["username"], "wxid_a")
+        self.assertEqual(top["count"], 2)
+        self.assertIn("display", top)
+
+    def test_export_sns(self):
+        d = self._tool("export_sns", {"account": self.acc, "format": "json"})
+        self.assertTrue(d["ok"], d.get("error"))
+        self.assertEqual(d["count"], 3)
+        self.assertTrue(Path(d["file"]).is_file())
+
+        # 关键词过滤
+        d2 = self._tool("export_sns",
+                        {"account": self.acc, "format": "json", "keyword": "world"})
+        self.assertEqual(d2["count"], 1)
+
+        # 非法格式
+        with self.assertRaises(ValueError):
+            self._tool("export_sns", {"account": self.acc, "format": "yaml"})
+
+    def test_account_validation(self):
+        from siwx import mcp_server as M
+        for bad in ("", "../..", "a/b", "a\\b", "nope"):
+            with self.subTest(account=bad):
+                with self.assertRaises(ValueError):
+                    M.tool_get_sns_timeline({"account": bad})
+
+    def test_mcp_jsonrpc_tools_list(self):
+        """tools/list 应返回全部内置工具（含 5 个 SNS 工具），且 schema 为 object。"""
+        import json as _json
+        from siwx import mcp_server as M
+        names = {t["name"] for t in M._all_tools()}
+        self.assertTrue({"list_sns_accounts", "get_sns_timeline",
+                         "get_sns_detail", "get_sns_friends", "export_sns"} <= names)
+        for t in M.TOOLS:
+            self.assertEqual(t["inputSchema"]["type"], "object")
+            self.assertTrue(t["description"])
+
+
+def _to_json_text(obj) -> str:
+    import json as _json
+    return _json.dumps(obj, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     unittest.main()

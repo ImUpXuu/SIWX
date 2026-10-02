@@ -232,22 +232,28 @@ SIWX 的导出目标是：**既适合人阅读，也适合机器继续处理**�
 }
 ```
 
-当前提供 6 个 MCP 工具（可在 MCP 页面按需禁用）：
+当前提供 **11 个 MCP 工具**（可在 MCP 页面按需禁用）：
 
-| 工具                | 作用           |
-| ----------------- | ------------ |
-| `get_status`      | 查看 SIWX 当前状态 |
-| `list_accounts`   | 列出已解密账号      |
-| `list_sessions`   | 列出某个账号下的会话   |
-| `get_messages`    | 读取指定会话消息     |
-| `search_messages` | 搜索聊天记录       |
-| `export_chat`     | 导出指定聊天（可含语音） |
+| 工具 | 作用 |
+| ----------------- | ------------- |
+| `get_status` | 查看 SIWX 当前状态 |
+| `list_accounts` | 列出已解密账号 |
+| `list_sessions` | 列出某个账号下的会话 |
+| `get_messages` | 读取指定会话消息 |
+| `search_messages` | 搜索聊天记录 |
+| `export_chat` | 导出指定聊天（可含语音） |
+| `list_sns_accounts` | 列出有朋友圈数据的账号 |
+| `get_sns_timeline` | 读取朋友圈时间线（支持关键词/发布者/时间范围过滤） |
+| `get_sns_detail` | 读取单条朋友圈动态详情（完整评论点赞） |
+| `get_sns_friends` | 按发布者聚合朋友圈动态 |
+| `export_sns` | 导出朋友圈（json/markdown/txt/html，可选媒体） |
 
 于是你可以问 AI：
 
 - "帮我找一下和某某有关的聊天记录。"
 - "总结一下这个群最近一个月讨论了什么。"
 - "把某个会话导出成 Markdown。"
+- "我最近发了哪些朋友圈？把上个月的朋友圈导出成 Markdown。"
 
 ---
 
@@ -385,7 +391,7 @@ git push origin v5.0.0
 
 **9. 朋友圈能像聊天一样让 AI 检索吗？**
 
-目前 MCP 的 6 个工具面向聊天记录；朋友圈支持 Web 端浏览、搜索与导出。如需 AI 处理，可先导出为 JSON / Markdown 再交给 AI。
+可以。MCP 提供 `list_sns_accounts` / `get_sns_timeline` / `get_sns_detail` / `get_sns_friends` / `export_sns` 五个朋友圈工具，AI 可直接浏览、搜索、过滤和导出朋友圈（时间线只回互动计数与正文，完整评论在详情里；CDN 媒体 URL 不暴露给 AI）。也可以先导出为 JSON / Markdown 再交给 AI。
 
 ---
 
