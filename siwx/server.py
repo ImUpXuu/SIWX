@@ -844,6 +844,16 @@ def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
     import contextlib as _cl
 
     def _run_flask():
+        # 自动更新重启时旧进程还占着端口：先探活等它退出再绑定，
+        # 否则新进程的 Flask 线程直接 EADDRINUSE 死掉。最多等 ~30s。
+        import socket as _socket
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                with _socket.create_connection((host, port), timeout=0.5):
+                    time.sleep(0.5)  # 端口仍被监听 → 等旧进程退出
+            except OSError:
+                break  # 连不上 = 端口已释放
         with _cl.redirect_stdout(io.StringIO()), \
              _cl.redirect_stderr(io.StringIO()):
             app.run(host=host, port=port, threaded=True,

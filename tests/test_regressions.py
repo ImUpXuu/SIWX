@@ -21,6 +21,7 @@
 """
 import hashlib
 import hmac as hmac_mod
+import contextlib
 import io
 import json
 import os
@@ -1146,7 +1147,7 @@ class TestVersionSource(unittest.TestCase):
         from siwx import __version__
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
-        self.assertEqual(__version__, "5.0.5")
+        self.assertEqual(__version__, "5.0.6")
 
     def test_remote_version_uses_newest_source_and_bypasses_cache(self):
         from siwx import auto_update
@@ -1183,6 +1184,147 @@ class TestVersionSource(unittest.TestCase):
         self.assertTrue(response.get_json()["has_update"])
         self.assertIn("no-store", response.headers["Cache-Control"])
         self.assertEqual(response.headers["Pragma"], "no-cache")
+
+
+class TestAutoUpdateInstall(unittest.TestCase):
+    """自动更新安装环节：跨盘安全、带版本号文件名、失败可回滚。
+
+    背景：os.replace 不能跨盘（WinError 17），且旧逻辑硬编码替换
+    stories-in-wx.exe——用户目录里往往是按版本号命名的多个 exe，
+    根本没有这个名字的文件。
+    """
+
+    @staticmethod
+    def _write(dir_path: Path, name: str, content: bytes) -> Path:
+        p = dir_path / name
+        p.write_bytes(content)
+        return p
+
+    def _patch_common(self, auto_update, paths, app_dir, running):
+        return [
+            mock.patch.object(paths, "app_root", return_value=app_dir),
+            mock.patch.object(auto_update.sys, "executable", str(running)),
+            mock.patch.object(auto_update, "_schedule_exit"),
+        ]
+
+    def test_target_exe_name_versioned_bumps_version(self):
+        from siwx.auto_update import _target_exe_name
+        self.assertEqual(
+            _target_exe_name("stories-in-wx-v5.0.4-windows-x64.exe",
+                             "5.0.4", "5.0.5"),
+            "stories-in-wx-v5.0.5-windows-x64.exe")
+
+    def test_target_exe_name_plain_name_kept_inplace(self):
+        from siwx.auto_update import _target_exe_name
+        self.assertEqual(
+            _target_exe_name("stories-in-wx.exe", "5.0.4", "5.0.5"),
+            "stories-in-wx.exe")
+
+    def test_target_exe_name_ignores_unrelated_versions(self):
+        from siwx.auto_update import _target_exe_name
+        # 文件名里的版本号与当前版本不符（用户改过名）→ 就地替换
+        self.assertEqual(
+            _target_exe_name("stories-in-wx-v0.4.0-windows-x64.exe",
+                             "5.0.4", "5.0.5"),
+            "stories-in-wx-v0.4.0-windows-x64.exe")
+        # 版本号子串不能误伤（v5.0.4 ≠ v5.0.45）
+        self.assertEqual(
+            _target_exe_name("stories-in-wx-v5.0.45.exe", "5.0.4", "5.0.5"),
+            "stories-in-wx-v5.0.45.exe")
+
+    def test_install_copy_verifies_content(self):
+        from siwx import auto_update
+        with tempfile.TemporaryDirectory() as td:
+            src = self._write(Path(td), "src.exe", b"A" * 4096)
+            dst = Path(td) / "sub" / "dst.exe"
+            dst.parent.mkdir()
+            # 临时目录模拟不了真跨盘，但 copyfile 路径与盘符布局无关
+            auto_update._install_copy(src, dst)
+            self.assertEqual(dst.read_bytes(), b"A" * 4096)
+
+    def test_install_copy_bad_sha_leaves_no_residue(self):
+        from siwx import auto_update
+        with tempfile.TemporaryDirectory() as td:
+            src = self._write(Path(td), "src.exe", b"DATA")
+            dst = Path(td) / "dst.exe"
+            with self.assertRaises(RuntimeError):
+                auto_update._install_copy(src, dst, expected_sha="0" * 64)
+            self.assertFalse(dst.exists())
+
+    def test_replace_windows_exe_writes_versioned_target(self):
+        """用户实际场景：目录里全是带版本号的 exe，正在运行 v5.0.4。"""
+        from siwx import auto_update, paths
+        with tempfile.TemporaryDirectory() as td:
+            app_dir = Path(td)
+            running = self._write(app_dir, "stories-in-wx-v5.0.4-windows-x64.exe", b"OLD")
+            new_exe = self._write(app_dir, "downloaded.exe", b"NEW")
+            launched = []
+            patches = self._patch_common(auto_update, paths, app_dir, running)
+            patches += [
+                mock.patch.object(auto_update, "current_version",
+                                  return_value="5.0.4"),
+                mock.patch.object(auto_update.subprocess, "Popen",
+                                  side_effect=lambda cmd, **kw: launched.append(cmd)),
+            ]
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                result = auto_update._replace_windows_exe(new_exe, "5.0.5")
+
+            self.assertTrue(result["ok"], result)
+            target = app_dir / "stories-in-wx-v5.0.5-windows-x64.exe"
+            self.assertEqual(target.read_bytes(), b"NEW")
+            # 正在运行的旧 exe 不被触碰
+            self.assertEqual(running.read_bytes(), b"OLD")
+            self.assertEqual(launched[0][0], str(target))
+
+    def test_replace_windows_exe_inplace_success_keeps_backup(self):
+        from siwx import auto_update, paths
+        with tempfile.TemporaryDirectory() as td:
+            app_dir = Path(td)
+            running = self._write(app_dir, "stories-in-wx.exe", b"OLD")
+            new_exe = self._write(app_dir, "downloaded.exe", b"NEW")
+            good_sha = hashlib.sha256(b"NEW").hexdigest()
+            launched = []
+            patches = self._patch_common(auto_update, paths, app_dir, running)
+            patches += [
+                mock.patch.object(auto_update, "current_version",
+                                  return_value="5.0.5"),
+                mock.patch.object(auto_update.subprocess, "Popen",
+                                  side_effect=lambda cmd, **kw: launched.append(cmd)),
+            ]
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                result = auto_update._replace_windows_exe(new_exe, "5.0.6", good_sha)
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual((app_dir / "stories-in-wx.exe").read_bytes(), b"NEW")
+            self.assertTrue((app_dir / "stories-in-wx.backup.exe").exists())
+            self.assertEqual(launched[0][0], str(app_dir / "stories-in-wx.exe"))
+
+    def test_replace_windows_exe_inplace_rollback_on_failure(self):
+        """复制失败必须把改名出去的旧 exe 改回来，不能把程序变砖。"""
+        from siwx import auto_update, paths
+        with tempfile.TemporaryDirectory() as td:
+            app_dir = Path(td)
+            running = self._write(app_dir, "stories-in-wx.exe", b"OLD")
+            new_exe = self._write(app_dir, "downloaded.exe", b"NEW")
+            bad_sha = hashlib.sha256(b"NOT-THIS").hexdigest()
+            patches = self._patch_common(auto_update, paths, app_dir, running)
+            patches += [
+                mock.patch.object(auto_update, "current_version",
+                                  return_value="5.0.5"),
+            ]
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                result = auto_update._replace_windows_exe(new_exe, "5.0.6", bad_sha)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(running.read_bytes(), b"OLD")
+            self.assertFalse((app_dir / "stories-in-wx.backup.exe").exists())
+            self.assertFalse((app_dir / "stories-in-wx.exe.new").exists())
 
 
 class TestEnvInfo(unittest.TestCase):
