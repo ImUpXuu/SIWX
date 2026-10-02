@@ -12,6 +12,9 @@ let earliestId = 0;      // 翻页游标第二分量：同一秒的消息按 loc
 let hasMore = false;
 let loading = false;
 let loadedMessages = [];
+// 请求代数守卫：fresh 加载（打开会话/跳转/刷新）递增序号，使仍在飞的
+// 旧请求（滚动加载/上一次跳转）返回后直接丢弃，避免旧响应覆盖新页面
+let loadSeq = 0;
 let timelineMonths = [];
 let timelineDayCache = new Map();
 let selectionMode = false;
@@ -263,6 +266,7 @@ async function openChat(s) {
   earliest = 0;
   earliestId = 0;
   hasMore = false;
+  loadSeq++;               // 使切换会话前仍在飞的旧请求失效
   loadedMessages = [];
   setSelectionMode(false);
   el('chat-wrap').classList.add('open');
@@ -327,6 +331,8 @@ function stopBottomFollow() {
 async function loadMessages(fresh, opts = {}) {
   const s = currentChat;
   if (!s) return false;
+  if (fresh) loadSeq++;               // fresh 加载使所有在飞旧请求失效
+  const seq = loadSeq;
   const before = opts.before || (!fresh && earliest ? earliest : 0);
   // 游标为 (ts, localId) 组合：同一秒多条消息只按时间戳 `<` 翻页会被跳过
   const beforeId = (!fresh && !opts.before && before && earliestId) ? earliestId : 0;
@@ -337,6 +343,7 @@ async function loadMessages(fresh, opts = {}) {
     (beforeId ? `&before_id=${beforeId}` : '') +
     `&limit=${limit}`;
   const data = await fetchJSON(url);
+  if (seq !== loadSeq || s !== currentChat) return false;   // 过期响应，丢弃
   const box = el('c-msgs');
   if (fresh) {
     selectedKeys.clear();
@@ -539,11 +546,13 @@ async function expandTimelineMonth(section) {
 
 function renderTimelineDays(inner, days) {
   inner.innerHTML = days.length ? days.map(d => `
-    <button class="tl-day" type="button" data-ts="${d.first_ts || 0}" title="${esc(d.day)} · ${d.count} 条">
+    <button class="tl-day" type="button" data-ts="${d.first_ts || 0}" data-day="${esc(d.day)}" title="${esc(d.day)} · ${d.count} 条">
       <span>${esc(d.day.slice(8))}日</span><b>${d.count}</b>
     </button>`).join('') : '<div class="tl-empty">该月没有消息</div>';
   inner.querySelectorAll('.tl-day').forEach(btn => {
-    btn.addEventListener('click', () => jumpToTime(Number(btn.dataset.ts || 0)));
+    // 跳转目标传日期字符串而非 first_ts——first_ts 是"当天第一条消息"时刻，
+    // 以它 +24h 当窗口终点会把次日上午的消息算进窗口
+    btn.addEventListener('click', () => jumpToTime(btn.dataset.day || ''));
   });
 }
 
@@ -552,19 +561,74 @@ function monthLabel(month) {
   return `${year}年${Number(mon)}月`;
 }
 
-async function jumpToTime(ts) {
-  if (!currentChat || !ts) return;
-  const endOfDay = ts + 24 * 3600;
+async function jumpToTime(day) {
+  if (!currentChat || !day) return;
+  // 由日期字符串计算次日零点（本机时区，与服务端 strftime localtime 语义
+  // 一致）作为跳转窗口终点。原实现 endOfDay = first_ts + 24h 实际是
+  // "当天第一条消息时刻 + 24 小时"：当天首条消息若发于 10:00，窗口会覆盖
+  // 次日凌晨到上午的消息，次日上午消息多时当天内容被整个挤出窗口
+  // （new Date 对 dd+1 的进月/进年由 Date 自动处理）。
+  const [yy, mm, dd] = String(day).split('-').map(Number);
+  if (!yy || !mm || !dd) return;
+  const endOfDay = Math.floor(new Date(yy, mm - 1, dd + 1).getTime() / 1000);
+  // 跳转期间置 loading 并清 hasMore，阻止滚动监听器在此期间再发出带旧
+  // 游标的加载请求，与跳转请求形成三方竞态
+  loading = true;
+  hasMore = false;
   el('c-msgs').innerHTML = '<div class="c-loading">正在跳转到所选时间…</div>';
   earliest = 0;
-  await loadMessages(true, { before: endOfDay, limit: 80, smooth: true });
+  try {
+    await loadMessages(true, { before: endOfDay, limit: 80 });
+  } finally {
+    loading = false;
+  }
   const target = [...el('c-msgs').querySelectorAll('.m-row[data-ts]')]
-    .find(n => Number(n.dataset.ts || 0) >= ts) || el('c-msgs').querySelector('.m-row[data-ts]');
+    .find(n => Number(n.dataset.ts || 0) >= tsOfTarget(day)) || el('c-msgs').querySelector('.m-row[data-ts]');
   if (target) {
     target.classList.add('jump-hit');
     target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setTimeout(() => target.classList.remove('jump-hit'), 1400);
+    recenterAfterImages(target);   // 图片懒加载会挤偏落点，加载后重新居中
   }
+}
+
+/** 当天零点（本地时区）时间戳，跳转定位用：窗口按"次日零点前"取，
+ *  命中的第一条应 >= 当天零点。 */
+function tsOfTarget(day) {
+  const [yy, mm, dd] = String(day).split('-').map(Number);
+  return Math.floor(new Date(yy, mm - 1, dd).getTime() / 1000);
+}
+
+/** 跳转定位靠一次性 scrollIntoView，而消息图片懒加载完成后内容高度
+ *  持续变化，滚动结束时目标行已被挤离原位。这里对目标行附近尚未加载
+ *  的图片改为立即加载，每次加载完成后把目标行重新滚回视野中心
+ *  （与打开会话的贴底跟随同思路）；4 秒后停止。 */
+function recenterAfterImages(target) {
+  const box = el('c-msgs');
+  const recenter = () => target.scrollIntoView({ block: 'center', behavior: 'auto' });
+  const rows = [target];
+  let sib = target.previousElementSibling;
+  for (let n = 0; sib && n < 8; n++) { rows.push(sib); sib = sib.previousElementSibling; }
+  sib = target.nextElementSibling;
+  for (let n = 0; sib && n < 8; n++) { rows.push(sib); sib = sib.nextElementSibling; }
+  let pending = 0;
+  const timer = setTimeout(stop, 4000);
+  function stop() { clearTimeout(timer); recenter(); }
+  rows.forEach(row => {
+    row.querySelectorAll('img[loading="lazy"]').forEach(img => {
+      img.loading = 'eager';
+      if (!img.complete) {
+        pending++;
+        img.addEventListener('load', onImg, { once: true });
+        img.addEventListener('error', onImg, { once: true });
+      }
+    });
+  });
+  function onImg() {
+    recenter();
+    if (--pending <= 0) stop();
+  }
+  if (!pending) stop();
 }
 
 function setSelectionMode(on) {

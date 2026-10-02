@@ -68,14 +68,27 @@ def build_chat_data(session, msgs, avatar_map):
     }
 
 
+def _script_safe_json(obj) -> str:
+    """json.dumps 后转义会在 <script> 内提前终止/改变解析状态的序列：
+    - `</`：消息含 `</script>` 会提前闭合 script 标签，导出的自包含
+      网页从此损坏；
+    - `<!--`：HTML 规范中 script 进入"双转义状态"，模板真正写出的
+      </script> 闭标签会被吞掉——只转义 `</` 而不顾 `<!--` 等于没修。
+    `\\/` 与 `\\u0021` 都是合法 JSON 转义，JSON.parse 结果与原文完全
+    等价，正常数据零影响。"""
+    return (json.dumps(obj, ensure_ascii=False)
+            .replace("</", "<\\/")
+            .replace("<!--", "<\\u0021--"))
+
+
 def render_html(chat_data: dict) -> str:
     """生成自包含 HTML。data = CHAT_DATA dict。"""
-    data_json = json.dumps(chat_data, ensure_ascii=False)
+    data_json = _script_safe_json(chat_data)
     title = chat_data["meta"]["sessionName"]
     count = chat_data["meta"]["messageCount"]
 
     return _HTML_HEAD + f"\n<script>window.CHAT_DATA = {data_json};</script>\n" + \
-        f"\n<script>\nconst MSG_COUNT = {count};\nconst CHAT_TITLE = {json.dumps(title, ensure_ascii=False)};\n" + \
+        f"\n<script>\nconst MSG_COUNT = {count};\nconst CHAT_TITLE = {_script_safe_json(title)};\n" + \
         _HTML_RENDERER + "\n</script>\n</body>\n</html>"
 
 
