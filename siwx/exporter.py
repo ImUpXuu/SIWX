@@ -343,11 +343,17 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
     # ── 打包 ─────────────────────────────────────────────
     zip_path = None
+    file_path = str(out_file)
     if pack == "zip":
         progress(92, "打包 zip…")
         zip_path = shutil.make_archive(str(root / f"{fname}_{fmt}"), "zip",
                                        root_dir=export_dir)
         shutil.rmtree(export_dir, ignore_errors=True)
+        # 目录已删，file 若仍指向目录内路径就是死链：「每会话一个 ZIP」
+        # （pack="each" → 每会话 run_export(pack="zip")）模式下前端拿它
+        # 渲染"下载文件"链接，点击必然 404。置空，前端对空值不渲染链接。
+        file_path = None
+        export_result["file"] = None
         # ── 插件：导出后处理（after_zip）───────────────────
         # 此时 export_dir 已被删除，只提供 zip 路径。
         _run_after_export("after_zip", {
@@ -360,7 +366,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     return {
         "export_dir": str(root) if pack == "zip" else str(export_dir),
         "zip": zip_path,
-        "file": str(out_file),
+        "file": file_path,
         "format": fmt, "pack": pack,
         "message_count": written, "media_count": stats_media + stats_voice,
         "image_count": stats_media, "voice_count": stats_voice,

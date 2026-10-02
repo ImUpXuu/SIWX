@@ -155,6 +155,21 @@ def _is_official_account(username: str) -> bool:
     return (username or "").startswith("gh_")
 
 
+def owner_base(account: str) -> str:
+    """从账号目录名推断本人原始 wxid：剥掉末尾的纯数字 uin 段。
+
+    目录名形如 wxid_xxx_<uin>。不能用 `split("_6")`（uin 不以 6 开头、或
+    wxid 本体含 6 开头段时会把 is_me 判定整体切错），也不能用
+    media.clean_wxid()（它取第一段下划线前缀，对 wxid_a_b_1234 会切错，
+    且其语义被 MMKV 密钥派生与图片路径查找依赖，不能改动）。
+    与前端 chat.js::ownerUsername() 的"只剥尾部纯数字段"规则保持一致。
+    """
+    s = (account or "").strip()
+    if re.fullmatch(r"wxid_.+_\d+", s):
+        return re.sub(r"_\d+$", "", s)
+    return s
+
+
 def _is_ghost_session(username: str, summary: str, ts: int) -> bool:
     """过滤 SessionTable 中的折叠占位/空壳会话。
 
@@ -478,7 +493,7 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
     account = account or acc.name
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     names = _contact_names(acc)
-    my_base = account.split("_6")[0] if "_6" in account else account
+    my_base = owner_base(account)
     is_group = chat.endswith("@chatroom")
 
     rows = []
@@ -602,7 +617,7 @@ def messages():
 
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     names = _contact_names(acc)
-    my_base = account.split("_6")[0] if "_6" in account else account
+    my_base = owner_base(account)
     is_group = chat.endswith("@chatroom")
     _log(f"[msg] 查询消息: account={account}, chat={chat}, table={table}, before={before}, before_id={before_id}, limit={limit}")
 
