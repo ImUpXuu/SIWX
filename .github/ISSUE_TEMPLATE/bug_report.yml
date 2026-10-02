@@ -1,0 +1,145 @@
+name: 🐛 Bug 反馈
+description: 报告一个可以复现的问题：崩溃、报错、结果不正确、界面异常等
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！下面的信息填得越完整，定位就越快。
+
+        > ⚠️ **请勿粘贴密钥、wxid 明文或未脱敏的聊天内容。**
+        > 「设置 → 环境信息 → 📋 复制环境信息」会生成**已打码**的环境信息，可直接粘贴。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      description: 这两项能过滤掉大部分重复反馈
+      options:
+        - label: 我已搜索过现有 issue，确认这不是重复问题
+          required: true
+        - label: 我已升级到最新版本（Release 产物或 main 分支）后仍然能复现
+          required: true
+
+  - type: input
+    id: siwx_version
+    attributes:
+      label: siwx 版本号
+      description: 设置页「当前版本」；源码运行可执行 `python -c "import siwx; print(siwx.__version__)"`
+      placeholder: "例如 5.0.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: run_mode
+    attributes:
+      label: 运行方式
+      description: 打包产物与源码运行的排查路径完全不同
+      options:
+        - 打包产物（Release 下载的 exe / dmg）
+        - 源码运行（python run.py serve）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS
+        - 其他（请在环境信息中说明）
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: 系统版本
+      description: Windows 见「设置 → 系统 → 关于」；macOS 见「关于本机」
+      placeholder: "例如 Windows 11 23H2 (10.0.22631) 或 macOS 14.5"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: arch
+    attributes:
+      label: 系统架构
+      description: 架构不对会导致密钥提取与打包产物行为异常
+      options:
+        - x64 / x86_64（Intel / AMD）
+        - arm64（Apple Silicon / Windows on ARM）
+        - 其他 / 不确定
+    validations:
+      required: true
+
+  - type: input
+    id: wechat_version
+    attributes:
+      label: 微信版本
+      description: 微信「设置 → 关于微信」。微信版本直接决定数据库结构与密钥提取策略
+      placeholder: "例如 4.1.0.20"
+    validations:
+      required: true
+
+  - type: textarea
+    id: env_info
+    attributes:
+      label: 环境信息
+      description: |
+        点「设置 → 环境信息 → 📋 复制环境信息」，把结果粘贴到这里。
+        源码运行也可以执行 `python run.py doctor` 获取同样内容。
+      render: markdown
+      placeholder: |
+        ### 环境信息
+
+        - siwx 版本: 5.0.2
+        - 运行模式: 打包产物
+        - 操作系统: Windows
+        - 系统版本: 10.0.22631
+        - 系统架构: AMD64
+        - Python: 3.12.7 (CPython)
+        - 数据目录: C:\Users\<user>\AppData\Local\stories-in-wx
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: 问题描述
+      description: 你期望发生什么？实际发生了什么？有报错弹窗请一并说明
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 尽量精确到点击了哪个按钮
+      placeholder: |
+        1. 打开 …
+        2. 点击 …
+        3. 看到 …
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: |
+        「设置 → 📥 导出日志」默认已脱敏，可直接分享。
+        也可以把日志文件直接拖进输入框。
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 截图、报错文本、特殊环境（虚拟机 / 微信多开 / 杀毒软件拦截 / 非默认安装路径）等
+    validations:
+      required: false

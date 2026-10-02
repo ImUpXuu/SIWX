@@ -1,0 +1,14 @@
+{
+  "version": "5.0.5",
+  "date": "2026-10-01 00:37:39",
+  "notes": "v5.0.5\n\n**UI 重构第一步：引入 Vue 3（零构建链），朋友圈页全面 Vue 化，切页有了过渡动画。**\n\n- **Vue 3 全局构建版**（vue.global.prod.js，~158KB，含运行时编译器）：零构建、零 node 依赖，源码用户 `clone → pip install → python run.py` 三步不变，PyInstaller 打包配置无需修改。\n- **朋友圈页 Vue 化**：响应式状态集中管理、组件化渲染（动态卡片 / 头像），好友昵称与头像到达后自动刷新，不再需要手动补渲染。\n- **切页过渡动画**：View Transitions API（Chrome/Edge 原生，零依赖）+ 其他浏览器降级淡入，尊重系统「减少动态效果」设置。\n\n- **导出按钮点击无反应**：弹层触发器白名单漏了导出按钮，点击后被全局点击处理器立即关闭；已修复，且按钮显示「导出」文字。\n- **本人头像不显示**：账号晚于页面挂载到达，首次预加载必然失败且不再重试；现在账号变更后自动重载。\n\n全量测试 265 通过 / 1 跳过。",
+  "assets": {
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/stories-in-wx-v5.0.5-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/stories-in-wx-v5.0.5-macos.dmg"
+  },
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/SHA256SUMS.txt",
+  "update_scripts": {
+    "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
+    "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
+  }
+}

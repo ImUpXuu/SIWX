@@ -1,0 +1,284 @@
+"""命令行入口 —— rich 漂亮 TUI。
+
+组件集中在 siwx/tui.py（可扩展），本模块只做参数解析与流程编排。
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from siwx import extract, keystore
+from siwx import paths as _paths, tui
+
+
+def _resolve_dirs(db_dir):
+    if db_dir:
+        return [(extract.wxid_of(db_dir), db_dir)]
+    return extract.find_wechat_data_dirs()
+
+
+def cmd_keys_extract(args) -> int:
+    # 修复：--json 此前只被 argparse 接收、从未生效（docs/cli-commands.md 已承诺
+    # 该参数输出 JSON）。此分支让 stdout 只输出 JSON，便于脚本消费。
+    if getattr(args, "json", False):
+        reports = extract.extract_all(log=lambda *_a, **_k: None,
+                                      use_cache=not args.no_cache)
+        print(json.dumps(reports, ensure_ascii=False, indent=2))
+        if not reports:
+            return 1
+        return 0 if all(r["verified"] == r["total_salts"] for r in reports) else 2
+    tui.banner()
+    reports = extract.extract_all(log=tui.log, use_cache=not args.no_cache)
+    if not reports:
+        tui.log("✗ 未找到微信数据目录，请确认本机登录过微信")
+        return 1
+    for r in reports:
+        tui.step(f"账号 {r['wxid']}")
+        tui.salt_table(r)
+        tui.summary_line(r["verified"], r["total_salts"], r["duration_ms"])
+    all_ok = all(r["verified"] == r["total_salts"] for r in reports)
+    return 0 if all_ok else 2
+
+
+def cmd_keys_list(_args) -> int:
+    tui.banner()
+    store = keystore.load()
+    if not store:
+        tui.log("密钥库为空（先执行 python run.py keys extract）")
+        return 0
+    tui.step(f"密钥库 · {len(store)} 条 · DPAPI 加密")
+    tui.log(f"路径: {keystore.store_path()}")
+    t = tui.salt_table  # 复用表格组件的样式基调
+    from rich.table import Table
+    from rich import box
+    table = Table(box=box.SIMPLE, header_style="bold")
+    table.add_column("salt", style="dim")
+    table.add_column("来源", style="cyan")
+    table.add_column("更新时间")
+    table.add_column("密钥", style="dim")
+    for salt, rec in sorted(store.items()):
+        table.add_row(salt[:16] + "…", rec.get("strategy", "-"),
+                      str(rec.get("updated", "-")),
+                      extract.mask_key(rec.get("key", "")))
+    tui.console.print(table)
+    return 0
+
+
+def cmd_decrypt(args) -> int:
+    tui.banner()
+    dirs = _resolve_dirs(args.db_dir)
+    if not dirs:
+        tui.log("✗ 未找到微信数据目录")
+        return 1
+    out_root = args.out or str(_paths.out_root())
+    code = 0
+    for wxid, db in dirs:
+        rep = extract.decrypt_dir(db, str(Path(out_root) / wxid), log=tui.log,
+                                  workers=args.workers,
+                                  use_cache=not args.no_cache)
+        tui.decrypt_summary(rep["ok"], rep["failed"], rep["skipped"],
+                            rep["cached"], rep["duration_ms"],
+                            rep["out_dir"])
+        if rep["ok"] == 0 and rep["cached"] == 0:
+            code = 2
+    return code
+
+
+def cmd_auto(args) -> int:
+    tui.banner()
+    out_root = args.out or str(_paths.out_root())
+    accounts = extract.auto_all(out_root, log=tui.log,
+                                use_cache=not args.no_cache,
+                                workers=args.workers)
+    if not accounts:
+        return 1
+    tui.step("总览")
+    table_ok = True
+    for a in accounts:
+        dec = a.get("decrypt")
+        tui.summary_line(a["verified"], a["total_salts"], a["duration_ms"])
+        if dec:
+            tui.decrypt_summary(dec["ok"], dec["failed"], dec["skipped"],
+                                dec.get("cached", 0), dec["duration_ms"],
+                                dec["out_dir"])
+        if a["verified"] != a["total_salts"]:
+            table_ok = False
+        if dec is not None and dec["ok"] == 0 and dec.get("cached", 0) == 0:
+            table_ok = False
+    if table_ok:
+        tui.log("✔ 全自动流水线完成")
+        return 0
+    tui.log("部分账号未完成 — 未登录账号的密钥不在微信内存中，切换登录后重跑即可")
+    return 2
+
+
+def cmd_serve(args) -> int:
+    from siwx.server import run_server
+    run_server(args.host, args.port, open_browser=not args.no_open)
+    return 0
+
+
+def cmd_mcp(_args) -> int:
+    """MCP stdio 服务器：由 AI 客户端拉起，收发 JSON-RPC。"""
+    from siwx.mcp_server import run_mcp_server
+    run_mcp_server()
+    return 0
+
+
+def cmd_doctor(_args) -> int:
+    """打印环境信息 —— 提交 issue / 反馈问题时可直接粘贴。
+
+    只输出文本块，不提供 --json：插件子命令注册阶段的日志会先写到 stdout，
+    机器可解析的输出目前无法保证，避免给出一个「看起来能用但实际会被污染」的开关。
+    """
+    from siwx import env_info
+    print()
+    print(env_info.format_text(quiet=True))
+    print()
+    print("提示：以上路径中的用户名已打码，可直接粘贴到 GitHub issue。")
+    return 0
+
+
+def main() -> int:
+    import os
+    import platform
+    # macOS 支持已通过 macos_lldb 策略实现
+    if platform.system() not in ("Windows", "Darwin"):
+        print("stories-in-wx 仅支持 Windows 和 macOS。")
+        return 1
+    ap = argparse.ArgumentParser(
+        prog="siwx",
+        description="stories-in-wx — 微信 4.x 密钥提取与解密 (自研)")
+    # 全局参数通过 parent 注入每个子命令，前后放置均可
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--workers", type=int, default=None,
+                        help="并行解密进程数 (默认 CPU 核数, 上限 8)")
+    common.add_argument("--no-cache", action="store_true",
+                        help="忽略缓存强制重跑")
+    sub = ap.add_subparsers(dest="cmd")
+
+    p_auto = sub.add_parser("auto", parents=[common],
+                            help="全自动：扫描 → 提取 → 保存 → 解密")
+    p_auto.add_argument("--out", default=None, help="解密输出根目录 (默认 ./output)")
+    p_auto.set_defaults(fn=cmd_auto)
+
+    p_keys = sub.add_parser("keys", parents=[common], help="密钥操作")
+    keys_sub = p_keys.add_subparsers(dest="keys_cmd", required=True)
+    p_ext = keys_sub.add_parser("extract", parents=[common], help="提取密钥")
+    p_ext.add_argument("--db-dir", default=None)
+    p_ext.add_argument("--json", action="store_true")
+    p_ext.set_defaults(fn=cmd_keys_extract)
+    p_list = keys_sub.add_parser("list", parents=[common], help="查看密钥库（打码）")
+    p_list.set_defaults(fn=cmd_keys_list)
+
+    p_dec = sub.add_parser("decrypt", parents=[common], help="解密数据库")
+    p_dec.add_argument("--db-dir", default=None)
+    p_dec.add_argument("--out", default=None)
+    p_dec.set_defaults(fn=cmd_decrypt)
+
+    p_serve = sub.add_parser("serve", parents=[common], help="Web 控制台")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8787)
+    p_serve.add_argument("--no-open", action="store_true")
+    p_serve.set_defaults(fn=cmd_serve)
+
+    p_mcp = sub.add_parser("mcp", parents=[common], help="MCP 服务器 (stdio, 供 AI 客户端接入)")
+    p_mcp.set_defaults(fn=cmd_mcp)
+
+    p_doc = sub.add_parser("doctor", parents=[common],
+                           help="打印环境信息 (提 issue 时粘贴)")
+    p_doc.set_defaults(fn=cmd_doctor)
+
+    # ── 插件子命令（插件贡献的 CLI 入口）─────────────────────
+    _register_plugin_commands(sub, common)
+
+    args = ap.parse_args()
+    if not getattr(args, "cmd", None):
+        # 裸跑（双击 exe）→ 默认启动 Web 控制台
+        return cmd_serve(argparse.Namespace(host="127.0.0.1", port=8787,
+                                            no_open=False))
+    try:
+        return args.fn(args)
+    except KeyboardInterrupt:
+        tui.log("\n中断")
+        return 130
+
+
+def _register_plugin_commands(sub, common) -> None:
+    """把插件声明的 cli 命令挂到子命令解析器上。
+
+    契约：`{"name": "foo", "handler": "run_foo", "help": "...",
+            "args": [{"name": "--limit", "type": "int", "default": 10,
+                      "help": "..."}]}`
+
+    可用的 type 关键字：str / int / float / flag（store_true）/ count。
+    插件命令名与内置冲突时跳过并 warn（内置优先）。
+    """
+    try:
+        from siwx.plugins import ensure_loaded, registry
+        ensure_loaded()
+    except Exception:
+        return
+    if not registry.cli_commands:
+        return
+
+    from siwx import logger as log
+    reserved = set(sub.choices.keys()) if hasattr(sub, "choices") else set()
+
+    for _i, c in registry.cli_commands.sorted_items():
+        plugin = c.meta.name if c.meta else "?"
+        name = (c.name or "").strip()
+        if not name:
+            continue
+        if name in reserved:
+            log.warn("plugin", f"{plugin} 的 CLI 命令 {name} 与内置冲突，已跳过")
+            continue
+        try:
+            p = sub.add_parser(name, parents=[common],
+                               help=c.help or f"[插件 {plugin}]")
+        except Exception as e:                      # 命令名非法（argparse 会抛）
+            log.warn("plugin", f"{plugin} 的 CLI 命令 {name} 注册失败: {e}")
+            continue
+
+        for spec in c.args or []:
+            if not isinstance(spec, dict):
+                continue
+            flag_name = spec.get("name")
+            if not flag_name:
+                continue
+            kind = str(spec.get("type") or "str").lower()
+            kw = {}
+            if spec.get("help"):
+                kw["help"] = str(spec["help"])
+            if spec.get("default") is not None:
+                kw["default"] = spec["default"]
+            if kind == "flag":
+                p.add_argument(flag_name, action="store_true", **kw)
+            elif kind == "count":
+                p.add_argument(flag_name, action="count",
+                               default=kw.get("default", 0), help=kw.get("help"))
+            else:
+                tmap = {"int": int, "float": float, "str": str}
+                p.add_argument(flag_name, type=tmap.get(kind, str), **kw)
+
+        p.set_defaults(fn=_make_plugin_handler(c.handler, plugin, name))
+
+
+def _make_plugin_handler(handler, plugin: str, name: str):
+    """包装插件 handler，保证异常不把 CLI 打崩、退出码统一。"""
+    def _run(args):
+        from siwx import logger as log
+        try:
+            rc = handler(args)
+            return int(rc) if isinstance(rc, (int, float)) else 0
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            log.error("plugin", f"{plugin} 的 CLI 命令 {name} 执行失败: {e}")
+            tui.log(f"插件命令 {name} 失败: {e}")
+            return 1
+    return _run
+
+
+if __name__ == "__main__":
+    sys.exit(main())

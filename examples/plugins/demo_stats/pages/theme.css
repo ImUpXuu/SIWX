@@ -1,0 +1,9 @@
+/* 插件主题示例：仅用 CSS 变量做轻度品牌化，不改布局 */
+:root {
+  --plugin-demo-accent: #6366f1;
+}
+.plg-call {
+  color: var(--plugin-demo-accent);
+  font-size: 13px;
+}
+.plg-call b { font-weight: 700; }

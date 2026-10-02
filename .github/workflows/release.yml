@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: PyInstaller 打包 (exe)
+        run: pyinstaller --clean -y packaging/siwx-win.spec
+      - name: 重命名产物
+        run: |
+          $tag = "${{ github.ref_name }}"
+          Move-Item dist/stories-in-wx.exe "dist/stories-in-wx-${tag}-windows-x64.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stories-in-wx-windows
+          path: dist/*.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: PyInstaller 打包 (.app)
+        run: pyinstaller --clean -y packaging/siwx-mac.spec
+      - name: 生成 DMG
+        run: |
+          mkdir -p dist/dmg-staging
+          cp -R dist/stories-in-wx.app dist/dmg-staging/
+          ln -s /Applications dist/dmg-staging/Applications
+          TAG="${{ github.ref_name }}"
+          hdiutil create -volname "stories-in-wx" \
+            -srcfolder dist/dmg-staging \
+            -ov -format UDZO \
+            "dist/stories-in-wx-${TAG}-macos.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stories-in-wx-macos
+          path: dist/*.dmg
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 整理产物
+        run: |
+          mkdir -p release
+          cp artifacts/stories-in-wx-windows/*.exe release/
+          cp artifacts/stories-in-wx-macos/*.dmg release/
+          ls -la release/
+      - name: 计算 SHA-256
+        working-directory: release
+        run: |
+          for f in *; do sha256sum "$f" >> SHA256SUMS.txt; done
+          cat SHA256SUMS.txt
+      - name: 提取 tag 更新内容
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"
+          git for-each-ref "refs/tags/$TAG" --format='%(contents)' > release/RELEASE_NOTES.md
+          if [ ! -s release/RELEASE_NOTES.md ]; then
+            echo "未能读取 $TAG 的 annotated tag 发布说明" >&2
+            exit 1
+          fi
+          cat release/RELEASE_NOTES.md
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: |
+            release/*.exe
+            release/*.dmg
+            release/SHA256SUMS.txt
+          body_path: release/RELEASE_NOTES.md
+          generate_release_notes: false
+
+  version-json:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 校验 tag 与 siwx.__version__ 一致
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=$(python3 - << 'PY'
+          from siwx import __version__
+          print(__version__)
+          PY
+          )
+          if [ "v${VERSION#v}" != "$TAG" ]; then
+            echo "tag $TAG 与 siwx.__version__=$VERSION 不一致" >&2
+            exit 1
+          fi
+      - name: 生成 version.json（自动更新用）
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          git fetch --force origin "+refs/tags/$TAG:refs/tags/$TAG"
+          python3 scripts/generate_version_json.py --tag "$TAG" --repo "$REPO"
+          cp version.json /tmp/siwx-version.json
+      - name: 提交 version.json 到 main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout main
+          cp /tmp/siwx-version.json version.json
+          git add version.json
+          if git diff --cached --quiet; then
+            echo "version.json 无变化"
+          else
+            git commit -m "chore(release): 更新 version.json → ${{ github.ref_name }}"
+            git push origin main
+          fi
