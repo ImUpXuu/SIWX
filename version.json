@@ -1,12 +1,12 @@
 {
-  "version": "5.0.5",
-  "date": "2026-10-01 00:37:39",
-  "notes": "v5.0.5\n\n**UI 重构第一步：引入 Vue 3（零构建链），朋友圈页全面 Vue 化，切页有了过渡动画。**\n\n- **Vue 3 全局构建版**（vue.global.prod.js，~158KB，含运行时编译器）：零构建、零 node 依赖，源码用户 `clone → pip install → python run.py` 三步不变，PyInstaller 打包配置无需修改。\n- **朋友圈页 Vue 化**：响应式状态集中管理、组件化渲染（动态卡片 / 头像），好友昵称与头像到达后自动刷新，不再需要手动补渲染。\n- **切页过渡动画**：View Transitions API（Chrome/Edge 原生，零依赖）+ 其他浏览器降级淡入，尊重系统「减少动态效果」设置。\n\n- **导出按钮点击无反应**：弹层触发器白名单漏了导出按钮，点击后被全局点击处理器立即关闭；已修复，且按钮显示「导出」文字。\n- **本人头像不显示**：账号晚于页面挂载到达，首次预加载必然失败且不再重试；现在账号变更后自动重载。\n\n全量测试 265 通过 / 1 跳过。",
+  "version": "5.0.6",
+  "date": "2026-10-02 04:33:56",
+  "notes": "v5.0.6\n\n**自动更新全面重做：修复跨盘更新失败（WinError 17），macOS 打包版首次支持应用内更新。**\n\n- **Windows 跨盘修复**：更新包先下载到系统临时目录，替换改用 shutil.copyfile 跨盘复制——os.replace 不能跨卷导致的「系统无法将文件移到不同的磁盘驱动器」不再出现。安装完成后复核 SHA-256/文件大小，失败自动回滚，不再出现「旧 exe 已改名、新文件没落位」的变砖现场。\n- **带版本号文件名**：安装目标改为「当前运行的 exe 换上新版本号」（运行 stories-in-wx-v5.0.4-windows-x64.exe → 落位 stories-in-wx-v5.0.5-windows-x64.exe），不再硬编码 stories-in-wx.exe——用户目录里往往根本不存在这个文件名；文件名不含版本号时原地替换并保留 backup。\n- **移除 taskkill 自杀雷**：旧逻辑 `taskkill /im stories-in-wx*.exe` 的通配符会匹配到正在更新的进程自己，一旦生效整个更新静默死亡（连错误提示都没有）。运行中的 exe 在 Windows 上本就允许改名，改为「改名旧文件 → 落新文件」平滑换血，全程无需杀进程。\n- **macOS 应用内更新**：挂载 DMG → 旧 .app 改名 → 新包原子落位（失败回滚）→ `open -n` 重启；裸二进制运行同样支持。不再依赖未打包进产物的 update_mac.sh（旧脚本依赖系统 python3，打包版点更新只会报「未找到更新脚本」）。\n- **下载加固**：多候选地址（version.json 提供的链接 + GitHub Release 直链兜底）逐个尝试，单地址失败自动重试。\n- **重启竞态**：新进程启动时先等旧进程释放 8787 端口（最多 30 秒），避免新版 Flask EADDRINUSE 静默退出。\n\n**注意**：v5.0.5 及更早版本内含旧更新代码，程序装在非 C 盘的用户本次更新到 v5.0.6 仍会失败，请到 Release 页手动下载对应产物覆盖一次；自 v5.0.6 起，应用内自动更新在所有盘符位置均可正常工作。\n\n全量测试 283 通过 / 1 跳过。",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/stories-in-wx-v5.0.5-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/stories-in-wx-v5.0.5-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.6/stories-in-wx-v5.0.6-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.6/stories-in-wx-v5.0.6-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.5/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.6/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
