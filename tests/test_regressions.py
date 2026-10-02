@@ -1834,6 +1834,27 @@ class TestDisclaimerSync(unittest.TestCase):
         self.assertIn('id="side-disclaimer"', index_html, "侧栏缺少免责声明查看入口")
 
 
+# ── 14. pack="zip" 后 file 字段死链 ─────────────────────────────
+
+class TestZipPackFileDeadLink(TempRootCase):
+    """run_export 打包 zip 后删除整个导出目录，但返回值 file 仍指向
+    目录内已删除的文件。「每会话一个 ZIP」（pack="each" → 每会话
+    run_export(pack="zip")）模式下前端拿它渲染"下载文件"链接，点击
+    必然 404。打包后 file 必须置空。"""
+
+    def test_zip_pack_file_is_none_and_zip_exists(self):
+        acc, account, chat = make_account(self.tmp)
+        from siwx.exporter import run_export
+        res = run_export(acc, account, chat, "测试好友", "json",
+                         export_root=self.tmp / "exports", pack="zip")
+        self.assertIsNone(res["file"], "zip 打包删除目录后 file 不应再指向死路径")
+        self.assertTrue(Path(res["zip"]).is_file())
+        # 不打包时 file 正常返回
+        res2 = run_export(acc, account, chat, "测试好友", "json",
+                          export_root=self.tmp / "exports", pack="none")
+        self.assertTrue(Path(res2["file"]).is_file())
+
+
 # ── 15. is_me 判定的账号目录名解析 ──────────────────────────────
 
 class TestOwnerBase(TempRootCase):
