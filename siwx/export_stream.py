@@ -17,7 +17,7 @@ from pathlib import Path
 from siwx import media, voice
 from siwx.api_chat import (
     KIND_MAP, SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
-    _parse_appmsg, _parse_refer, _sender_map, _fmt, shards_for,
+    _parse_appmsg, _parse_refer, _sender_map, _fmt, owner_base, shards_for,
 )
 
 # 精简消息字段（去掉 rawContent 重复、去掉前端专用字段）
@@ -123,7 +123,7 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     if names is None:
         names = _contact_names(acc)
-    my_base = account.split("_6")[0] if "_6" in account else account
+    my_base = owner_base(account)
     is_group = chat.endswith("@chatroom")
 
     # 分片索引：只打开真正含该会话的分片。原先每次调用都要把 message/ 下全部
