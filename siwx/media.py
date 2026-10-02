@@ -38,6 +38,9 @@ _IMAGE_SIGS = (
 # ── 内存缓存（程序关闭即释放，不落盘） ──────────────────────────────
 _IMG_CACHE: "OrderedDict[str, tuple[bytes, str]]" = OrderedDict()
 _IMG_CACHE_MAX = 200            # 最多 200 张（约几十 MB）
+# LRU OrderedDict 的 move_to_end / popitem 并发调用会损坏内部链表
+# （最坏返回错误图片字节），Web API 多线程访问必须持锁
+_IMG_CACHE_LOCK = threading.Lock()
 
 # 派生密钥持久缓存（只有密钥，没有明文）
 _KEY_FILE_NAME = "media_key.json"
@@ -380,10 +383,11 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
     （packed_info md5 映射）→ hardlink → Thumb 明文缩略图。
     """
     cache_key = f"{account}:{chat}:{local_id}:{md5}:{bubble_md5}:{hq}"
-    if cache_key in _IMG_CACHE:
-        _IMG_CACHE.move_to_end(cache_key)
-        b, ct = _IMG_CACHE[cache_key]
-        return b, ct
+    with _IMG_CACHE_LOCK:
+        if cache_key in _IMG_CACHE:
+            _IMG_CACHE.move_to_end(cache_key)
+            b, ct = _IMG_CACHE[cache_key]
+            return b, ct
 
     wxid = account
     last_err = "未找到文件"
@@ -391,9 +395,10 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
 
     def _emit(body: bytes, ext: str):
         body, ext, ctype = _finalize(body, ext, f"image/{ext}")
-        _IMG_CACHE[cache_key] = (body, ctype)
-        if len(_IMG_CACHE) > _IMG_CACHE_MAX:
-            _IMG_CACHE.popitem(last=False)
+        with _IMG_CACHE_LOCK:
+            _IMG_CACHE[cache_key] = (body, ctype)
+            if len(_IMG_CACHE) > _IMG_CACHE_MAX:
+                _IMG_CACHE.popitem(last=False)
         return body, ctype
 
     # ⓪ attach 原图目录直查（按消息 XML md5 命名，不依赖 hardlink；
