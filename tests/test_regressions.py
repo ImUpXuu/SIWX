@@ -1834,6 +1834,50 @@ class TestDisclaimerSync(unittest.TestCase):
         self.assertIn('id="side-disclaimer"', index_html, "侧栏缺少免责声明查看入口")
 
 
+# ── 13. HTML 导出 </script> / <!-- 注入 ─────────────────────────
+
+class TestScriptSafeJson(unittest.TestCase):
+    """消息或会话名含 </script> 会提前闭合 window.CHAT_DATA 的 script
+    标签，导出的自包含网页损坏；含 <!-- 则令 script 进入双转义状态、
+    模板写出的闭标签被吞。两者都必须转义。"""
+
+    def test_closing_script_is_escaped(self):
+        from siwx.html_template import render_html
+        data = self._chat_data("</script><script>alert(1)</script>")
+        html = render_html(data)
+        blob = html.split("window.CHAT_DATA = ", 1)[1]
+        # script 体里不允许再出现原始的 </script>（闭标签只有模板自己写的）
+        body = blob[:blob.rindex(";</script>")]
+        self.assertNotIn("</script>", body)
+        import json
+        self.assertEqual(json.loads(blob[:blob.index(";</script>")])
+                         ["meta"]["sessionName"],
+                         "</script><script>alert(1)</script>")
+
+    def test_html_comment_is_escaped(self):
+        # 只转义 </ 不转 <!-- 等于没修：<!-- 叠加 <script> 会令 HTML
+        # 解析器吞掉模板写出的闭标签
+        from siwx.html_template import render_html
+        import json
+        data = self._chat_data("<!--")
+        html = render_html(data)
+        blob = html.split("window.CHAT_DATA = ", 1)[1]
+        self.assertEqual(json.loads(blob[:blob.index(";</script>")])
+                         ["meta"]["sessionName"], "<!--")
+
+    @staticmethod
+    def _chat_data(name):
+        from siwx.html_template import build_chat_data
+        msgs = [{
+            "createTime": 1, "senderUsername": "a", "senderDisplayName": "A",
+            "localType": 1, "content": name, "rawContent": name, "isSend": 0,
+        }]
+        session = {"wxid": "room", "displayName": name, "isGroup": False,
+                   "firstTimestamp": 1, "lastTimestamp": 1, "ownerId": "o",
+                   "messageCount": 1}
+        return build_chat_data(session, msgs, {})
+
+
 # ── 14. pack="zip" 后 file 字段死链 ─────────────────────────────
 
 class TestZipPackFileDeadLink(TempRootCase):
