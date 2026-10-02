@@ -8,6 +8,7 @@ let sessions = [];
 let currentChat = null;
 let officialOpen = false;
 let earliest = 0;
+let earliestId = 0;      // 翻页游标第二分量：同一秒的消息按 local_id 续翻
 let hasMore = false;
 let loading = false;
 let loadedMessages = [];
@@ -171,6 +172,7 @@ function resetChatView() {
   timelineMonths = [];
   timelineDayCache.clear();
   earliest = 0;
+  earliestId = 0;
   hasMore = false;
   setSelectionMode(false);
   el('c-title').textContent = '微信';
@@ -262,6 +264,7 @@ function renderSessions(kw) {
 async function openChat(s) {
   currentChat = s;
   earliest = 0;
+  earliestId = 0;
   hasMore = false;
   loadSeq++;               // 使切换会话前仍在飞的旧请求失效
   loadedMessages = [];
@@ -331,10 +334,13 @@ async function loadMessages(fresh, opts = {}) {
   if (fresh) loadSeq++;               // fresh 加载使所有在飞旧请求失效
   const seq = loadSeq;
   const before = opts.before || (!fresh && earliest ? earliest : 0);
+  // 游标为 (ts, localId) 组合：同一秒多条消息只按时间戳 `<` 翻页会被跳过
+  const beforeId = (!fresh && !opts.before && before && earliestId) ? earliestId : 0;
   const limit = opts.limit || 80;
   const url = `/api/chat/messages?account=${encodeURIComponent(account)}` +
     `&chat=${encodeURIComponent(s.username)}` +
     (before ? `&before=${before}` : '') +
+    (beforeId ? `&before_id=${beforeId}` : '') +
     `&limit=${limit}`;
   const data = await fetchJSON(url);
   if (seq !== loadSeq || s !== currentChat) return false;   // 过期响应，丢弃
@@ -359,6 +365,7 @@ async function loadMessages(fresh, opts = {}) {
     refreshSelectionUI();
   }
   earliest = loadedMessages.length ? loadedMessages[0].ts : earliest;
+  earliestId = loadedMessages.length ? (loadedMessages[0].id || 0) : earliestId;
   hasMore = data.has_more;
   updateSubtitle();
   return true;

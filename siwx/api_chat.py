@@ -603,6 +603,11 @@ def messages():
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
     before = int(request.args.get("before", "0") or 0)
+    # 游标升级为 (create_time, local_id) 组合：只用时间戳做 `<` 条件时，
+    # 翻页边界落在同一秒的一批消息中间（连发消息、消息与系统提示同秒很
+    # 常见），剩余同秒消息会被永久跳过。before_id 与 before 配套使用；
+    # 只传 before 时保持旧语义（向后兼容旧前端）。
+    before_id = int(request.args.get("before_id", "0") or 0)
     # 修复：limit 只做了上限、没做下限。负数会被直接拼进 SQL，而 SQLite 的
     # LIMIT -2 等同「无限制」，一次请求就能把整个会话读进内存。
     limit = max(1, min(int(request.args.get("limit", "100") or 100), 300))
@@ -614,7 +619,7 @@ def messages():
     names = _contact_names(acc)
     my_base = owner_base(account)
     is_group = chat.endswith("@chatroom")
-    _log(f"[msg] 查询消息: account={account}, chat={chat}, table={table}, before={before}, limit={limit}")
+    _log(f"[msg] 查询消息: account={account}, chat={chat}, table={table}, before={before}, before_id={before_id}, limit={limit}")
 
     # 用分片索引只打开真正含该会话的分片（原来是把十几个库全扫一遍）。
     # 分片内按 create_time 有序，合并后取最新的 limit 条。
@@ -630,8 +635,13 @@ def messages():
                    f"packed_info_data FROM [{table}]")
             params = []
             if before:
-                sql += " WHERE create_time < ?"
-                params.append(before)
+                if before_id:
+                    sql += (" WHERE (create_time < ?) "
+                            "OR (create_time = ? AND local_id < ?)")
+                    params = [before, before, before_id]
+                else:
+                    sql += " WHERE create_time < ?"
+                    params.append(before)
             sql += f" ORDER BY create_time DESC LIMIT {limit * 2}"
             rows = list(conn.execute(sql, params))
             if rows:
