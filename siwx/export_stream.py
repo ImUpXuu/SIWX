@@ -17,7 +17,7 @@ from pathlib import Path
 from siwx import media, voice
 from siwx.api_chat import (
     KIND_MAP, SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
-    _parse_appmsg, _parse_refer, _sender_map, _fmt, shards_for,
+    _parse_appmsg, _parse_refer, _sender_map, _fmt, owner_base, shards_for,
 )
 
 # 精简消息字段（去掉 rawContent 重复、去掉前端专用字段）
@@ -123,7 +123,7 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     if names is None:
         names = _contact_names(acc)
-    my_base = account.split("_6")[0] if "_6" in account else account
+    my_base = owner_base(account)
     is_group = chat.endswith("@chatroom")
 
     # 分片索引：只打开真正含该会话的分片。原先每次调用都要把 message/ 下全部
@@ -209,7 +209,9 @@ def stream_export_txt(path: Path, session: dict, msg_iter, progress=None):
     from datetime import datetime
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"聊天记录：{session['displayName']}（{session['type']}）\n")
-        f.write(f"消息数：未知（流式导出）    导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        # 元数据遍（run_export 第一遍扫描）早已统计出条数，回填而非"未知"
+        f.write(f"消息数：{session.get('messageCount') or '未知（流式导出）'}    "
+                f"导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n")
         f.write("=" * 60 + "\n\n")
         count = 0
         for msg in msg_iter:

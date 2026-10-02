@@ -3,7 +3,11 @@
   function esc(s) {
     const d = document.createElement('div');
     d.textContent = s == null ? '' : String(s);
-    return d.innerHTML;
+    // innerHTML 序列化只转义 & < >，不转义引号；而本函数大量用于属性位
+    // （data-* / onclick / href），值中出现引号即可逃出属性注入任意事件。
+    // 补齐引号转义后，属性位与文本位同等安全（顺带修复 settings 插件
+    // choice 型设置项 data-choices 属性被 JSON 引号截断导致选项丢失）。
+    return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   function timeStr(t) {
     const d = new Date(Number(t));
