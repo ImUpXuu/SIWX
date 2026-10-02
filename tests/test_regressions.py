@@ -1834,5 +1834,54 @@ class TestDisclaimerSync(unittest.TestCase):
         self.assertIn('id="side-disclaimer"', index_html, "侧栏缺少免责声明查看入口")
 
 
+# ── 12. 同秒消息分页游标（create_time + local_id 组合游标）──────────
+
+class TestSameSecondPagination(TempRootCase):
+    """向上翻页原来只按 `create_time < before` 取数：翻页边界落在同一秒的
+    一批消息中间时，剩余同秒消息会被永久跳过。升级为 (create_time,
+    local_id) 组合游标后必须能全部翻出；只传 before 时保持旧语义。"""
+
+    def _make_same_second_account(self):
+        acc, account, chat = make_account(self.tmp, n_texts=0)
+        db = acc / "message" / "message_0.db"
+        t = _msg_table(chat)
+        conn = sqlite3.connect(db)
+        # ts=100 同秒 4 条（id 1~4，新→旧写入），ts=50 两条（id 5~6）
+        for lid, ts in [(1, 100), (2, 100), (3, 100), (4, 100), (5, 50), (6, 50)]:
+            content = f"消息 {lid}".encode("utf-8")
+            conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
+                         (lid, 1000 + lid, 1, ts, 0, 1, content, None))
+        conn.commit()
+        conn.close()
+        api_chat._SHARD_INDEX.clear()
+        return account, chat
+
+    def test_same_second_messages_are_not_skipped(self):
+        from siwx.server import app
+        account, chat = self._make_same_second_account()
+        client = app.test_client()
+        base = f"/api/chat/messages?account={account}&chat={chat}&limit=3"
+
+        page1 = client.get(base).get_json()
+        self.assertEqual([m["id"] for m in page1["messages"]], [2, 3, 4])
+        self.assertTrue(page1["has_more"])
+
+        cursor = page1["messages"][0]
+        url = (f"{base}&before={cursor['ts']}&before_id={cursor['id']}")
+        page2 = client.get(url).get_json()
+        # 修复前：before=100 只按 `ts < 100` 取 → id=1（同秒）永久丢失
+        self.assertEqual(sorted(m["id"] for m in page2["messages"]), [1, 5, 6])
+        self.assertFalse(page2["has_more"])
+
+    def test_legacy_before_only_cursor_still_works(self):
+        from siwx.server import app
+        account, chat = self._make_same_second_account()
+        client = app.test_client()
+        page = client.get(
+            f"/api/chat/messages?account={account}&chat={chat}&limit=10&before=100"
+        ).get_json()
+        self.assertEqual(sorted(m["id"] for m in page["messages"]), [5, 6])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
