@@ -1148,7 +1148,7 @@ class TestVersionSource(unittest.TestCase):
         from siwx import __version__
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
-        self.assertEqual(__version__, "5.0.6")
+        self.assertEqual(__version__, "5.0.7")
 
     def test_remote_version_uses_newest_source_and_bypasses_cache(self):
         from siwx import auto_update
@@ -2150,7 +2150,7 @@ class TestLogDesensitize(unittest.TestCase):
         out = desensitize_msg(
             "[msg] 查询消息: account=wxalias_abc12345, chat=wxid_secret999")
         self.assertNotIn("wxalias_abc12345", out)
-        self.assertIn("account=cnpo***", out)
+        self.assertIn("account=wxal***", out)
         self.assertNotIn("wxid_secret999", out)
         self.assertIn("wxid_***", out)
 
