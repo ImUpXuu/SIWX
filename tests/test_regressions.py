@@ -1878,5 +1878,70 @@ class TestScriptSafeJson(unittest.TestCase):
         return build_chat_data(session, msgs, {})
 
 
+# ── 14. pack="zip" 后 file 字段死链 ─────────────────────────────
+
+class TestZipPackFileDeadLink(TempRootCase):
+    """run_export 打包 zip 后删除整个导出目录，但返回值 file 仍指向
+    目录内已删除的文件。「每会话一个 ZIP」（pack="each" → 每会话
+    run_export(pack="zip")）模式下前端拿它渲染"下载文件"链接，点击
+    必然 404。打包后 file 必须置空。"""
+
+    def test_zip_pack_file_is_none_and_zip_exists(self):
+        acc, account, chat = make_account(self.tmp)
+        from siwx.exporter import run_export
+        res = run_export(acc, account, chat, "测试好友", "json",
+                         export_root=self.tmp / "exports", pack="zip")
+        self.assertIsNone(res["file"], "zip 打包删除目录后 file 不应再指向死路径")
+        self.assertTrue(Path(res["zip"]).is_file())
+        # 不打包时 file 正常返回
+        res2 = run_export(acc, account, chat, "测试好友", "json",
+                          export_root=self.tmp / "exports", pack="none")
+        self.assertTrue(Path(res2["file"]).is_file())
+
+
+# ── 15. is_me 判定的账号目录名解析 ──────────────────────────────
+
+class TestOwnerBase(TempRootCase):
+    """is_me 依赖"从账号目录名 wxid_xxx_<uin> 推断本人原始 wxid"。
+    原实现 split("_6")[0] 赌 uin 以 6 开头、且是任意子串匹配：
+    uin 不以 6 开头时 is_me 全灭；wxid 本体含 6 开头段（如
+    wxid_6abc_6409）时直接得到 "wxid"。也不能改用 media.clean_wxid()
+    ——它对 wxid_a_b_1234 会切错，且语义被 MMKV 密钥派生依赖。"""
+
+    def test_owner_base_matrix(self):
+        from siwx.api_chat import owner_base
+        cases = [
+            ("wxid_abc_6409", "wxid_abc"),      # 常规：uin 以 6 开头
+            ("wxid_abc_123456", "wxid_abc"),    # uin 不以 6 开头（旧实现切错）
+            ("wxid_a_b_1234", "wxid_a_b"),      # wxid 本体含下划线
+            ("wxid_6abc_6409", "wxid_6abc"),    # wxid 本体含 6 开头段
+            ("my_custom_id", "my_custom_id"),   # 自定义账号 ID（无数字后缀）
+            ("wxid_abc", "wxid_abc"),           # 无 uin 后缀
+            ("", ""),
+            (None, ""),
+        ]
+        for inp, want in cases:
+            self.assertEqual(owner_base(inp), want, f"owner_base({inp!r})")
+
+    def test_is_me_uses_owner_base(self):
+        # uin 不以 6 开头的账号目录，自己发的消息 is_me / isSend 必须正确
+        acc, account, chat = make_account(self.tmp, account="wxid_me_123456",
+                                          chat="wxid_friend")
+        db = acc / "message" / "message_0.db"
+        t = _msg_table(chat)
+        conn = sqlite3.connect(db)
+        content = "wxid_me_123456:\n自己发的消息".encode("utf-8")
+        conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
+                     (999, 1999, 1, 1_700_000_500, 1, None, content, None))
+        conn.commit()
+        conn.close()
+        api_chat._SHARD_INDEX.clear()
+        from siwx.export_stream import message_stream
+        msgs = list(message_stream(acc, chat, account=account))
+        mine = [m for m in msgs if m["localId"] == 999]
+        self.assertTrue(mine and mine[0]["isSend"] == 1,
+                        "uin 不以 6 开头时 is_me 判定失败")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
