@@ -104,8 +104,11 @@
     return matchMedia('(prefers-reduced-motion: reduce)').matches;
   }
 
+  let navSeq = 0;                  // 路由代数守卫：快速连点菜单时旧导航作废
+
   async function navigate() {
     if (overlayOpen) return;                 // 免责声明弹层打开期间冻结导航
+    const seq = ++navSeq;
     let name = currentPageName();
     if (!allPages().includes(name)) {
       name = defaultRoute();
@@ -122,11 +125,14 @@
       if (!res.ok) throw new Error(`页面加载失败 (${res.status})`);
       html = await res.text();
     } catch (e) {
+      if (seq !== navSeq) return;
       view.innerHTML = `<div class="card"><h2>页面加载失败</h2><p class="dim">${e.message}</p></div>`;
       return;
     }
+    if (seq !== navSeq) return;              // 取页期间用户又点了别的页面
     ensureCss(base.css);
     const doSwap = () => {
+      if (seq !== navSeq) return;            // 视图过渡期间又发起了新导航
       if (current && current.mod && current.mod.destroy) {
         try { current.mod.destroy(); } catch (e) { /* 忽略 */ }
       }
@@ -148,12 +154,15 @@
       }
     } else {
       doSwap();
+      if (seq !== navSeq) return;
       view.classList.remove('view-enter');
       void view.offsetWidth;                 // 强制 reflow 重启动画
       view.classList.add('view-enter');
     }
+    if (seq !== navSeq) return;
     try {
       const mod = await import(`${base.js}?v=${Date.now()}`);
+      if (seq !== navSeq) return;            // 模块加载期间导航已切换
       current = { name, mod };
       if (mod.init) await mod.init(view);
     } catch (e) {
