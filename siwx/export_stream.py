@@ -209,7 +209,9 @@ def stream_export_txt(path: Path, session: dict, msg_iter, progress=None):
     from datetime import datetime
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"聊天记录：{session['displayName']}（{session['type']}）\n")
-        f.write(f"消息数：未知（流式导出）    导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        # 元数据遍（run_export 第一遍扫描）早已统计出条数，回填而非"未知"
+        f.write(f"消息数：{session.get('messageCount') or '未知（流式导出）'}    "
+                f"导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n")
         f.write("=" * 60 + "\n\n")
         count = 0
         for msg in msg_iter:
