@@ -1,18 +1,17 @@
 /* 聊天查看 —— 微信风格气泡 + 时间轴 + 消息选择/复制 */
-import { createDropdown, openMenu, closeMenu } from '/widgets.js';
+import { createDropdown, openMenu, closeMenu } from '/widgets.js?v=2026100203';
 
-const { esc, fetchJSON, fmtTs, fmtListTs, startJob } = window.SX;
+const { esc, fetchJSON, fmtTs, fmtListTs } = window.SX;
 
 let account = null;
 let sessions = [];
 let currentChat = null;
 let officialOpen = false;
 let earliest = 0;
-let earliestId = 0;
+let earliestId = 0;      // 翻页游标第二分量：同一秒的消息按 local_id 续翻
 let hasMore = false;
 let loading = false;
 let loadedMessages = [];
-let totalMessages = 0;   // V-3：会话消息总数（/api/chat/messages 返回，带缓存）
 // 请求代数守卫：fresh 加载（打开会话/跳转/刷新）递增序号，使仍在飞的
 // 旧请求（滚动加载/上一次跳转）返回后直接丢弃，避免旧响应覆盖新页面
 let loadSeq = 0;
@@ -57,27 +56,20 @@ async function init() {
     el('c-sessions').innerHTML = '<div class="c-loading">增量同步中…</div>';
     try {
       const acc = accDrop?.value || account;
-      // S-6：轮询统一走 SX.startJob（原来手写 300×1s，超 5 分钟静默放弃无提示）
-      await new Promise((resolve) => {
-        startJob({ mode: 'sync', export_opts: { account: acc } }, (logs) => {
-          if (logs.length) {
-            const last = logs[logs.length - 1];
-            const msg = last.length >= 4 ? last[3] : last[1];
-            el('c-sessions').innerHTML =
-              `<div class="c-loading">${esc(String(msg).substring(0, 60))}</div>`;
-          }
-        }, (job) => {
-          if (job.error === '已有任务在运行') {
-            el('c-sessions').innerHTML = '<div class="c-empty">已有任务在运行</div>';
-          } else if (job.timedOut) {
-            el('c-sessions').innerHTML =
-              '<div class="c-empty">同步超时（5 分钟）— 已停止等待，后台可能仍在进行，稍后请点刷新</div>';
-          } else if (job.error) {
-            el('c-sessions').innerHTML = `<div class="c-empty">同步失败: ${esc(job.error)}</div>`;
-          }
-          resolve();
-        }, { interval: 1000, timeout: 300000 });
+      const r = await fetch('/api/run', {
+        method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({ mode: 'sync', export_opts: { account: acc } }),
       });
+      if (r.status === 409) { el('c-sessions').innerHTML = '<div class="c-empty">已有任务在运行</div>'; return; }
+      for (let i = 0; i < 300; i++) {
+        await new Promise(res => setTimeout(res, 1000));
+        const j = await (await fetch('/api/job')).json();
+        if (!j.running) break;
+        if (j.logs.length) {
+          const last = j.logs[j.logs.length - 1][1];
+          el('c-sessions').innerHTML = `<div class="c-loading">${esc(last.substring(0, 60))}</div>`;
+        }
+      }
       await loadSessions();
       if (currentChat) await Promise.all([loadMessages(true), loadTimeline()]);
     } catch (e) {
@@ -98,18 +90,24 @@ async function init() {
     el('c-timeline').classList.toggle('pinned');
   });
 
-  // 跳转导出页并预选当前会话；若处于多选状态，把所选消息的 localId 精确带过去
-  // （E-2：原先按天取整为日期范围，实际导出的是所选日期的全部消息）
+  // 跳转导出页并预选当前会话；若处于多选状态，把所选范围一并带过去
   el('c-export').addEventListener('click', () => {
     if (!currentChat) { window.alert('先在左侧打开一个会话'); return; }
     const preset = { account, chat: currentChat.username, display: currentChat.display };
     if (selectionMode && selectedKeys.size) {
-      const ids = [...selectedKeys]
+      const tss = [...selectedKeys]
         .map(k => messageByKey(k)).filter(Boolean)
-        .map(m => m.id || 0).filter(Boolean);
-      if (ids.length) {
-        preset.ids = ids;
-        preset.count = ids.length;
+        .map(m => m.ts || 0).filter(Boolean);
+      if (tss.length) {
+        const day = (ts) => {
+          const d = new Date(ts * 1000);
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
+        preset.range = {
+          start: day(Math.min(...tss)),
+          end: day(Math.max(...tss)),
+          count: selectedKeys.size,
+        };
       }
     }
     sessionStorage.setItem('siwx-export-preset', JSON.stringify(preset));
@@ -176,7 +174,6 @@ function resetChatView() {
   earliest = 0;
   earliestId = 0;
   hasMore = false;
-  totalMessages = 0;
   setSelectionMode(false);
   el('c-title').textContent = '微信';
   el('c-sub').textContent = '选择一个会话查看聊天记录';
@@ -269,7 +266,6 @@ async function openChat(s) {
   earliest = 0;
   earliestId = 0;
   hasMore = false;
-  totalMessages = 0;
   loadSeq++;               // 使切换会话前仍在飞的旧请求失效
   loadedMessages = [];
   setSelectionMode(false);
@@ -337,9 +333,8 @@ async function loadMessages(fresh, opts = {}) {
   if (!s) return false;
   if (fresh) loadSeq++;               // fresh 加载使所有在飞旧请求失效
   const seq = loadSeq;
-  // J-3：游标升级为 (ts, localId) 组合——同一秒的多条消息只按时间戳
-  // 翻页会被 `<` 条件永久跳过；服务端 before_id 与 before 配套使用
   const before = opts.before || (!fresh && earliest ? earliest : 0);
+  // 游标为 (ts, localId) 组合：同一秒多条消息只按时间戳 `<` 翻页会被跳过
   const beforeId = (!fresh && !opts.before && before && earliestId) ? earliestId : 0;
   const limit = opts.limit || 80;
   const url = `/api/chat/messages?account=${encodeURIComponent(account)}` +
@@ -372,7 +367,6 @@ async function loadMessages(fresh, opts = {}) {
   earliest = loadedMessages.length ? loadedMessages[0].ts : earliest;
   earliestId = loadedMessages.length ? (loadedMessages[0].id || 0) : earliestId;
   hasMore = data.has_more;
-  if (typeof data.total === 'number') totalMessages = data.total;   // V-3
   updateSubtitle();
   return true;
 }
@@ -556,8 +550,8 @@ function renderTimelineDays(inner, days) {
       <span>${esc(d.day.slice(8))}日</span><b>${d.count}</b>
     </button>`).join('') : '<div class="tl-empty">该月没有消息</div>';
   inner.querySelectorAll('.tl-day').forEach(btn => {
-    // J-1：传日期字符串而非 first_ts——first_ts 是"当天第一条消息"时刻，
-    // +24h 会把次日上午的消息算进窗口
+    // 跳转目标传日期字符串而非 first_ts——first_ts 是"当天第一条消息"时刻，
+    // 以它 +24h 当窗口终点会把次日上午的消息算进窗口
     btn.addEventListener('click', () => jumpToTime(btn.dataset.day || ''));
   });
 }
@@ -569,20 +563,20 @@ function monthLabel(month) {
 
 async function jumpToTime(day) {
   if (!currentChat || !day) return;
-  // J-1：由日期字符串计算次日零点（本机时区，与服务端 strftime localtime
-  // 语义一致）作为跳转窗口终点。原实现 endOfDay = first_ts + 24h 实际是
-  // "当天第一条消息时刻 + 24 小时"，次日上午消息会挤进窗口、把当天的
-  // 消息整个挤出去（new Date 对 dd+1 的进月/进年由 Date 自动处理）。
+  // 由日期字符串计算次日零点（本机时区，与服务端 strftime localtime 语义
+  // 一致）作为跳转窗口终点。原实现 endOfDay = first_ts + 24h 实际是
+  // "当天第一条消息时刻 + 24 小时"：当天首条消息若发于 10:00，窗口会覆盖
+  // 次日凌晨到上午的消息，次日上午消息多时当天内容被整个挤出窗口
+  // （new Date 对 dd+1 的进月/进年由 Date 自动处理）。
   const [yy, mm, dd] = String(day).split('-').map(Number);
   if (!yy || !mm || !dd) return;
   const endOfDay = Math.floor(new Date(yy, mm - 1, dd + 1).getTime() / 1000);
-  // J-2：跳转期间置 loading 并清 hasMore，阻止滚动监听器在此期间
-  // 再发出带旧游标的加载请求形成三方竞态
+  // 跳转期间置 loading 并清 hasMore，阻止滚动监听器在此期间再发出带旧
+  // 游标的加载请求，与跳转请求形成三方竞态
   loading = true;
   hasMore = false;
   el('c-msgs').innerHTML = '<div class="c-loading">正在跳转到所选时间…</div>';
   earliest = 0;
-  earliestId = 0;
   try {
     await loadMessages(true, { before: endOfDay, limit: 80 });
   } finally {
@@ -594,7 +588,7 @@ async function jumpToTime(day) {
     target.classList.add('jump-hit');
     target.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setTimeout(() => target.classList.remove('jump-hit'), 1400);
-    recenterAfterImages(target);   // J-4：图片懒加载会挤偏落点，加载后重新居中
+    recenterAfterImages(target);   // 图片懒加载会挤偏落点，加载后重新居中
   }
 }
 
@@ -605,10 +599,10 @@ function tsOfTarget(day) {
   return Math.floor(new Date(yy, mm - 1, dd).getTime() / 1000);
 }
 
-/** J-4：跳转定位靠一次性 scrollIntoView，而消息图片懒加载完成后内容
- *  高度持续变化，滚动结束时目标行已被挤离原位。这里对目标行附近
- *  尚未加载的图片改为立即加载，每次加载完成后把目标行重新滚回
- *  视野中心（与打开会话的贴底跟随同思路）；4 秒后停止。 */
+/** 跳转定位靠一次性 scrollIntoView，而消息图片懒加载完成后内容高度
+ *  持续变化，滚动结束时目标行已被挤离原位。这里对目标行附近尚未加载
+ *  的图片改为立即加载，每次加载完成后把目标行重新滚回视野中心
+ *  （与打开会话的贴底跟随同思路）；4 秒后停止。 */
 function recenterAfterImages(target) {
   const box = el('c-msgs');
   const recenter = () => target.scrollIntoView({ block: 'center', behavior: 'auto' });
@@ -773,9 +767,8 @@ function flashButton(btn, text) {
 function updateSubtitle() {
   if (!currentChat) return;
   const type = currentChat.is_group ? '群聊' : '私聊';
-  const total = totalMessages ? ` / 共 ${totalMessages} 条` : '';
   const more = hasMore ? ' · 向上滚动加载更早' : '';
-  el('c-sub').textContent = `${type} · 已载入 ${loadedMessages.length}${total} 条${more}`;
+  el('c-sub').textContent = `${type} · 已载入 ${loadedMessages.length} 条${more}`;
 }
 
 async function openStatsModal() {

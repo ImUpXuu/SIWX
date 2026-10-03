@@ -15,20 +15,13 @@ function levelClass(m) {
   return "log-line dim";
 }
 
-function logText(entry) {
-  // /api/logs 混合返回旧格式 [ts,msg] 与新格式 [ts,level,module,msg]——
-  // 原先恒取 entry[1]，4 元组条目在日志页显示的是 "INFO"/"WARN" 级别串
-  return entry.length >= 4 ? entry[3] : entry[1];
-}
-
 function renderLogs(logs) {
   const box = el("log-box");
   const shown = logs.slice(-1000);
-  const sig = shown.length ? `${shown.length}:${shown[shown.length - 1][0]}:${logText(shown[shown.length - 1])}` : "0";
+  const sig = shown.length ? `${shown.length}:${shown[shown.length - 1][0]}:${shown[shown.length - 1][1]}` : "0";
   if (sig === lastSig) return;
   lastSig = sig;
-  box.innerHTML = shown.map((entry) => {
-    const m = logText(entry);
+  box.innerHTML = shown.map(([, m]) => {
     const div = document.createElement("div");
     div.className = levelClass(m);
     div.textContent = m;

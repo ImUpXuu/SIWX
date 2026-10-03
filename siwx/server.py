@@ -159,11 +159,10 @@ _register_plugin_blueprints(app)
 
 # ── 全局状态（必须在路由和错误处理之前定义）──────────────────────
 _lock = threading.Lock()
-_job = {"running": False, "mode": None, "done": False, "ok": False, "pct": 0,
-        "log_trimmed": 0, "logs": [], "report": None}
+_job = {"running": False, "mode": None, "done": False, "ok": False,
+        "logs": [], "report": None}
 _LOG_RING: list = []          # 环形日志缓冲（供日志页展示）
 _LOG_RING_MAX = 2000
-_CANCEL = threading.Event()   # S-3：协作式取消标志（仅 export/sync 响应）
 
 
 # ── 全局错误处理：确保所有异常都有日志 + JSON 响应 ──────────────
@@ -192,9 +191,7 @@ def _handle_exception(e):
         _LOG_RING.append([ts, msg])
         if len(_LOG_RING) > _LOG_RING_MAX:
             del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
-    # S-5：完整 traceback 只进日志文件，不回传页面——本地单用户威胁模型下
-    # 不算漏洞，但配合 DNS rebinding（既有审计 M-1）会放大信息泄露
-    return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+    return jsonify({"error": f"{type(e).__name__}: {e}", "traceback": tb}), 500
 
 
 def _log(msg: str) -> None:
@@ -206,8 +203,6 @@ def _log(msg: str) -> None:
         _job["logs"].append([ts, msg])
         if len(_job["logs"]) > 1200:
             del _job["logs"][:400]
-            # E-11：记录累计裁剪条数，增量拉取的 offset 按绝对条数计算
-            _job["log_trimmed"] = _job.get("log_trimmed", 0) + 400
         _LOG_RING.append([ts, msg])
         if len(_LOG_RING) > _LOG_RING_MAX:
             del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
@@ -217,21 +212,9 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _job_progress(pct, msg: str) -> None:
-    """导出进度回调：结构化记录 pct（E-11），前端进度条不再解析日志正则。"""
-    _log(f"[export] {pct}% {msg}")
-    with _lock:
-        _job["pct"] = int(pct or 0)
-
-
 def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
-             export_opts=None) -> bool:
-    """任务执行器。keys/decrypt 支持指定 db_dir（引导页单账号流程）。
-
-    返回任务是否成功完成（S-4：调用方据此记录结果，不再回头读 _job["ok"]——
-    那存在 TOCTOU：_run_job 释放任务槽与调用方获锁之间，/api/run 可能已把
-    _job 重置为新任务，读到的是别人的结果）。
-    """
+             export_opts=None) -> None:
+    """任务执行器。keys/decrypt 支持指定 db_dir（引导页单账号流程）。"""
     use_cache = not no_cache
     _log(f"[job] 模式={mode}, 指定目录={db_dir or '无'}, 缓存={use_cache}, 进程数={workers or '默认'}")
     _emit_task_event("start", mode=mode, db_dir=db_dir, out_dir=out_dir,
@@ -291,7 +274,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 _job["report"] = report
             _emit_task_event("done", mode=mode, ok=True, report=report,
                              duration_ms=int((time.time() - _t0) * 1000))
-            return True
+            return
 
         dirs = ([(wxid_of(db_dir), db_dir)] if db_dir else find_wechat_data_dirs())
         if not dirs:
@@ -367,16 +350,11 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _log(f"[job] 全自动完成")
 
         elif mode == "sync":
-            """增量同步：密钥缓存优先 → 收割缺失 → 只解密变更库。
-
-            S-2：直接用函数入口已发现的 dirs（原先无条件重新
-            find_wechat_data_dirs()，每次同步多一次全盘扫描；且若将来带
-            db_dir 调 sync，会静默丢弃单账号语义改扫全部账号）。
-            S-3：支持协作式取消，在账号边界检查取消标志。"""
+            """增量同步：密钥缓存优先 → 收割缺失 → 只解密变更库。"""
+            dirs = find_wechat_data_dirs()
+            if not dirs:
+                raise RuntimeError("未找到微信数据目录")
             for wxid, db in dirs:
-                if _CANCEL.is_set():
-                    _log("[sync] 收到取消请求，停止剩余账号")
-                    break
                 _log(f"[sync] 同步 {wxid}…")
                 entries = collect_db_files(db)
                 rep = extract.extract_keys_for_dir(db, _log,
@@ -407,16 +385,6 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             start_ts = int(datetime.strptime(start, "%Y-%m-%d").timestamp()) if start else None
             end_ts = int(datetime.strptime(end, "%Y-%m-%d").replace(
                 hour=23, minute=59, second=59).timestamp()) if end else None
-            # E-2：「导出所选」精确导出——按 localId 列表而非日期范围
-            local_ids = data.get("local_ids") or None
-            if local_ids:
-                try:
-                    local_ids = {int(x) for x in local_ids}
-                except (TypeError, ValueError):
-                    raise RuntimeError("local_ids 参数应为 localId 数组")
-                if len(local_ids) > 100000:
-                    raise RuntimeError("local_ids 数量超出上限")
-                _log(f"[export] 精确导出所选 {len(local_ids)} 条消息（忽略日期范围）")
             _log(f"[export] 账号={data.get('account')} 会话数={len(chats)} 格式={data.get('format', 'json')}")
             _log(f"[export] 消息={data.get('messages', True)} 图片={data.get('media', False)} "
                  f"语音={data.get('voice', False)} 头像={data.get('avatars', False)} "
@@ -433,14 +401,10 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 want_avatars=data.get("avatars", False),
                 export_root=_paths.exports_root(),
                 pack=data.get("pack", "folder"),
-                only_local_ids=local_ids,
-                should_cancel=_CANCEL.is_set,
-                progress=_job_progress)
+                progress=lambda pct, msg: _log(f"[export] {pct}% {msg}"))
             _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
                  f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"
                  f"耗时 {res.get('duration_ms', 0)}ms")
-            if res.get("cancelled"):
-                _log("[export] 任务已被用户取消，结果仅含已完成部分")
             report = {"kind": "export", **res}
 
         else:
@@ -451,7 +415,6 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _job["report"] = report
         _emit_task_event("done", mode=mode, ok=True, report=report,
                          duration_ms=int((time.time() - _t0) * 1000))
-        return True
     except Exception as e:
         _siwx_logger.exception("任务执行失败: %s", e)
         _flush_logs()
@@ -465,14 +428,10 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
         _emit_task_event("done", mode=mode, ok=False, error=str(e),
                          duration_ms=int((time.time() - _t0) * 1000))
-        return False
     finally:
         with _lock:
             _job["running"] = False
             _job["done"] = True
-        # 任务可能新增/更新了密钥缓存与解密产物 → 状态快照立即失效
-        _invalidate_status_cache()
-        _CANCEL.clear()   # S-3：任务结束（含取消）后复位取消标志
 
 
 def _emit_task_event(event: str, **ctx) -> None:
@@ -526,44 +485,31 @@ def _plugin_theme_links() -> str:
     return "\n".join(parts)
 
 
-def _no_cache(resp):
-    """静态资源协商缓存：保留 ETag/Last-Modified，但禁止启发式缓存。
-
-    F-2：前端模块 URL 已固定为 ?v=UI_VERSION（不再是每次导航的时间戳），
-    软件更新覆盖文件后浏览器必须回源校验，否则"更新后不生效"。
-    """
-    resp.headers["Cache-Control"] = "no-cache"
-    return resp
-
-
 @app.get("/app.css")
 def css():
-    return _no_cache(send_from_directory(UI_DIR, "app.css", mimetype="text/css"))
+    return send_from_directory(UI_DIR, "app.css", mimetype="text/css")
 
 
 @app.get("/app.js")
 def js():
-    return _no_cache(send_from_directory(UI_DIR, "app.js",
-                                         mimetype="text/javascript"))
+    return send_from_directory(UI_DIR, "app.js", mimetype="text/javascript")
 
 
 @app.get("/common.js")
 def common_js():
-    return _no_cache(send_from_directory(UI_DIR, "common.js",
-                                         mimetype="text/javascript"))
+    return send_from_directory(UI_DIR, "common.js", mimetype="text/javascript")
 
 
 @app.get("/widgets.js")
 def widgets_js():
     """自绘控件（下拉/日期/菜单）：被 pages/*.js 以 ESM 静态 import 引用。"""
-    return _no_cache(send_from_directory(UI_DIR, "widgets.js",
-                                         mimetype="text/javascript"))
+    return send_from_directory(UI_DIR, "widgets.js", mimetype="text/javascript")
 
 
 @app.get("/pages/<path:filename>")
 def pages(filename: str):
     """模块化页面资源：pages/<name>.html / .js / .css"""
-    return _no_cache(send_from_directory(UI_DIR / "pages", filename))
+    return send_from_directory(UI_DIR / "pages", filename)
 
 
 @app.get("/vendor/<path:filename>")
@@ -576,7 +522,7 @@ def vendor(filename: str):
         abort(404)
     if not (root / filename).is_file():
         abort(404)
-    return _no_cache(send_from_directory(root, filename))
+    return send_from_directory(root, filename)
 
 
 @app.get("/plugin-pages/<plugin>/<path:filename>")
@@ -593,24 +539,11 @@ def plugin_pages(plugin: str, filename: str):
         abort(404)
     if not target.is_file():
         abort(404)
-    return _no_cache(send_from_directory(root, filename))
+    return send_from_directory(root, filename)
 
 
 @app.get("/api/status")
 def status():
-    return jsonify(_status_snapshot())
-
-
-# ── 微信状态快照缓存（S-1）───────────────────────────────────────
-# /api/status（前端 5s 轮询）、TUI 状态栏（1s 轮询）、auto-sync 调度（30s）
-# 原先各自独立全盘扫描（find_wechat_pids + collect_db_files + HMAC 验证），
-# 常驻磁盘 IO。收敛为带 TTL 的共享快照，三处共用。
-_STATUS_TTL = 12.0
-_STATUS_LOCK = threading.Lock()
-_STATUS_CACHE: dict = {"ts": 0.0, "data": None}
-
-
-def _compute_status_snapshot() -> dict:
     pids = find_wechat_pids()
     accounts = []
     manual_set = {str(Path(db).resolve()).casefold()
@@ -639,35 +572,14 @@ def _compute_status_snapshot() -> dict:
         accounts.append({"wxid": wxid, "db_dir": db, "db_count": total,
                          "keys_cached": cached, "total_salts": total,
                          "manual": is_manual})
-    return {
+    return jsonify({
         "wechat_running": bool(pids),
         "pids": pids,
         "accounts": accounts,
         "stored_salts": len(store),
         # 同名账号冲突：多个 db_dir 共用 output/<wxid>/，解密会互相覆盖
         "conflicts": find_account_conflicts(all_dirs),
-    }
-
-
-def _status_snapshot() -> dict:
-    now = time.monotonic()
-    with _STATUS_LOCK:
-        cached = _STATUS_CACHE["data"]
-        if cached is not None and now - _STATUS_CACHE["ts"] < _STATUS_TTL:
-            return cached
-    # 慢扫描放锁外：并发时最坏重复算一次，不阻塞 /api/run、/api/job
-    data = _compute_status_snapshot()
-    with _STATUS_LOCK:
-        _STATUS_CACHE["ts"] = time.monotonic()
-        _STATUS_CACHE["data"] = data
-    return data
-
-
-def _invalidate_status_cache() -> None:
-    """解密类任务结束 / 手动新增数据目录后立即失效，避免最长滞后一个 TTL。"""
-    with _STATUS_LOCK:
-        _STATUS_CACHE["ts"] = 0.0
-        _STATUS_CACHE["data"] = None
+    })
 
 
 @app.post("/api/run")
@@ -676,10 +588,8 @@ def run():
     with _lock:
         if _job["running"]:
             return jsonify({"error": "已有任务在运行"}), 409
-        _CANCEL.clear()   # S-3：新任务启动前复位取消标志
         _job.update({"running": True, "mode": data.get("mode", ""), "done": False,
-                     "ok": False, "pct": 0, "log_trimmed": 0,
-                     "logs": [], "report": None})
+                     "ok": False, "logs": [], "report": None})
     args = (data.get("mode", ""), data.get("db_dir"), data.get("out_dir"),
             bool(data.get("no_cache")), data.get("workers"),
             data.get("export_opts") or {})
@@ -763,6 +673,16 @@ def _log_item_text(item) -> str:
     return str(item[3] if len(item) >= 4 else item[1])
 
 
+def _desensitize_item(item):
+    """对单条日志条目的文本部分脱敏。
+
+    重建列表而非原地改：环形缓冲 / 文件缓冲与这里共享同一批 entry 对象，
+    原地改会把脱敏写回底层缓冲（污染 export_logs 的 desensitize=0 通道）。"""
+    if len(item) >= 4:
+        return [item[0], item[1], item[2], log.desensitize_msg(str(item[3]))]
+    return [item[0], log.desensitize_msg(str(item[1]))]
+
+
 @app.get("/api/logs")
 def api_logs():
     """返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）。"""
@@ -785,6 +705,9 @@ def api_logs():
             continue
         seen.add(key)
         merged.append(item)
+    # 日志页统一脱敏：账号标识（含 wxalias_xxx 类自定义微信号）、密钥、路径
+    # 不随截图/粘贴外泄。导出日志另有 desensitize=0 通道可拿原文。
+    merged = [_desensitize_item(item) for item in merged]
     return jsonify({"logs": merged[-limit:], "level": log.get_level().value})
 
 
@@ -800,6 +723,9 @@ def api_log_settings_save():
     data = request.get_json(silent=True) or {}
     level = data.get("level", "rough")
     log.set_level(log.LogLevel.DETAILED if level == "detailed" else log.LogLevel.ROUGH)
+    # 级别切换必须同时作用于 siwx.log：此前文件日志恒 DEBUG，UI 里切换等于没切
+    logging.getLogger("siwx").setLevel(
+        logging.DEBUG if level == "detailed" else logging.INFO)
     return jsonify({"level": log.get_level().value})
 
 
@@ -818,54 +744,16 @@ def api_log_export():
 
 @app.get("/api/job")
 def api_job():
-    """返回当前任务状态（供前端轮询）。
-
-    E-11：带 offset 参数时只返回其后的增量日志（offset 为绝对条数，
-    含已被环形缓冲裁剪的早期条数），供导出页追加渲染；不带 offset 时
-    返回全量日志（向后兼容旧调用方）。
-    """
-    try:
-        offset = int(request.args.get("offset", "-1") or -1)
-    except ValueError:
-        offset = -1
+    """返回当前任务状态（供前端轮询）。"""
     with _lock:
-        logs = _job["logs"]
-        trimmed = int(_job.get("log_trimmed", 0))
-        payload = {
+        return jsonify({
             "running": _job["running"],
             "done": _job["done"],
             "ok": _job["ok"],
             "mode": _job["mode"],
-            "pct": _job.get("pct", 0),
-            "log_total": trimmed + len(logs),
-            "log_trimmed": trimmed,
+            "logs": _job["logs"],
             "report": _job["report"],
-        }
-        if offset >= 0:
-            payload["logs"] = list(logs[max(0, offset - trimmed):])
-        else:
-            payload["logs"] = list(logs)
-        return jsonify(payload)
-
-
-@app.post("/api/cancel")
-def api_cancel():
-    """S-3：协作式取消当前任务。
-
-    仅 export/sync 响应：导出在会话边界停止（已完成部分保留并照常打包），
-    同步在账号边界停止。keys/decrypt 不支持（单次内存扫描/解密流水线，
-    中途停止收益低、复杂度高）。
-    """
-    with _lock:
-        running = _job["running"]
-        mode = _job["mode"]
-    if not running:
-        return jsonify({"error": "当前没有运行中的任务"}), 409
-    if mode not in ("export", "sync"):
-        return jsonify({"error": f"模式 {mode} 不支持取消"}), 400
-    _CANCEL.set()
-    _log("[job] 收到取消请求，将在当前会话/账号完成后停止…")
-    return jsonify({"cancelling": True})
+        })
 
 
 @app.post("/api/discover/validate")
@@ -873,8 +761,6 @@ def api_validate_path():
     """验证并保存手动输入的微信存储路径。"""
     data = request.get_json(silent=True) or {}
     result = add_manual_data_dir(data.get("path", ""))
-    # 手动新增数据目录 → 状态快照立即失效，否则引导页最长滞后一个 TTL
-    _invalidate_status_cache()
     return jsonify(result)
 
 
@@ -899,20 +785,19 @@ def _start_auto_sync_scheduler() -> None:
                 interval = max(1, int(cfg.get("interval_minutes") or 30)) * 60
                 if last and time.time() - last < interval:
                     continue
-                if not _status_snapshot().get("pids"):
+                if not find_wechat_pids():
                     continue
                 with _lock:
                     if _job["running"]:
                         continue
                     _job.update({"running": True, "mode": "sync", "done": False,
-                                 "ok": False, "pct": 0, "log_trimmed": 0,
-                                 "logs": [], "report": None})
+                                 "ok": False, "logs": [], "report": None})
                 _log(f"[auto-sync] 微信在线，开始定时增量同步（间隔 {interval // 60} 分钟）")
 
                 def _worker():
-                    # S-4：直接使用 _run_job 的返回值，不再回头读 _job["ok"]——
-                    # 释放任务槽与获锁之间 /api/run 可能已重置 _job（TOCTOU）
-                    ok = _run_job("sync")
+                    _run_job("sync")
+                    with _lock:
+                        ok = bool(_job.get("ok"))
                     mark_auto_sync_result(ok, "增量同步完成" if ok else "增量同步失败")
 
                 threading.Thread(target=_worker, daemon=True).start()
@@ -949,18 +834,16 @@ def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
     if open_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
 
-    # 状态 getter（供 TUI 状态栏轮询）；走共享快照缓存（S-1），
-    # 状态栏 1s 一轮不再独立全盘扫描
+    # 状态 getter（供 TUI 状态栏轮询）
     def _status_getter() -> dict:
         d = {}
         try:
             d["url"] = url
-            snap = _status_snapshot()
-            pids = snap.get("pids") or []
+            pids = find_wechat_pids()
             d["wechat"] = f"运行中({len(pids)})" if pids else "未运行"
-            accs = snap.get("accounts") or []
-            d["wxid"] = accs[0]["wxid"] if accs else "未检测"
-            d["keys"] = str(snap.get("stored_salts") or 0)
+            accs = find_wechat_data_dirs()
+            d["wxid"] = accs[0][0] if accs else "未检测"
+            d["keys"] = str(len(keystore.load()))
             with _lock:
                 if _job["running"]:
                     d["job"] = f"{_job['mode']}…"

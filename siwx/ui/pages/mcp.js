@@ -1,5 +1,5 @@
 /* MCP 配置页 —— 左侧会话列表 + 右侧配置/工具开关 + 调用日志 */
-import { createDropdown } from '/widgets.js';
+import { createDropdown } from '/widgets.js?v=2026100203';
 
 const { esc, fetchJSON, fmtTs, fmtListTs } = window.SX;
 

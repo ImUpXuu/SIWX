@@ -1,5 +1,5 @@
 /* 设置页 —— 版本与更新 / 缓存总览 / 清除 / 重新运行引导 */
-import { createDropdown } from '/widgets.js';
+import { createDropdown } from '/widgets.js?v=2026100203';
 
 const { esc, fetchJSON, go, resetSetup, copyText } = window.SX;
 

@@ -14,7 +14,6 @@
   let pluginPages = [];            // 服务端已按显示条件过滤
   let current = null;              // { name, mod }
   let loadedCss = {};
-  let navSeq = 0;                  // 路由代数守卫（F-3）：快速连点菜单时旧导航作废
 
   /** 全部可用页面名（内置 + 插件） */
   function allPages() {
@@ -105,9 +104,11 @@
     return matchMedia('(prefers-reduced-motion: reduce)').matches;
   }
 
+  let navSeq = 0;                  // 路由代数守卫：快速连点菜单时旧导航作废
+
   async function navigate() {
     if (overlayOpen) return;                 // 免责声明弹层打开期间冻结导航
-    const seq = ++navSeq;                    // F-3：慢的旧导航完成后不得覆盖新页面
+    const seq = ++navSeq;
     let name = currentPageName();
     if (!allPages().includes(name)) {
       name = defaultRoute();
@@ -124,10 +125,11 @@
       if (!res.ok) throw new Error(`页面加载失败 (${res.status})`);
       html = await res.text();
     } catch (e) {
+      if (seq !== navSeq) return;
       view.innerHTML = `<div class="card"><h2>页面加载失败</h2><p class="dim">${e.message}</p></div>`;
       return;
     }
-    if (seq !== navSeq) return;              // 导航期间用户又点了别的页面
+    if (seq !== navSeq) return;              // 取页期间用户又点了别的页面
     ensureCss(base.css);
     const doSwap = () => {
       if (seq !== navSeq) return;            // 视图过渡期间又发起了新导航
@@ -159,10 +161,7 @@
     }
     if (seq !== navSeq) return;
     try {
-      // F-2：固定版本号而非每次导航的时间戳——原实现让浏览器每次都重新
-      // 下载并重新解析执行整页模块；静态服务已配套 no-cache 头（协商缓存），
-      // 更新覆盖文件后 ?v 变更 + 回源校验双保险。
-      const mod = await import(`${base.js}?v=${UI_VERSION}`);
+      const mod = await import(`${base.js}?v=${Date.now()}`);
       if (seq !== navSeq) return;            // 模块加载期间导航已切换
       current = { name, mod };
       if (mod.init) await mod.init(view);

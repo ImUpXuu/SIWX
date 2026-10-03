@@ -1,5 +1,5 @@
 /* 聊天统计页 —— 所有图表用内联 SVG 手绘，零外部依赖，沿用黑白描边风格 */
-import { createDropdown, createDatePicker } from '/widgets.js';
+import { createDropdown, createDatePicker } from '/widgets.js?v=2026100203';
 
 const { esc, fmtTs, fetchJSON } = window.SX;
 

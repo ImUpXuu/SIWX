@@ -45,16 +45,9 @@
     return j;
   }
 
-  /* 任务：POST /api/run + 轮询 /api/job；返回 stop()。
-   * opts.interval  轮询间隔 ms（默认 600）
-   * opts.timeout   超时 ms（默认 0 = 无超时，保持旧行为）；超时后回调
-   *                onDone({...job, timedOut:true, error})，调用方应给出提示 */
-  function startJob(body, onLog, onDone, opts) {
-    const o = opts || {};
-    const interval = Math.max(200, o.interval || 600);
-    const timeout = o.timeout || 0;
+  /* 任务：POST /api/run + 轮询 /api/job；返回 stop()。 */
+  function startJob(body, onLog, onDone) {
     let stop = false;
-    let elapsed = 0;
     (async () => {
       try {
         const r = await fetch('/api/run', {
@@ -71,13 +64,7 @@
           try { job = await (await fetch('/api/job')).json(); } catch (e) { return; }
           if (onLog) onLog(job.logs || []);
           if (job.running) {
-            elapsed += interval;
-            if (timeout && elapsed >= timeout) {
-              onDone && onDone({ ...job, running: false, timedOut: true,
-                                 error: o.timeoutMessage || `等待超时（${Math.round(timeout / 1000)} 秒）` });
-              return;
-            }
-            setTimeout(poll, interval);
+            setTimeout(poll, 600);
           } else {
             onDone && onDone(job);
           }

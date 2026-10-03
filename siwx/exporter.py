@@ -9,19 +9,15 @@
 import hashlib
 import json
 import os
-import re
 import shutil
 import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
 
-from siwx import media, voice
+from siwx import logger, media, voice
 from siwx import paths as _paths
-from siwx.api_chat import (
-    _contact_names, _decode_content, _resolve_sender, _sender_map,
-    owner_base, shards_for,
-)
+from siwx.api_chat import _contact_names
 from siwx.export_stream import (
     message_stream, stream_export_json, stream_export_txt,
     stream_export_csv, stream_export_md,
@@ -81,65 +77,59 @@ def collect_avatars(acc_out_dir: Path, usernames: list, dest: Path, progress=Non
     return mapping
 
 
-def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None,
-                      only_local_ids=None):
-    """第一遍：轻量扫描，只采集计数/发送者/媒体引用。内存 O(发送者数 + 媒体数)。
-
-    E-3：不再对每行做全套富化——通常占大头的纯文本/系统消息只做发送者解析
-    （解码 + 前缀正则 + rsid 映射，与 _enrich_row 共用 _resolve_sender），
-    md5/bubble_md5 只对图片(3)/表情(47) 类型执行，语音(34) 只记 localId；
-    quote/link/_fmt 等写出阶段才需要的重活全部跳过，大会话第一遍明显提速。
-    only_local_ids（E-2 精确导出）与 start_ts/end_ts 是独立过滤条件。
-    """
+def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
+    """第一遍：轻量扫描，只采集计数/发送者/媒体引用。内存 O(发送者数 + 媒体数)。"""
     senders = set()
     images = []       # (md5, bubble_md5, localId, ts) 引用
     voices = []       # (localId, serverId, ts) 引用
     count = 0
     first_ts = last_ts = 0
-    account = account or acc_out_dir.name
-    my_base = owner_base(account)
-    is_group = chat.endswith("@chatroom")
-    table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
-    for db in shards_for(acc_out_dir, chat):
-        conn = sqlite3.connect(db)
-        try:
-            smap = _sender_map(conn)
-            cur = conn.execute(
-                f"SELECT local_id, server_id, local_type, create_time, "
-                f"origin_source, real_sender_id, message_content, packed_info_data "
-                f"FROM [{table}] ORDER BY create_time")
-            for local_id, server_id, ltype, ts, origin, rsid, content, packed in cur:
-                if only_local_ids is not None and local_id not in only_local_ids:
-                    continue
-                if start_ts and (ts or 0) < start_ts:
-                    continue
-                if end_ts and (ts or 0) > end_ts:
-                    continue
-                count += 1
-                ts = ts or 0
-                if count == 1:
-                    first_ts = ts
-                last_ts = ts
-                text = _decode_content(content)
-                sender_wxid, _is_me, text = _resolve_sender(
-                    text, rsid, origin, smap, my_base, is_group, chat, account)
-                senders.add(sender_wxid or chat)
-                t = ltype & 0xFFFF
-                if t in (3, 47):
-                    md5 = media.extract_md5_from_xml(text) if text else None
-                    bubble_md5 = None
-                    if packed:
-                        m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
-                        bubble_md5 = m2.group().decode() if m2 else None
-                    if md5 or bubble_md5:
-                        images.append((md5, bubble_md5, local_id, ts))
-                elif t == 34:
-                    voices.append((local_id, str(server_id or ""), ts))
-        except sqlite3.Error:
-            pass
-        finally:
-            conn.close()
+    for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
+        count += 1
+        ts = msg["createTime"] or 0
+        if count == 1:
+            first_ts = ts
+        last_ts = ts
+        senders.add(msg["senderUsername"])
+        if msg.get("md5") or msg.get("bubbleMd5"):
+            images.append((msg.get("md5"), msg.get("bubbleMd5"),
+                           msg["localId"], ts))
+        if msg.get("localType") == 34:
+            voices.append((msg["localId"], msg.get("platformMessageId") or "", ts))
     return count, first_ts, last_ts, senders, images, voices
+
+
+def _attach_media(msg: dict, media_map: dict) -> None:
+    """按消息类型回填 mediaFile，防跨分片 local_id 撞号错挂。
+
+    导出管线只产出图片(3/47)与语音(34)两类媒体文件，而媒体映射以 localId
+    为键；多分片会话中各分片的 local_id 独立编号会撞号——文本/链接/系统
+    消息一旦撞上键，就会被挂上属于其它消息的图片（实测某会话 885 条）。
+    图片槽位与语音槽位也互斥，防图片/语音之间串型。
+    已知残留：同为图片的两条消息跨分片撞号时仍会共享同一张图，彻底解决
+    需要把映射键升级为 (md5, localId, ts) 组合键。"""
+    t = msg.get("localType")
+    if t not in (3, 47, 34):
+        return
+    mf = media_map.get(msg.get("localId"))
+    if not mf:
+        return
+    if (t == 34) != ("/voice_" in mf):
+        return
+    msg["mediaFile"] = mf
+
+
+def _log_media_failures(kind: str, failures: list, total: int) -> None:
+    """聚合记录媒体失败（原因分布），终结导出失败全静默的盲区。"""
+    if not failures:
+        return
+    reasons = {}
+    for r in failures:
+        reasons[r] = reasons.get(r, 0) + 1
+    top = "; ".join(f"{k} ×{v}" for k, v in
+                    sorted(reasons.items(), key=lambda kv: -kv[1])[:3])
+    logger.warn("export",
+                f"[export] {kind}处理失败 {len(failures)}/{total}: {top}")
 
 
 def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=None):
@@ -167,41 +157,49 @@ def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=N
     from multiprocessing import Pool
 
     media_map = {}
+    failures = []
     with Pool(n) as pool:
         for i, result in enumerate(pool.imap_unordered(_decrypt_one, tasks)):
-            local_id, rel_path, ok = result
+            local_id, rel_path, ok, reason = result
             if ok:
                 media_map[local_id] = rel_path
+            else:
+                failures.append(reason)
             if (i + 1) % 10 == 0 and progress:
                 progress(0, f"媒体 {i + 1}/{len(images)}")
+    _log_media_failures("图片", failures, len(images))
     return media_map
 
 
 def _decrypt_media_serial(acc_out_dir, account, chat, images, dest, progress=None):
     """串行解密（单核兜底）。"""
     media_map = {}
+    failures = []
     for i, (md5, bubble_md5, local_id, ts) in enumerate(images):
         fn = f"{i:04d}_{(md5 or 'img')[:12]}.jpg"
         dst = dest / fn
-        out = _try_decrypt(acc_out_dir, account, chat, md5, bubble_md5,
-                           local_id, ts, dst)
+        out, reason = _try_decrypt(acc_out_dir, account, chat, md5, bubble_md5,
+                                   local_id, ts, dst)
         if out:
             media_map[local_id] = f"media/{out.name}"
+        else:
+            failures.append(reason)
         if (i + 1) % 10 == 0 and progress:
             progress(0, f"媒体 {i + 1}/{len(images)}")
+    _log_media_failures("图片", failures, len(images))
     return media_map
 
 
 def _decrypt_one(task):
-    """单张图片解密（子进程入口）。返回实际落盘文件名。"""
+    """单张图片解密（子进程入口）。返回 (local_id, 相对路径, 是否成功, 失败原因)。"""
     acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst = task
-    out = _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts,
-                       Path(dst))
-    return (local_id, f"media/{out.name}" if out else "", out is not None)
+    out, reason = _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id,
+                               ts, Path(dst))
+    return (local_id, f"media/{out.name}" if out else "", out is not None, reason)
 
 
 def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
-    """尝试解密单张图片。成功返回实际写出的 Path，失败返回 None。
+    """尝试解密单张图片。成功返回 (实际写出的 Path, "")，失败返回 (None, 原因)。
 
     Bug 修复：实际扩展名由图片内容决定（png/gif/jpg），必须把改写后的路径返回给
     调用方。原实现只返回 True/False，调用方却拿传入的 `.jpg` 占位名去拼 media
@@ -217,45 +215,51 @@ def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
             ext = "png" if "png" in ctype else ("gif" if "gif" in ctype else "jpg")
             dst = Path(dst).with_suffix(f".{ext}")
             dst.write_bytes(body)
-            return dst
-    except Exception:
-        pass
-    return None
+            return dst, ""
+        return None, "未找到源文件或解密为空"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _export_voice_media(acc_out_dir, account, chat, voices, dest, progress=None):
     """导出语音媒体：优先 WAV，缺少解码器时保留 SILK。"""
     dest.mkdir(parents=True, exist_ok=True)
     media_map = {}
+    failures = []
     for i, (local_id, svr_id, ts) in enumerate(voices):
-        out = _try_export_voice(acc_out_dir, chat, local_id, svr_id, ts,
-                                dest / f"voice_{i:04d}_{local_id or 'msg'}")
+        out, reason = _try_export_voice(acc_out_dir, chat, local_id, svr_id, ts,
+                                        dest / f"voice_{i:04d}_{local_id or 'msg'}")
         if out:
             media_map[local_id] = f"media/{out.name}"
+        else:
+            failures.append(reason)
         if (i + 1) % 10 == 0 and progress:
             progress(0, f"语音 {i + 1}/{len(voices)}")
+    _log_media_failures("语音", failures, len(voices))
     return media_map
 
 
 def _try_export_voice(acc_dir, chat, local_id, svr_id, ts, dst_base):
-    """读取并尝试转码一条语音。成功返回实际写出的 Path，失败返回 None。"""
+    """读取并尝试转码一条语音。成功返回 (实际写出的 Path, "")，失败返回 (None, 原因)。
+
+    转码失败不算失败：无本地解码器时保留清理后的 SILK 原文，供用户后续转换。"""
     try:
         body, info = voice.get_voice(Path(acc_dir), chat=chat or "",
                                      local_id=local_id or 0,
                                      svr_id=int(svr_id or 0), ts=ts or 0)
         if body is None:
-            return None
+            return None, "语音数据未找到"
         wav, meta = voice.transcode_voice(body, "wav")
         if wav is not None:
             dst = Path(dst_base).with_suffix(".wav")
             dst.write_bytes(wav)
-            return dst
+            return dst, ""
         # 无本地解码器时不阻塞导出，保留清理后的 SILK 原文，供用户后续转换。
         dst = Path(dst_base).with_suffix(".silk")
         dst.write_bytes(body)
-        return dst
-    except Exception:
-        return None
+        return dst, ""
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
 def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
@@ -263,13 +267,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                want_messages=True, want_media=True, want_voice=False,
                want_avatars=True,
                export_root: Path = None, pack: str = "zip",
-               folder_name: str = None, only_local_ids=None,
+               folder_name: str = None,
                progress=lambda pct, msg: None) -> dict:
-    """导出单个会话。
-
-    only_local_ids: 非 None 时只导出该集合内的 localId（E-2「导出所选」
-    精确导出）；与 start_ts/end_ts 独立，传入时日期范围不再参与过滤。
-    """
     t0 = time.time()
     progress(1, f"开始导出: 账号={account}, 会话={chat}, 格式={fmt}")
 
@@ -279,8 +278,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     # ── 第一遍：轻量采集元数据 ─────────────────────────────
     progress(3, "扫描消息元数据…")
     count, first_ts, last_ts, senders, images, voices = _collect_metadata(
-        acc_out_dir, chat, start_ts, end_ts, account, names,
-        only_local_ids=only_local_ids)
+        acc_out_dir, chat, start_ts, end_ts, account, names)
     progress(10, f"共 {count} 条消息，{len(images)} 张图片，{len(voices)} 条语音")
 
     display = display or names.get(chat, chat) or chat
@@ -345,9 +343,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     out_file = export_dir / f"{fname}.{ext}"
 
     def export_stream_with_media():
-        for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account,
-                                  names, only_local_ids=only_local_ids):
-            msg["mediaFile"] = media_map.get(msg["localId"])
+        for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
+            _attach_media(msg, media_map)
             yield msg
 
     # ── 传入缓存的 names，避免重复加载 ───────────────────
@@ -358,10 +355,9 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     elif fmt == "json":
         written = stream_export_json(out_file, session, export_stream_with_media(), progress)
     elif fmt == "html":
-        written = _write_html(out_file, acc_out_dir, chat, start_ts, end_ts,
-                              account, names, media_map, avatar_map, progress,
-                              display, count, first_ts, last_ts, senders,
-                              only_local_ids=only_local_ids)
+        written = _write_html_streaming(out_file, acc_out_dir, chat, start_ts,
+                                        end_ts, account, names, media_map,
+                                        avatar_map, progress, display)
     elif fmt == "txt":
         written = stream_export_txt(out_file, session, export_stream_with_media(), progress)
     elif fmt == "csv":
@@ -371,12 +367,15 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     elif fmt in ("toml", "sqlite", "xlsx"):
         # 这些格式需要全量数据 → 降级为流式分批（每批 500 条）
         written = _write_batch(out_file, fmt, session,
-                               acc_out_dir, chat, start_ts, end_ts, account, names,
-                               media_map, progress, only_local_ids=only_local_ids)
+                               acc_out_dir, chat, start_ts, end_ts, account, names, media_map, progress)
     else:
         raise ValueError(f"未知格式: {fmt}")
 
     progress(88, f"写入完成: {written} 条")
+    if count and written != count:
+        logger.warn("export",
+                    f"[export] 条数对账不一致: 采集 {count} 条 vs 实际写出 "
+                    f"{written} 条（可能有分片读取失败、消息缺失，详见上方日志）")
 
     # ── 插件：导出后处理（before_zip）─────────────────────
     # 必须在打包 zip **之前**运行：zip 一旦生成会 rmtree 掉 export_dir，
@@ -401,9 +400,9 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         zip_path = shutil.make_archive(str(root / f"{fname}_{fmt}"), "zip",
                                        root_dir=export_dir)
         shutil.rmtree(export_dir, ignore_errors=True)
-        # E-1：目录已删，file 若仍指向目录内路径就是死链（pack="each" 批量
-        # 模式下前端拿它渲染"下载文件"链接，点击必然 404）→ 置空，
-        # 前端对空值不渲染链接；需要文件请下载 zip。
+        # 目录已删，file 若仍指向目录内路径就是死链：「每会话一个 ZIP」
+        # （pack="each" → 每会话 run_export(pack="zip")）模式下前端拿它
+        # 渲染"下载文件"链接，点击必然 404。置空，前端对空值不渲染链接。
         file_path = None
         export_result["file"] = None
         # ── 插件：导出后处理（after_zip）───────────────────
@@ -494,56 +493,54 @@ def _run_after_export(when: str, ctx: dict) -> None:
             log.warn("plugin", f"{plugin}.after_export({when}) 失败: {e}")
 
 
-def _write_html(path, acc_dir, chat, start_ts, end_ts, account,
-                names, media_map, avatar_map, progress=None,
-                display=None, count=0, first_ts=0, last_ts=0, senders=(),
-                only_local_ids=None):
-    """HTML 导出（E-4：真流式）——头部 + CHAT_DATA 逐条增量写入 + 渲染器
-    尾部，全程不把消息列表攒进内存（旧实现 lines.extend 全量累积后一次性
-    render，名不副实且大会话内存峰值高）。
+def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
+                          names, media_map, avatar_map, progress=None,
+                          display=None):
+    """HTML 流式导出：分批渲染，避免一次性构建巨型 JSON。"""
+    from siwx.html_template import build_chat_data, render_html
+    lines = []
+    batch, count = [], 0
+    first_ts = last_ts = 0
+    # 复用外部传入的联系人缓存，避免重复读 contact.db。
+    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+        _attach_media(msg, media_map)
+        batch.append(msg)
+        count += 1
+        ts = msg.get("createTime", 0) or 0
+        if count == 1:
+            first_ts = ts
+        last_ts = ts
+        if len(batch) >= 500:
+            lines.extend(batch)
+            batch = []
+            if count % 1000 == 0 and progress:
+                progress(0, f"已收集 {count} 条…")
+    lines.extend(batch)
 
-    members/计数/时间跨度直接取自第一遍扫描结果（E-3 已收集 senders），
-    第二遍只做逐条写出。
-    """
-    from siwx.html_template import stream_html
-    display = display or names.get(chat, chat) or chat
-    members = [{"id": un, "name": names.get(un, un) or un,
-                "avatar": avatar_map.get(un, "")} for un in sorted(senders)]
-    meta = {
-        "meta": {
-            "sessionId": chat,
-            "sessionName": display,
-            "isGroup": chat.endswith("@chatroom"),
-            "exportTime": int(datetime.now().timestamp() * 1000),
-            "messageCount": count,
-            "dateRange": {"start": first_ts, "end": last_ts},
-            "ownerId": account,
-        },
-        "members": members,
-        "avatarFiles": avatar_map,
-    }
-
-    def msg_iter():
-        for msg in message_stream(acc_dir, chat, start_ts, end_ts, account,
-                                  names, only_local_ids=only_local_ids):
-            msg["mediaFile"] = media_map.get(msg["localId"])
-            yield msg
-
-    return stream_html(path, meta, msg_iter(), progress)
+    session = {"wxid": chat,
+               "displayName": display or names.get(chat, chat) or chat,
+               "isGroup": chat.endswith("@chatroom"),
+               "firstTimestamp": first_ts,
+               "lastTimestamp": last_ts,
+               "ownerId": account,
+               "messageCount": count}
+    html = render_html(build_chat_data(session, lines, avatar_map))
+    path.write_text(html, encoding="utf-8")
+    return count
 
 
 def _write_batch(path, fmt, session, acc_dir, chat, start_ts, end_ts, account, names,
-                 media_map, progress=None, only_local_ids=None):
+                 media_map, progress=None):
     """TOML/SQLite/XLSX 流式分批写入。"""
     if fmt == "toml":
-        return _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, only_local_ids)
+        return _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress)
     elif fmt == "sqlite":
-        return _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, only_local_ids)
+        return _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress)
     elif fmt == "xlsx":
-        return _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, only_local_ids)
+        return _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress)
 
 
-def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, only_local_ids=None):
+def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress):
     def toml_str(s):
         return json.dumps(str(s), ensure_ascii=False)
     lines = ["[exportInfo]", f'version = {toml_str("1.0")}',
@@ -558,9 +555,8 @@ def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, n
             lines.append(f'{k} = {v}')
     lines.append("")
     count = 0
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names,
-                              only_local_ids=only_local_ids):
-        msg["mediaFile"] = media_map.get(msg["localId"])
+    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+        _attach_media(msg, media_map)
         count += 1
         lines.append("[[messages]]")
         lines.append(f"localId = {msg['localId']}")
@@ -578,7 +574,7 @@ def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, n
     return count
 
 
-def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, only_local_ids=None):
+def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress):
     if path.exists():
         path.unlink()
     conn = sqlite3.connect(path)
@@ -595,16 +591,15 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
                   session["isGroup"], session["messageCount"],
                   session["firstTimestamp"], session["lastTimestamp"]))
     count = 0
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names,
-                              only_local_ids=only_local_ids):
-        msg["mediaFile"] = media_map.get(msg["localId"])
+    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+        _attach_media(msg, media_map)
         count += 1
         conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                      (msg["localId"], msg["createTime"],
                       datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                       msg["localType"], msg["typeName"], msg["isSend"],
                       msg["senderUsername"], msg["senderDisplayName"],
-                      msg["content"], _truncated(msg.get("rawContent", ""), 8000),
+                      msg["content"], msg.get("rawContent", "")[:8000],
                       msg.get("mediaFile")))
         if count % 1000 == 0:
             conn.commit()
@@ -615,28 +610,20 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
     return count
 
 
-def _truncated(text: str, limit: int) -> str:
-    """E-8：截断必须留标记，与 HTML 导出的 rawContent 行为一致。"""
-    if text and len(text) > limit:
-        return text[:limit] + "…[已截断]"
-    return text
-
-
-def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, only_local_ids=None):
+def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress):
     from openpyxl import Workbook
-    # E-6：write_only 模式逐行落盘，全部行不再驻留内存
-    wb = Workbook(write_only=True)
-    ws = wb.create_sheet("聊天记录")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "聊天记录"
     ws.append(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
     count = 0
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names,
-                              only_local_ids=only_local_ids):
-        msg["mediaFile"] = media_map.get(msg["localId"])
+    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+        _attach_media(msg, media_map)
         count += 1
         ws.append([msg["localId"],
                    datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                    msg["typeName"], msg["senderDisplayName"],
-                   "是" if msg["isSend"] else "否", _truncated(msg["content"], 30000),
+                   "是" if msg["isSend"] else "否", msg["content"][:30000],
                    msg.get("mediaFile") or ""])
         if count % 1000 == 0 and progress:
             progress(0, f"已写入 {count} 条…")
@@ -649,14 +636,8 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
                      want_messages=True, want_media=False, want_voice=False,
                      want_avatars=False,
                      export_root: Path = None, pack: str = "folder",
-                     only_local_ids=None, should_cancel=None,
                      progress=lambda pct, msg: None) -> dict:
-    """多会话批量导出。
-
-    only_local_ids: E-2「导出所选」精确导出，仅在单会话时有意义——
-    localId 是分片内序号，跨会话无意义，多会话时忽略。
-    should_cancel: S-3 协作式取消，返回 True 时在会话边界停止并返回已完成部分。
-    """
+    """多会话批量导出。"""
     t0 = time.time()
     n = max(len(chats), 1)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -665,14 +646,8 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
     total_dir.mkdir(parents=True, exist_ok=True)
     progress(1, f"共 {n} 个会话 · 输出目录 {total_dir.name}/ · 打包={pack}")
 
-    ids = only_local_ids if (only_local_ids and len(chats) == 1) else None
-    cancelled = False
     results, ok_n = [], 0
     for i, item in enumerate(chats):
-        if should_cancel is not None and should_cancel():
-            cancelled = True
-            progress(int(100 * i / n), "收到取消请求，停止后续会话")
-            break
         chat = item.get("chat") if isinstance(item, dict) else str(item)
         display = (item.get("display") or "") if isinstance(item, dict) else ""
         base, endp = int(100 * i / n), int(100 * (i + 1) / n)
@@ -690,7 +665,6 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
                              export_root=total_dir,
                              folder_name=f"{i + 1:02d}_{display or chat}",
                              pack=("zip" if pack == "each" else "none"),
-                             only_local_ids=ids,
                              progress=sub)
             ok_n += 1
             results.append({"chat": chat, "display": display or chat,
@@ -715,11 +689,10 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
                                        root_dir=total_dir)
         progress(98, f"zip 完成: {Path(zip_path).stat().st_size / 1048576:.1f} MB")
 
-    progress(100, "导出完成（已取消，仅含已完成部分）" if cancelled else "导出完成")
+    progress(100, "导出完成")
     return {
         "total_dir": str(total_dir), "zip": zip_path, "zips": zips,
         "pack": pack, "format": fmt, "sessions": results, "ok_count": ok_n,
-        "cancelled": cancelled,
         "message_count": sum(r.get("message_count", 0) for r in results),
         "media_count": sum(r.get("media_count", 0) for r in results),
         "image_count": sum(r.get("image_count", 0) for r in results),

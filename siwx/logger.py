@@ -61,48 +61,63 @@ def _append(ts: int, level: str, module: str, msg: str):
             del _FILE_LOG[:len(_FILE_LOG) - _FILE_LOG_MAX]
 
 
+def _cprint(line: str) -> None:
+    """控制台输出。打包成无控制台（--noconsole）运行时 stdout 可能为 None，
+    print 会抛 AttributeError——控制台输出只是附加通道，失败必须静默。"""
+    try:
+        print(line)
+    except Exception:
+        pass
+
+
 def rough(module: str, msg: str):
     """粗略模式日志（始终记录）。"""
     ts = _now_ms()
     _append(ts, "INFO", module, msg)
     # 同时输出到控制台
-    print(f"[{time.strftime('%H:%M:%S')}] [{module}] {msg}")
+    _cprint(f"[{time.strftime('%H:%M:%S')}] [{module}] {msg}")
 
 
 def detailed(module: str, msg: str):
     """详细模式日志（仅 DETAILED 模式记录）。"""
-    if _log_level == LogLevel.DETAILED:
-        ts = _now_ms()
-        _append(ts, "DEBUG", module, msg)
+    with _lock:
+        enabled = _log_level == LogLevel.DETAILED
+    if enabled:
+        _append(_now_ms(), "DEBUG", module, msg)
 
 
 def info(module: str, msg: str):
     """信息日志（始终记录）。"""
     ts = _now_ms()
     _append(ts, "INFO", module, msg)
-    print(f"[{time.strftime('%H:%M:%S')}] [{module}] {msg}")
+    _cprint(f"[{time.strftime('%H:%M:%S')}] [{module}] {msg}")
 
 
 def warn(module: str, msg: str):
     """警告日志（始终记录）。"""
     ts = _now_ms()
     _append(ts, "WARN", module, msg)
-    print(f"[{time.strftime('%H:%M:%S')}] [WARN] [{module}] {msg}")
+    _cprint(f"[{time.strftime('%H:%M:%S')}] [WARN] [{module}] {msg}")
 
 
 def error(module: str, msg: str):
     """错误日志（始终记录）。"""
     ts = _now_ms()
     _append(ts, "ERROR", module, msg)
-    print(f"[{time.strftime('%H:%M:%S')}] [ERROR] [{module}] {msg}")
+    _cprint(f"[{time.strftime('%H:%M:%S')}] [ERROR] [{module}] {msg}")
 
 
-def get_logs(limit: int = 2000, detailed_only: bool = False) -> list:
-    """获取日志（供日志页展示）。"""
+def get_logs(limit: int = 2000, detailed_only: bool = False,
+             desensitize: bool = True) -> list:
+    """获取日志（供日志页展示）。默认脱敏：密钥/账号标识/路径不外泄。"""
     with _lock:
-        logs = list(_LOG_RING)
+        # 拷贝条目：ring 与文件缓冲共享同一批 list 对象，不能原地改
+        logs = [list(l) for l in _LOG_RING]
     if detailed_only:
         logs = [l for l in logs if l[1] == "DEBUG"]
+    if desensitize:
+        for l in logs:
+            l[3] = desensitize_msg(l[3])
     return logs[-limit:]
 
 
@@ -140,6 +155,9 @@ _GH_RE = re.compile(r"gh_[a-zA-Z0-9_\-]+")
 _CHATROOM_RE = re.compile(r"\d+@chatroom")
 # 匹配绝对路径 (Windows/Mac)
 _PATH_RE = re.compile(r"([A-Za-z]:[\\/][^\s]+|[/][^\s]+)")
+# 匹配键值对形式的账号标识：account=/chat=/ownerId=/username=/talker= 后的值，
+# 覆盖 wxid_/gh_ 之外的自定义微信号（如 wxalias_xxx）
+_ACCOUNT_KV_RE = re.compile(r"\b(account|chat|ownerId|username|talker)=([^\s'\"&,;]+)")
 
 
 def desensitize_msg(msg: str) -> str:
@@ -154,4 +172,11 @@ def desensitize_msg(msg: str) -> str:
     msg = _CHATROOM_RE.sub("***@chatroom", msg)
     # 路径 → 仅保留文件名
     msg = _PATH_RE.sub(lambda m: Path(m.group()).name, msg)
-    return msg
+    # 键值对形式的账号标识 → 保留前 4 字符 + ***（wxid/gh/chatroom 已被上面
+    # 的规则遮盖，值里含 *** 的跳过，保证重复脱敏幂等）
+    def _mask_kv(m):
+        v = m.group(2)
+        if "***" in v or len(v) <= 4:
+            return m.group()
+        return f"{m.group(1)}={v[:4]}***"
+    return _ACCOUNT_KV_RE.sub(_mask_kv, msg)

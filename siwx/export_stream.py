@@ -9,10 +9,16 @@
 import heapq
 import hashlib
 import json
+import os
+import re
 import sqlite3
 from pathlib import Path
 
-from siwx.api_chat import _contact_names, _enrich_row, _sender_map, owner_base, shards_for
+from siwx import logger, media, voice
+from siwx.api_chat import (
+    KIND_MAP, SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
+    _parse_appmsg, _parse_refer, _sender_map, _fmt, owner_base, shards_for,
+)
 
 # 精简消息字段（去掉 rawContent 重复、去掉前端专用字段）
 _KEEP_FIELDS = ("localId", "createTime", "localType", "typeName",
@@ -21,6 +27,75 @@ _KEEP_FIELDS = ("localId", "createTime", "localType", "typeName",
 
 # 分批大小
 BATCH_SIZE = 500
+
+
+def _enrich_row(row, names, my_base, is_group, chat, account):
+    """把一行原始数据精简为导出用 dict。"""
+    local_id, server_id, ltype, ts, origin, rsid, content, packed, smap = row
+    text = _decode_content(content)
+    raw_text = text
+    sender_wxid = ""
+    m = SENDER_PREFIX_RE.match(text[:100]) if text else None
+    if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
+              or m.group(1).endswith("@chatroom")):
+        sender_wxid = m.group(1)
+        text = text[m.end():]
+    if not sender_wxid and rsid:
+        sender_wxid = smap.get(int(rsid), "")
+    if not is_group:
+        if sender_wxid and sender_wxid != chat:
+            pass
+        elif origin == 1:
+            sender_wxid = my_base
+        else:
+            sender_wxid = chat
+    if is_group and not sender_wxid and origin == 1:
+        sender_wxid = my_base
+    is_me = (sender_wxid == my_base or sender_wxid == account
+             or (not is_group and sender_wxid == my_base))
+    if is_group and not is_me and sender_wxid == chat:
+        sender_wxid = ""
+
+    t = ltype & 0xFFFF
+    md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
+    voice_meta = voice.parse_voice_meta(text) if t == 34 else None
+    bubble_md5 = None
+    if t in (3, 47) and packed:
+        m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
+        bubble_md5 = m2.group().decode() if m2 else None
+
+    quote = link = None
+    if t == 57:
+        quote = _parse_refer(text)
+    if t == 49:
+        if "<refermsg>" in text:
+            # 微信 5.0 库里引用消息外层是 49，引用信息在内层 <refermsg>；
+            # 必须走引用分支并跳过 link 卡片，否则"谁引用了什么"全部丢失
+            # （实测全量导出 31437 条内层 57 的引用消息外层全部为 49）。
+            quote = _parse_refer(text)
+        else:
+            title, url, des = _parse_appmsg(text)
+            if title or url:
+                link = {"title": title or "链接", "url": url, "desc": des}
+
+    return {
+        "localId": local_id,
+        "platformMessageId": str(server_id or ""),
+        "createTime": ts or 0,
+        "localType": t,
+        "typeName": TYPE_NAMES.get(t, f"类型{t}"),
+        "rawContent": raw_text,
+        "content": _fmt(t, text) if t != 1 else text,
+        "isSend": 1 if is_me else 0,
+        "senderUsername": sender_wxid or chat,
+        "senderDisplayName": (names.get(sender_wxid, sender_wxid) if sender_wxid
+                              else (names.get(chat, chat) if not is_group else chat)),
+        "md5": md5,
+        "bubbleMd5": bubble_md5,
+        "voice": voice_meta,
+        "quote": quote,
+        "link": link,
+    }
 
 
 def count_messages(acc, chat):
@@ -35,13 +110,14 @@ def count_messages(acc, chat):
                     f'SELECT COUNT(*) FROM [{table}]').fetchone()[0]
             finally:
                 conn.close()
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            logger.warn("export", f"[export] 分片打开失败，该分片消息可能缺失: "
+                                  f"{Path(db).name}: {e}")
     return total
 
 
 def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
-                   account=None, names=None, only_local_ids=None):
+                   account=None, names=None):
     """流式生成器：按 create_time 顺序逐条产出消息，内存 O(分片数)。
 
     使用 heapq.merge 做 K 路归并，每个分片内已按 create_time 有序。
@@ -49,8 +125,6 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
 
     参数:
         names: 联系人名 dict，不传则自动加载（建议外部缓存传入以避免重复加载）
-        only_local_ids: 非 None 时只产出该集合内的 localId（E-2「导出所选」
-                        精确导出用；与 start_ts/end_ts 是独立过滤条件）
     """
     account = account or acc.name
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
@@ -76,15 +150,12 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
 
     merged = heapq.merge(*iterators, key=lambda x: (x[0] or 0, x[1] or 0))
     for ts, local_id, (ltype, origin, rsid, content, packed, smap) in merged:
-        if only_local_ids is not None and local_id not in only_local_ids:
-            continue
         if start_ts and (ts or 0) < start_ts:
             continue
         if end_ts and (ts or 0) > end_ts:
             continue
         row = (local_id, None, ltype, ts, origin, rsid, content, packed, smap)
-        yield _enrich_row(row, names, my_base, is_group, chat, account,
-                          shape="export")
+        yield _enrich_row(row, names, my_base, is_group, chat, account)
 
 
 def _shard_iter(cursor, conn, smap):
@@ -145,7 +216,7 @@ def stream_export_txt(path: Path, session: dict, msg_iter, progress=None):
     from datetime import datetime
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"聊天记录：{session['displayName']}（{session['type']}）\n")
-        # E-9：元数据遍早已统计出条数（session.messageCount），回填而非"未知"
+        # 元数据遍（run_export 第一遍扫描）早已统计出条数，回填而非"未知"
         f.write(f"消息数：{session.get('messageCount') or '未知（流式导出）'}    "
                 f"导出时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n")
         f.write("=" * 60 + "\n\n")

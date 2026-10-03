@@ -29,9 +29,6 @@ from siwx.plugins import chat_bridge as _plugins
 _SHARD_INDEX: dict = {}
 _CONTACT_CACHE: dict = {}
 _SESSION_CACHE: dict = {}
-_TIMELINE_CACHE: dict = {}    # (账号目录, 会话, month) -> (分片签名, 响应)（V-4）
-_STATS_CACHE: dict = {}       # (账号目录, 会话) -> (分片签名, 响应)（V-4）
-_TOTAL_CACHE: dict = {}       # (账号目录, 会话) -> (分片签名, 消息总数)（V-3）
 _SHARD_LOCK = threading.Lock()
 _CACHE_LOCK = threading.Lock()
 _HOLDER_SESSIONS = {"brandsessionholder", "brandservicesessionholder", "@placeholder_foldgroup"}
@@ -308,12 +305,22 @@ def _fmt(ltype: int, text: str) -> str:
     if t == 57:
         # 引用消息：用户回复文本在 <title>，被引用部分由 quote 字段单独承载
         m = re.search(r"<title>(.*?)</title>", text, re.S)
-        return m.group(1).strip() if m else (text or "[引用]")
+        if m:
+            return _xml_text(m.group(1)) or "[引用]"
+        return text or "[引用]"
     if t in (10000, 10002):
         return text or "[系统消息]"
     if t == 49:
+        if "<refermsg>" in text:
+            # 引用消息（外层 49、内层 57）：与 t==57 同口径，只取回复文本，
+            # 不带 "[链接]" 前缀；CDATA 由 _xml_text 一并剥离
+            m = re.search(r"<title>(.*?)</title>", text, re.S)
+            return (_xml_text(m.group(1)) if m else None) or "[引用]"
         m = re.search(r"<title>(.*?)</title>", text, re.S)
-        return f"[链接] {m.group(1).strip()}" if m else "[链接]"
+        if m:
+            # 剥离 CDATA 包装，避免 content 出现 <![CDATA[...]]> 原文
+            return f"[链接] {_xml_text(m.group(1))}".rstrip()
+        return "[链接]"
     return FALLBACK_LABEL.get(t, f"[类型{t}]")
 
 
@@ -323,34 +330,6 @@ def _sender_map(conn) -> dict:
         return {rid: un for rid, un in conn.execute("SELECT rowid, user_name FROM Name2Id")}
     except sqlite3.Error:
         return {}
-
-
-def _msg_dir_sig(acc: Path):
-    """message 目录的分片文件签名（timeline/stats/总数缓存失效用）。"""
-    return _dir_signature(acc / "message")
-
-
-def _conversation_total(acc: Path, chat: str) -> int:
-    """会话消息总数（V-3）：分片 COUNT(*) 求和，按分片签名缓存。"""
-    table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
-    sig = _msg_dir_sig(acc)
-    key = (str(acc), chat)
-    with _CACHE_LOCK:
-        hit = _TOTAL_CACHE.get(key)
-        if hit is not None and hit[0] == sig:
-            return hit[1]
-    total = 0
-    for db in shards_for(acc, chat):
-        conn = sqlite3.connect(db)
-        try:
-            total += int(conn.execute(f"SELECT COUNT(*) FROM [{table}]").fetchone()[0])
-        except sqlite3.Error:
-            pass
-        finally:
-            conn.close()
-    with _CACHE_LOCK:
-        _TOTAL_CACHE[key] = (sig, total)
-    return total
 
 
 @bp.get("/accounts")
@@ -514,120 +493,9 @@ def _parse_refer(text: str):
     return {"displayname": dn, "content": content[:500], "ts": ts}
 
 
-def _resolve_sender(text, rsid, origin, smap, my_base, is_group, chat, account):
-    """发送者解析（_enrich_row 与导出第一遍轻量扫描共用的唯一实现）。
-
-    返回 (sender_wxid, is_me, 剥掉前缀后的 text)。"""
-    sender_wxid = ""
-    m = SENDER_PREFIX_RE.match(text[:100]) if text else None
-    if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
-              or m.group(1).endswith("@chatroom")):
-        sender_wxid = m.group(1)
-        text = text[m.end():]
-    if not sender_wxid and rsid:
-        sender_wxid = smap.get(int(rsid), "")
-    if not is_group:
-        if sender_wxid and sender_wxid != chat:
-            pass
-        elif origin == 1:
-            sender_wxid = my_base
-        else:
-            sender_wxid = chat
-    if is_group and not sender_wxid and origin == 1:
-        sender_wxid = my_base
-    is_me = (sender_wxid == my_base or sender_wxid == account
-             or (not is_group and sender_wxid == my_base))
-    if is_group and not is_me and sender_wxid == chat:
-        sender_wxid = ""
-    return sender_wxid, is_me, text
-
-
-def _enrich_row(row, names, my_base, is_group, chat, account, shape="export"):
-    """单条消息富化 —— Web API / MCP / 导出三处共用的唯一实现（V-2）。
-
-    row: (local_id, server_id, local_type, create_time, origin_source,
-          real_sender_id, message_content, packed_info_data, sender_map)
-    shape 决定输出字段集：
-      "frontend"  Web API 分页用（省掉导出专用字段，省流量）
-      "export"    导出管线用（export_stream / exporter）
-      "both"      MCP build_messages 用（前端形状 + 导出形状）
-    """
-    (local_id, server_id, ltype, ts, origin, rsid, content, packed, smap) = row
-    text = _decode_content(content)
-    raw_text = text
-    sender_wxid, is_me, text = _resolve_sender(
-        text, rsid, origin, smap, my_base, is_group, chat, account)
-
-    t = ltype & 0xFFFF
-    md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
-    voice_meta = voice.parse_voice_meta(text) if t == 34 else None
-    bubble_md5 = None
-    if t in (3, 47) and packed:
-        m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
-        bubble_md5 = m2.group().decode() if m2 else None
-
-    quote = link = None
-    if t == 57:
-        quote = _parse_refer(text)
-    if t == 49:
-        title, url, des = _parse_appmsg(text)
-        if title or url:
-            link = {"title": title or "链接", "url": url, "desc": des}
-
-    kind = KIND_MAP.get(t, "text")
-    if t == 57:
-        kind = "quote"
-    elif t == 49 and link and link.get("url"):
-        kind = "link"
-
-    fmt_text = _fmt(t, text) if t != 1 else text
-    sender_name = names.get(sender_wxid, sender_wxid) if sender_wxid \
-        else (names.get(chat, chat) if not is_group else "")
-    sender_display = sender_name if (sender_wxid or not is_group) else chat
-
-    msg = {}
-    if shape in ("frontend", "both"):
-        msg.update({
-            "id": local_id,
-            "platformMessageId": str(server_id or ""),
-            "ts": ts or 0,
-            "type": t,
-            "kind": kind,
-            "sender_wxid": sender_wxid,
-            "sender_name": sender_name,
-            "is_me": bool(is_me),
-            "md5": md5,
-            "bubble_md5": bubble_md5,
-            "voice": voice_meta,
-            "quote": quote,
-            "link": link,
-            "text": fmt_text,
-        })
-    if shape in ("export", "both"):
-        msg.update({
-            "localId": local_id,
-            "platformMessageId": str(server_id or ""),
-            "createTime": ts or 0,
-            "localType": t,
-            "typeName": TYPE_NAMES.get(t, f"类型{t}"),
-            "rawContent": raw_text,
-            "content": fmt_text,
-            "isSend": 1 if is_me else 0,
-            "senderUsername": sender_wxid or chat,
-            "senderDisplayName": sender_display,
-            "md5": md5,
-            "bubbleMd5": bubble_md5,
-            "voice": voice_meta,
-            "quote": quote,
-            "link": link,
-        })
-    return msg
-
-
 def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
                    account: str = None):
-    """读取一个会话的全部消息并富化（MCP 使用；富化逻辑与 Web API、
-    导出共用 _enrich_row 单一实现）。
+    """读取一个会话的全部消息并富化（导出与 API 共用）。
 
     account: 数据库归属账号（wxid），用于判定 is_me；None 时从 acc 推断。
     返回 dict 列表，字段同时服务前端（id/ts/kind/...）与导出（CipherTalk 风格）。
@@ -656,26 +524,104 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
 
     rows.sort(key=lambda r: (r[3] or 0, r[0] or 0))
     msgs = []
-    for row in rows:
-        ts = row[3] or 0
-        if start_ts and ts < start_ts:
+    for local_id, server_id, ltype, ts, origin, rsid, content, packed, smap in rows:
+        if start_ts and (ts or 0) < start_ts:
             continue
-        if end_ts and ts > end_ts:
+        if end_ts and (ts or 0) > end_ts:
             continue
-        msgs.append(_enrich_row(row, names, my_base, is_group, chat, account,
-                                shape="both"))
+        text = _decode_content(content)
+        raw_text = text
+        sender_wxid = ""
+        m = SENDER_PREFIX_RE.match(text[:100]) if text else None
+        if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
+                  or m.group(1).endswith("@chatroom")):
+            sender_wxid = m.group(1)
+            text = text[m.end():]
+        if not sender_wxid and rsid:
+            sender_wxid = smap.get(int(rsid), "")
+        if not is_group:
+            if sender_wxid and sender_wxid != chat:
+                pass
+            elif origin == 1:
+                sender_wxid = my_base
+            else:
+                sender_wxid = chat
+        if is_group and not sender_wxid and origin == 1:
+            sender_wxid = my_base
+        is_me = (sender_wxid == my_base or sender_wxid == account
+                 or (not is_group and sender_wxid == my_base))
+        if is_group and not is_me and sender_wxid == chat:
+            sender_wxid = ""
+
+        t = ltype & 0xFFFF
+        md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
+        voice_meta = voice.parse_voice_meta(text) if t == 34 else None
+        bubble_md5 = None
+        if t in (3, 47) and packed:
+            m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
+            bubble_md5 = m2.group().decode() if m2 else None
+
+        quote = link = None
+        if t == 57:
+            quote = _parse_refer(text)
+        if t == 49:
+            if "<refermsg>" in text:
+                # 微信 5.0 库里引用消息外层是 49（与 export_stream._enrich_row
+                # 同口径），走引用分支并跳过 link 卡片
+                quote = _parse_refer(text)
+            else:
+                title, url, des = _parse_appmsg(text)
+                if title or url:
+                    link = {"title": title or "链接", "url": url, "desc": des}
+
+        kind = KIND_MAP.get(t, "text")
+        if t == 57 or (t == 49 and quote):
+            kind = "quote"
+        elif t == 49 and link and link.get("url"):
+            kind = "link"
+
+        msgs.append({
+            # 前端形状
+            "id": local_id,
+            "ts": ts or 0,
+            "type": t,
+            "kind": kind,
+            "sender_wxid": sender_wxid,
+            "sender_name": names.get(sender_wxid, sender_wxid) if sender_wxid
+            else (names.get(chat, chat) if not is_group else ""),
+            "is_me": bool(is_me),
+            "md5": md5,
+            "bubble_md5": bubble_md5,
+            "voice": voice_meta,
+            "quote": quote,
+            "link": link,
+            "text": _fmt(t, text) if t != 1 else text,
+            # 导出形状（CipherTalk 风格）
+            "localId": local_id,
+            "platformMessageId": str(server_id or ""),
+            "createTime": ts or 0,
+            "localType": t,
+            "typeName": TYPE_NAMES.get(t, f"类型{t}"),
+            "rawContent": raw_text,
+            "content": _fmt(t, text) if t != 1 else text,
+            "isSend": 1 if is_me else 0,
+            "senderUsername": sender_wxid or chat,
+            "senderDisplayName": names.get(sender_wxid, sender_wxid) if sender_wxid
+            else (names.get(chat, chat) if not is_group else chat),
+        })
     return msgs
 
 
 @bp.get("/messages")
 def messages():
-    """分页加载聊天消息：SQL LIMIT，不载入全部消息。"""
+    """分页加载聊天消息：SQL LIMIT/OFFSET，不载入全部消息。"""
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
     before = int(request.args.get("before", "0") or 0)
-    # J-3：游标升级为 (create_time, local_id) 组合。只用时间戳做 `<` 条件时，
-    # 翻页边界落在同一秒的一批消息中间，剩余同秒消息会被永久跳过。
-    # before_id 与 before 配套使用；只传 before 时保持旧语义（向后兼容）。
+    # 游标升级为 (create_time, local_id) 组合：只用时间戳做 `<` 条件时，
+    # 翻页边界落在同一秒的一批消息中间（连发消息、消息与系统提示同秒很
+    # 常见），剩余同秒消息会被永久跳过。before_id 与 before 配套使用；
+    # 只传 before 时保持旧语义（向后兼容旧前端）。
     before_id = int(request.args.get("before_id", "0") or 0)
     # 修复：limit 只做了上限、没做下限。负数会被直接拼进 SQL，而 SQLite 的
     # LIMIT -2 等同「无限制」，一次请求就能把整个会话读进内存。
@@ -710,7 +656,7 @@ def messages():
                     params = [before, before, before_id]
                 else:
                     sql += " WHERE create_time < ?"
-                    params = [before]
+                    params.append(before)
             sql += f" ORDER BY create_time DESC LIMIT {limit * 2}"
             rows = list(conn.execute(sql, params))
             if rows:
@@ -730,9 +676,68 @@ def messages():
     has_more = len(candidates) > limit
 
     msgs = []
-    for row, smap in page:
-        msgs.append(_enrich_row(row + (smap,), names, my_base, is_group, chat,
-                                account, shape="frontend"))
+    for (local_id, server_id, ltype, ts, origin, rsid, content, packed), smap in page:
+        text = _decode_content(content)
+        sender_wxid = ""
+        m = SENDER_PREFIX_RE.match(text[:100]) if text else None
+        if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
+                  or m.group(1).endswith("@chatroom")):
+            sender_wxid = m.group(1)
+            text = text[m.end():]
+        if not sender_wxid and rsid:
+            sender_wxid = smap.get(int(rsid), "")
+        if not is_group:
+            if sender_wxid and sender_wxid != chat:
+                pass
+            elif origin == 1:
+                sender_wxid = my_base
+            else:
+                sender_wxid = chat
+        if is_group and not sender_wxid and origin == 1:
+            sender_wxid = my_base
+        is_me = (sender_wxid == my_base or sender_wxid == account
+                 or (not is_group and sender_wxid == my_base))
+        if is_group and not is_me and sender_wxid == chat:
+            sender_wxid = ""
+
+        t = ltype & 0xFFFF
+        md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
+        voice_meta = voice.parse_voice_meta(text) if t == 34 else None
+        bubble_md5 = None
+        if t in (3, 47) and packed:
+            m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
+            bubble_md5 = m2.group().decode() if m2 else None
+
+        quote = link = None
+        if t == 57:
+            quote = _parse_refer(text)
+        if t == 49:
+            if "<refermsg>" in text:
+                # 微信 5.0 库里引用消息外层是 49（与 export_stream._enrich_row
+                # 同口径），走引用分支并跳过 link 卡片
+                quote = _parse_refer(text)
+            else:
+                title, url, des = _parse_appmsg(text)
+                if title or url:
+                    link = {"title": title or "链接", "url": url, "desc": des}
+
+        kind = KIND_MAP.get(t, "text")
+        if t == 57 or (t == 49 and quote):
+            kind = "quote"
+        elif t == 49 and link and link.get("url"):
+            kind = "link"
+
+        msgs.append({
+            "id": local_id, "platformMessageId": str(server_id or ""),
+            "ts": ts or 0, "type": t, "kind": kind,
+            "sender_wxid": sender_wxid,
+            "sender_name": names.get(sender_wxid, sender_wxid) if sender_wxid
+            else (names.get(chat, chat) if not is_group else ""),
+            "is_me": bool(is_me), "md5": md5, "bubble_md5": bubble_md5,
+            "voice": voice_meta,
+            "quote": quote, "link": link,
+            "text": _fmt(t, text) if t != 1 else text,
+        })
 
     # ── 插件层（无插件时零开销）──────────────────────────────
     if msgs and _plugins.has_message_hooks():
@@ -748,8 +753,7 @@ def messages():
     display = names.get(chat, chat)
     _log(f"[msg] 返回 {len(msgs)} 条消息, has_more={has_more}")
     return jsonify({"account": account, "chat": chat, "display": display,
-                    "is_group": is_group, "messages": msgs, "has_more": has_more,
-                    "total": _conversation_total(acc, chat)})
+                    "is_group": is_group, "messages": msgs, "has_more": has_more})
 
 
 @bp.get("/timeline")
@@ -766,13 +770,6 @@ def timeline():
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     key_name = "day" if month else "month"
     fmt = "%Y-%m-%d" if month else "%Y-%m"
-    # V-4：按分片签名缓存聚合结果（原先每请求全表 strftime 聚合）
-    cache_key = (str(acc), chat, month)
-    sig = _msg_dir_sig(acc)
-    with _CACHE_LOCK:
-        hit = _TIMELINE_CACHE.get(cache_key)
-        if hit is not None and hit[0] == sig:
-            return jsonify(hit[1])
     buckets = {}
     total = 0
     ts_min = ts_max = 0
@@ -811,8 +808,6 @@ def timeline():
     result["days" if month else "months"] = [buckets[k] for k in sorted(buckets, reverse=True)]
     if month:
         result["month"] = month
-    with _CACHE_LOCK:
-        _TIMELINE_CACHE[cache_key] = (sig, result)
     return jsonify(result)
 
 
@@ -826,13 +821,6 @@ def conversation_stats():
         return jsonify({"error": "账号不存在或未解密"}), 404
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     names = _contact_names(acc)
-    # V-4：按分片签名缓存聚合结果
-    cache_key = (str(acc), chat)
-    sig = _msg_dir_sig(acc)
-    with _CACHE_LOCK:
-        hit = _STATS_CACHE.get(cache_key)
-        if hit is not None and hit[0] == sig:
-            return jsonify(hit[1])
     type_counts = {}
     by_day = {}
     by_hour = [0] * 24
@@ -877,15 +865,12 @@ def conversation_stats():
     busiest_hour = max(range(24), key=lambda h: by_hour[h]) if any(by_hour) else None
     types = [{"type": t, "label": TYPE_NAMES.get(t, f"类型{t}"), "count": c}
              for t, c in sorted(type_counts.items(), key=lambda x: -x[1])]
-    payload = {"account": account, "chat": chat,
-               "display": names.get(chat, chat), "total": total,
-               "sent": sent, "received": received,
-               "first_ts": ts_min, "last_ts": ts_max,
-               "active_days": len(by_day), "busiest_day": busiest_day,
-               "busiest_hour": busiest_hour, "types": types}
-    with _CACHE_LOCK:
-        _STATS_CACHE[cache_key] = (sig, payload)
-    return jsonify(payload)
+    return jsonify({"account": account, "chat": chat,
+                    "display": names.get(chat, chat), "total": total,
+                    "sent": sent, "received": received,
+                    "first_ts": ts_min, "last_ts": ts_max,
+                    "active_days": len(by_day), "busiest_day": busiest_day,
+                    "busiest_hour": busiest_hour, "types": types})
 
 
 @bp.get("/avatar")

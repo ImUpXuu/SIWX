@@ -17,31 +17,6 @@ def _fmt_date(ts):
     return datetime.fromtimestamp(ts or 0).strftime("%Y年%m月%d日")
 
 
-def _msg_entry(m):
-    """单条消息 → CHAT_DATA.messages 条目（build_chat_data 与流式写出共用）。"""
-    entry = {
-        "timestamp": m["createTime"],
-        "sender": m["senderUsername"],
-        "senderName": m["senderDisplayName"],
-        "type": m["localType"],
-        "content": m["content"],
-        "rawContent": m["rawContent"][:8000],
-        "isSend": m["isSend"],
-    }
-    # E-8：截断必须留标记，否则长消息被静默吞尾
-    if len(m["rawContent"]) > 8000:
-        entry["rawContent"] += "…[已截断]"
-    if m.get("mediaFile"):
-        entry["mediaPath"] = m["mediaFile"]
-    if m.get("quote"):
-        entry["quote"] = {"sender": m["quote"]["displayname"],
-                          "content": m["quote"]["content"]}
-    if m.get("link"):
-        entry["link"] = {"title": m["link"]["title"],
-                         "url": m["link"]["url"] or ""}
-    return entry
-
-
 def build_chat_data(session, msgs, avatar_map):
     """把内部消息格式转为 CHAT_DATA 嵌入格式。"""
     members_map = {}
@@ -54,7 +29,26 @@ def build_chat_data(session, msgs, avatar_map):
             members.append({"id": un, "name": name,
                             "avatar": avatar_map.get(un, "")})
 
-    messages = [_msg_entry(m) for m in msgs]
+    messages = []
+    for m in msgs:
+        entry = {
+            "timestamp": m["createTime"],
+            "sender": m["senderUsername"],
+            "senderName": m["senderDisplayName"],
+            "type": m["localType"],
+            "content": m["content"],
+            "rawContent": m["rawContent"][:8000],
+            "isSend": m["isSend"],
+        }
+        if m.get("mediaFile"):
+            entry["mediaPath"] = m["mediaFile"]
+        if m.get("quote"):
+            entry["quote"] = {"sender": m["quote"]["displayname"],
+                              "content": m["quote"]["content"]}
+        if m.get("link"):
+            entry["link"] = {"title": m["link"]["title"],
+                             "url": m["link"]["url"] or ""}
+        messages.append(entry)
 
     is_group = session.get("isGroup", False)
     return {
@@ -75,12 +69,13 @@ def build_chat_data(session, msgs, avatar_map):
 
 
 def _script_safe_json(obj) -> str:
-    """json.dumps 后转义会在 <script> 内提前终止/改变解析状态的序列（E-5）：
-    - `</`：消息含 `</script>` 会提前闭合 script 标签，整个页面损坏；
-    - `<!--`：HTML 规范中 script 进入"双转义状态"，模板真正写出的 </script>
-      闭标签会被吞掉——只转义 `</` 而不顾 `<!--` 等于没修。
-    `\\/` 与 `\\u0021` 都是合法 JSON 转义，JSON.parse 结果与原文完全等价，
-    正常数据零影响。"""
+    """json.dumps 后转义会在 <script> 内提前终止/改变解析状态的序列：
+    - `</`：消息含 `</script>` 会提前闭合 script 标签，导出的自包含
+      网页从此损坏；
+    - `<!--`：HTML 规范中 script 进入"双转义状态"，模板真正写出的
+      </script> 闭标签会被吞掉——只转义 `</` 而不顾 `<!--` 等于没修。
+    `\\/` 与 `\\u0021` 都是合法 JSON 转义，JSON.parse 结果与原文完全
+    等价，正常数据零影响。"""
     return (json.dumps(obj, ensure_ascii=False)
             .replace("</", "<\\/")
             .replace("<!--", "<\\u0021--"))
@@ -95,37 +90,6 @@ def render_html(chat_data: dict) -> str:
     return _HTML_HEAD + f"\n<script>window.CHAT_DATA = {data_json};</script>\n" + \
         f"\n<script>\nconst MSG_COUNT = {count};\nconst CHAT_TITLE = {_script_safe_json(title)};\n" + \
         _HTML_RENDERER + "\n</script>\n</body>\n</html>"
-
-
-def stream_html(path, meta: dict, msg_iter, progress=None) -> int:
-    """E-4：HTML 真流式写出 —— 头部 → CHAT_DATA 逐条增量写 → 渲染器尾部。
-
-    与 render_html() 输出完全同构，但全程不把消息列表攒进内存：
-    meta 是除 messages 外的完整 CHAT_DATA（meta/members/avatarFiles），
-    messages 由 msg_iter 逐条 JSON 序列化直接写文件句柄。
-    返回写入条数。
-    """
-    count = 0
-    first = True
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(_HTML_HEAD)
-        f.write("\n<script>window.CHAT_DATA = ")
-        # 复用 render_html 的拼接方式：去掉 meta 尾部的 }，续写 messages 数组
-        f.write(_script_safe_json(meta)[:-1] + ',"messages":[')
-        for m in msg_iter:
-            if not first:
-                f.write(",")
-            f.write(_script_safe_json(_msg_entry(m)))
-            first = False
-            count += 1
-            if count % 500 == 0 and progress:
-                progress(0, f"已写入 {count} 条…")
-        f.write("]};</script>")
-        f.write(f"\n<script>\nconst MSG_COUNT = {meta['meta']['messageCount']};\n"
-                f"const CHAT_TITLE = {_script_safe_json(meta['meta']['sessionName'])};\n")
-        f.write(_HTML_RENDERER)
-        f.write("\n</script>\n</body>\n</html>")
-    return count
 
 
 _HTML_HEAD = """<!DOCTYPE html>
@@ -354,7 +318,7 @@ _HTML_RENDERER = r"""
     html += '<div class="msg-bubble">';
     if (isGroup && !msg.isSend) html += '<div class="msg-sender">'+esc(name)+'</div>';
     html += '<div class="bubble-body">';
-    if (msg.quote) html += '<div class="msg-quote"><div class="qn">'+esc(msg.quote.sender)+'</div>'+esc(msg.quote.content)+'</div>';
+    if (msg.quote) html += '<div class="msg-quote"><div class="qn">'+esc(msg.quote.sender || msg.quote.displayname || '')+'</div>'+esc(msg.quote.content)+'</div>';
     html += renderContent(msg);
     html += '<div class="msg-time">'+fmtTime(msg.timestamp)+'</div>';
     html += '</div></div></div>';
@@ -393,9 +357,14 @@ _HTML_RENDERER = r"""
       return '<div class="wx-card"><div class="wx-card-left">📍</div><div class="wx-card-right"><div class="wx-card-title">'+esc(content.replace(/^\[位置\]\s*/,''))+'</div><div class="wx-card-sub">位置共享</div></div></div>';
     // 链接 / 小程序 / 文件
     if (t === 49) {
-      var title = xmlVal(raw, 'title') || content;
-      var url = xmlVal(raw, 'url');
-      var des = xmlVal(raw, 'des');
+      // 引用消息（外层 49、内层 57）：正文走纯文本，引用块由 .msg-quote 呈现，
+      // 不再落入链接卡片分支（此前被错挂图片时整卡被顶掉）
+      if (msg.quote) return esc(content) || '<em style="opacity:.5">引用</em>';
+      // 优先复用预解析的 link 字段（单一数据源），rawContent 仅作旧数据兜底
+      var lk = msg.link || {};
+      var title = lk.title || xmlVal(raw, 'title') || content;
+      var url = lk.url || xmlVal(raw, 'url');
+      var des = lk.desc || xmlVal(raw, 'des');
       var html = '<div class="wx-card"><div class="wx-card-left">🔗</div><div class="wx-card-right">';
       html += '<div class="wx-card-title">'+esc(title)+'</div>';
       if (des) html += '<div class="wx-card-sub">'+esc(des.substring(0,80))+'</div>';

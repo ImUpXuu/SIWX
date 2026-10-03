@@ -1,5 +1,5 @@
 /* 导出页 —— 多选会话导出：左侧勾选列表 + 右侧配置 + 底部日志/进度 */
-import { createDropdown, createDatePicker } from '/widgets.js';
+import { createDropdown, createDatePicker } from '/widgets.js?v=2026100203';
 
 const { esc, fetchJSON, fmtTs, fmtListTs } = window.SX;
 
@@ -9,11 +9,9 @@ let account = null;
 let sessions = [];
 let selected = new Set();       // 已勾选 username 集合
 let chatPreset = null;
-let chatRange = null;           // 聊天页多选带入的范围 {account, chat, display, ids, count}
+let chatRange = null;           // 聊天页多选带入的范围 {account, chat, display, start, end, count}
 let running = false;
 let pollTimer = null;
-let logAbs = 0;                 // E-11：已消费日志的绝对条数（含服务端已裁剪部分）
-let allLogs = [];               // E-11：客户端累积的完整日志（渲染结果详情用）
 let accDrop = null;
 let fmtDrop = null;
 let packDrop = null;
@@ -35,14 +33,15 @@ function renderRangeBanner() {
   box.classList.remove('hidden');
   box.innerHTML = '';
   const text = document.createElement('span');
-  // E-2：精确导出所选 localId，不再是"所选日期范围的全部消息"
-  text.textContent = `聊天页多选已带入：${chatRange.display || chatRange.chat} · 将精确导出所选 ${chatRange.count ?? (chatRange.ids || []).length} 条消息（而非日期范围内全部）`;
+  text.textContent = `聊天页多选已带入：${chatRange.display || chatRange.chat} · ${chatRange.count} 条消息 · ${chatRange.start} ~ ${chatRange.end}（按此日期范围导出）`;
   const btn = document.createElement('button');
   btn.className = 'mini-btn';
   btn.textContent = '清除';
   btn.addEventListener('click', () => {
     chatRange = null;
     sessionStorage.removeItem('siwx-export-range');
+    startPick.value = null;
+    endPick.value = null;
     renderRangeBanner();
   });
   box.append(text, btn);
@@ -51,8 +50,11 @@ function renderRangeBanner() {
 /** 手动改动日期 = 用户接管范围；与带入范围不一致时自动解除 */
 function onManualDate() {
   if (chatRange) {
-    chatRange = null;
-    sessionStorage.removeItem('siwx-export-range');
+    const same = startPick.value === chatRange.start && endPick.value === chatRange.end;
+    if (!same) {
+      chatRange = null;
+      sessionStorage.removeItem('siwx-export-range');
+    }
   }
   renderRangeBanner();
 }
@@ -110,10 +112,8 @@ async function init() {
   catch (e) { chatPreset = null; }
   // 聊天页带过来的预选 + 多选范围：预选是一次性的，范围持续到清除为止
   if (chatPreset) {
-    if (chatPreset.ids && chatPreset.ids.length) {
-      // E-2：多选精确导出（localId 列表）
-      chatRange = { ids: chatPreset.ids, count: chatPreset.count || chatPreset.ids.length,
-                    account: chatPreset.account, chat: chatPreset.chat, display: chatPreset.display };
+    if (chatPreset.range) {
+      chatRange = { ...chatPreset.range, account: chatPreset.account, chat: chatPreset.chat, display: chatPreset.display };
       sessionStorage.setItem('siwx-export-range', JSON.stringify(chatRange));
     } else {
       sessionStorage.removeItem('siwx-export-range');
@@ -157,40 +157,6 @@ async function init() {
     updateCount();
   });
   el('e-run').addEventListener('click', run);
-
-  // S-3：协作式取消（导出在会话边界停止，已完成部分保留并照常打包）
-  el('e-cancel').addEventListener('click', async () => {
-    const btn = el('e-cancel');
-    btn.disabled = true;
-    try {
-      const r = await fetch('/api/cancel', { method: 'POST' });
-      if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        appendLogs([[0, `取消失败：${j.error || r.statusText}`]]);
-      }
-    } catch (e) {
-      appendLogs([[0, `取消失败：${e.message}`]]);
-    } finally {
-      btn.disabled = false;
-    }
-  });
-
-  // F-4：切走再切回导出页时恢复运行中的导出任务——原先按钮显示可用，
-  // 点击才 409"已有任务在运行"
-  try {
-    const job = await (await fetch('/api/job')).json();
-    if (job.running && job.mode === 'export') {
-      running = true;
-      updateCount();
-      el('e-log').innerHTML = '';
-      el('e-result').innerHTML = '';
-      logAbs = 0;
-      allLogs = [];
-      el('e-progress-card').style.display = 'block';
-      el('e-bar').style.animation = '';
-      poll();
-    }
-  } catch (e) { /* 后端离线时忽略 */ }
 }
 
 async function loadSessions() {
@@ -204,9 +170,11 @@ async function loadSessions() {
     sessionStorage.removeItem('siwx-export-preset');
     chatPreset = null;
   }
-  // 聊天页多选范围：预选会话（精确 ids 不预填日期）
+  // 聊天页多选范围：预选会话 + 预填日期
   if (chatRange && chatRange.account === account && sessions.some(s => s.username === chatRange.chat)) {
     selected.add(chatRange.chat);
+    startPick.value = chatRange.start;
+    endPick.value = chatRange.end;
   }
   renderSessions();
   updateCount();
@@ -245,8 +213,6 @@ async function run() {
   if (running || !selected.size) return;
   const chats = sessions.filter(s => selected.has(s.username))
     .map(s => ({ chat: s.username, display: s.display }));
-  // E-2：聊天页多选带入的 localId 列表 —— 精确导出所选消息
-  const useIds = !!chatRange && (chatRange.ids || []).length > 0 && selected.has(chatRange.chat);
   const body = {
     mode: 'export',
     export_opts: {
@@ -256,7 +222,6 @@ async function run() {
       pack: packDrop.value,
       start: startPick.value || null,
       end: endPick.value || null,
-      local_ids: useIds ? chatRange.ids : null,
       messages: el('e-msg').checked,
       media: el('e-media').checked,
       voice: el('e-voice').checked,
@@ -267,10 +232,7 @@ async function run() {
   updateCount();
   el('e-log').innerHTML = '';
   el('e-result').innerHTML = '';
-  logAbs = 0;
-  allLogs = [];
   el('e-progress-card').style.display = 'block';
-  el('e-cancel').disabled = false;
   el('e-bar').style.width = '0%';
   el('e-bar').style.animation = '';
   try {
@@ -294,28 +256,14 @@ async function run() {
 function poll() {
   pollTimer = setInterval(async () => {
     try {
-      // E-11：带 offset 增量拉日志（服务端按绝对条数切片），只追加渲染，
-      // 不再每次全量拉几十 KB 文本并重建整个 DOM
-      const job = await (await fetch(`/api/job?offset=${logAbs}`)).json();
-      const batch = job.logs || [];
-      if (batch.length) {
-        if (job.log_trimmed > logAbs) {
-          allLogs.push([0, '[日志] …（早期日志过长已被服务端裁剪）…']);
-          appendLogs([[0, '…（早期日志过长已被服务端裁剪）…']]);
-        }
-        allLogs.push(...batch);
-        appendLogs(batch);
-        logAbs = typeof job.log_total === 'number' ? job.log_total : logAbs + batch.length;
-      }
-      // 进度条：优先用 /api/job 结构化 pct 字段（服务端 progress 回调记录），
-      // 旧后端无该字段时回退到解析日志里的 "[export] N%"
-      let pct = Number(job.pct) || 0;
-      if (!pct) {
-        for (const entry of allLogs.slice(-50)) {
-          const msg = entry.length >= 4 ? entry[3] : entry[1];
-          const mt = /\[export\] (\d+)%/.exec(msg);
-          if (mt) pct = +mt[1];
-        }
+      const job = await (await fetch('/api/job')).json();
+      renderLogs(job.logs || []);
+      // 进度条：解析最后一条 [export] N%
+      let pct = 0;
+      for (const entry of (job.logs || [])) {
+        const msg = entry.length >= 4 ? entry[3] : entry[1];
+        const mt = /\[export\] (\d+)%/.exec(msg);
+        if (mt) pct = +mt[1];
       }
       el('e-bar').style.width = pct + '%';
       if (!job.running) {
@@ -331,22 +279,21 @@ function poll() {
   }, 600);
 }
 
-function appendLogs(entries) {
+function renderLogs(logs) {
   const box = el('e-log');
-  if (!entries.length) return;
-  box.insertAdjacentHTML('beforeend', entries.map(entry => {
+  box.innerHTML = logs.map(entry => {
     const msg = entry.length >= 4 ? entry[3] : entry[1];
     return `<div class="log-line">${esc(msg)}</div>`;
-  }).join(''));
+  }).join('') || '<div class="log-line dim">…</div>';
   box.scrollTop = box.scrollHeight;
 }
 
 function renderResult(job) {
   const box = el('e-result');
   const lines = [];
-  const logs = allLogs;   // E-11：/api/job 现在返回增量切片，完整日志用客户端累积
   if (job.error) {
     lines.push(`<div class="res-row res-err">❌ 导出失败：${esc(job.error)}</div>`);
+    const logs = job.logs || [];
     lines.push(`<details class="res-logs-detail" open><summary>📋 运行日志 (${logs.length} 条)</summary>`);
     for (const entry of logs) {
       const msg = entry.length >= 4 ? entry[3] : entry[1];
@@ -363,8 +310,7 @@ function renderResult(job) {
     return;
   }
   const dur = ((r.duration_ms || 0) / 1000).toFixed(1);
-  const cancelNote = r.cancelled ? '（已取消，仅含已完成部分）' : '';
-  lines.push(`<div class="res-row res-ok">✔ 导出完成${cancelNote}：${r.ok_count}/${r.sessions.length} 个会话，`
+  lines.push(`<div class="res-row res-ok">✔ 导出完成：${r.ok_count}/${r.sessions.length} 个会话，`
     + `共 ${r.message_count} 条消息，图片 ${r.image_count || 0}，语音 ${r.voice_count || 0}，头像 ${r.avatar_count}（${dur}s）</div>`);
   if (r.total_dir) {
     lines.push(`<div class="res-meta">目录：<span class="mono">${esc(r.total_dir)}</span></div>`);
@@ -387,6 +333,7 @@ function renderResult(job) {
     }
   }
   lines.push('</details>');
+  const logs = job.logs || [];
   lines.push(`<details class="res-logs-detail"><summary>📋 运行日志 (${logs.length} 条)</summary>`);
   for (const entry of logs) {
     const msg = entry.length >= 4 ? entry[3] : entry[1];
