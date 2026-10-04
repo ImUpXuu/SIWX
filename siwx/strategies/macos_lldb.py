@@ -156,7 +156,11 @@ def _main():
     # Attach 后按名字在所有模块上创建断点（兼容符号表/导出表两种形态）
     bp_key = target.BreakpointCreateByName("sqlite3_key")
     bp_v2 = target.BreakpointCreateByName("sqlite3_key_v2")
-    n_loc = bp_key.GetNumLocations() + bp_v2.GetNumLocations()
+    # 微信 4.1.80+ 的 SQLCipher 不导出 sqlite3_key（按名字只会匹配到系统 libsqlite3 的
+    # 空壳），因此额外在 CCKeyDerivationPBKDF 上下断点：SQLCipher 用它把 passphrase
+    # 派生为数据库密钥 (rounds=256000)，参数里直接就是 passphrase。
+    bp_cc = target.BreakpointCreateByName("CCKeyDerivationPBKDF")
+    n_loc = bp_key.GetNumLocations() + bp_v2.GetNumLocations() + bp_cc.GetNumLocations()
 
     # Fallback: 扫描各模块符号表按地址建断点
     # (SBModule.FindSymbols 返回 SBSymbolContextList，取 .symbol 才有 .addr)
@@ -199,6 +203,7 @@ def _main():
     found = False
     dead = False
     hits = 0
+    cc_other = 0
     ev = lldb.SBEvent()
     while time.time() < deadline and not found and not dead:
         # 关键：脚本是在 lldb 驱动的命令处理器里同步执行的，驱动主循环
@@ -221,6 +226,32 @@ def _main():
             if thread.GetStopReason() != lldb.eStopReasonBreakpoint:
                 continue
             hits += 1
+            # --- CCKeyDerivationPBKDF(alg, password, passwordLen, salt, saltLen,
+            #                          prf, rounds, derivedKey, derivedKeyLen) ---
+            # arm64: x1=password x2=passwordLen x6=rounds
+            # x86_64: rsi=password rdx=passwordLen, rounds 在栈上 (rsp+8)
+            if thread.GetStopReasonDataAtIndex(0) == bp_cc.GetID():
+                frame = thread.GetFrameAtIndex(0)
+                pw = _reg(frame, ["x1", "rsi"])
+                plen = _reg(frame, ["x2", "rdx"])
+                rounds = _reg(frame, ["x6"])
+                if rounds is None:
+                    sp = _reg(frame, ["rsp"])
+                    if sp:
+                        rounds = process.ReadUnsignedFromMemory(sp + 8, 8, error)
+                if rounds is not None:
+                    rounds &= 0xFFFFFFFF
+                if rounds == 256000 and plen == 32 and pw:
+                    data = process.ReadMemory(pw, 32, error)
+                    if not error.Fail() and len(data) == 32:
+                        print(f"OK:{{data.hex()}}")
+                        found = True
+                        break
+                else:
+                    cc_other += 1
+                    if cc_other <= 8:
+                        print(f"HIT:cc rounds={{rounds}} plen={{plen}} hits={{hits}}")
+                continue
             # 用断点 ID 区分命中了哪个函数，二者参数位不同:
             # sqlite3_key(db, pKey, nKey)         -> pKey=arg2, nKey=arg3
             # sqlite3_key_v2(db, zDb, pKey, nKey) -> pKey=arg3, nKey=arg4
@@ -281,6 +312,31 @@ except Exception as e:
     return script
 
 
+def _lldb_cmd_prefix(log) -> list:
+    """选择与微信进程架构一致的 lldb 启动前缀。
+
+    /usr/bin/lldb 是 xcrun 垂片，会继承父进程架构。若 Python/终端跑在 Rosetta
+    (x86_64) 下，启动的 debugserver 也是 x86_64，附加 arm64 原生的微信时会报
+    "debugserver is x86_64 binary running in translation, attach failed"。
+    Apple Silicon 上微信为 arm64 时，强制用 arm64 运行 lldb。
+    """
+    try:
+        r = subprocess.run(["sysctl", "-n", "hw.optional.arm64"],
+                           capture_output=True, text=True, timeout=5)
+        if r.stdout.strip() != "1":
+            return []  # Intel Mac，无需处理
+        wx = "/Applications/WeChat.app/Contents/MacOS/WeChat"
+        if os.path.exists(wx):
+            r = subprocess.run(["lipo", "-archs", wx],
+                               capture_output=True, text=True, timeout=5)
+            if "arm64" not in r.stdout:
+                return []  # 微信是 x86_64 (Rosetta)，用默认 x86_64 lldb
+        log("[macos_lldb] Apple Silicon: 强制以 arm64 启动 lldb")
+        return ["arch", "-arm64"]
+    except Exception:
+        return []
+
+
 def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
     """LLDB breakpoint to capture sqlite3_key passphrase arg, with detailed logging."""
     script = _build_lldb_script(pid)
@@ -291,7 +347,7 @@ def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
             script_path = f.name
 
         result = subprocess.run(
-            ["lldb", "-b", "-O", f"command script import {script_path}"],
+            _lldb_cmd_prefix(log) + ["lldb", "-b", "-O", f"command script import {script_path}"],
             capture_output=True, text=True, timeout=90)
         os.unlink(script_path)
 

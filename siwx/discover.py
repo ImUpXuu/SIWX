@@ -164,9 +164,12 @@ def find_wechat_data_dirs():
         if users_dir.is_dir():
             try:
                 for user_dir in users_dir.iterdir():
-                    if user_dir.is_dir() and user_dir != home:
-                        roots.append(user_dir / "Documents" / "xwechat_files")
-                        roots.append(user_dir / "xwechat_files")
+                    try:
+                        if user_dir.is_dir() and user_dir != home:
+                            roots.append(user_dir / "Documents" / "xwechat_files")
+                            roots.append(user_dir / "xwechat_files")
+                    except OSError:
+                        continue
             except OSError:
                 pass
     else:
@@ -185,9 +188,11 @@ def find_wechat_data_dirs():
         out.append((wxid, str(db)))
 
     for root in roots:
-        if not root.is_dir():
-            continue
+        # macOS 上其他用户的 ~/Documents 受系统保护，is_dir() 会抛 PermissionError
+        # (EACCES 不在 pathlib 忽略的错误码内)，必须一并捕获，否则整个扫描中断。
         try:
+            if not root.is_dir():
+                continue
             for entry in root.iterdir():
                 db = entry / "db_storage"
                 if db.is_dir():
