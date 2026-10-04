@@ -6,6 +6,7 @@ zstd 解压、类型映射、发送者解析（前缀 / real_sender_id / origin_
 后续富文本（图片/语音实体）在此扩展。
 """
 import hashlib
+import html
 import os
 import re
 import sqlite3
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, current_app as _current_app
 
+from siwx import logger as _logger
 from siwx import media, voice
 from siwx.plugins import chat_bridge as _plugins
 
@@ -75,7 +77,9 @@ def shard_index(msg_dir: Path) -> dict:
                     "SELECT name FROM sqlite_master WHERE type='table'")]
             finally:
                 conn.close()
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            # 分片打不开即被剔除索引 → 该库里的会话在聊天页/MCP 里"消失"
+            _logger.detailed("api", f"[shard] 分片读取失败 db={db.name}: {e}")
             continue
         for t in names:
             if t.startswith("Msg_"):
@@ -118,10 +122,61 @@ bp = Blueprint("chat_api", __name__, url_prefix="/api/chat")
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 KIND_MAP = {3: "image", 6: "file", 34: "voice", 42: "card", 43: "video",
-            47: "sticker", 48: "location", 50: "call"}
+            47: "sticker", 48: "location", 50: "call", 19: "record"}
 FALLBACK_LABEL = {3: "[图片]", 6: "[文件]", 34: "[语音]", 42: "[名片]",
-                  43: "[视频]", 47: "[动画表情]", 48: "[位置]", 50: "[通话]"}
+                  43: "[视频]", 47: "[动画表情]", 48: "[位置]", 50: "[通话]",
+                  19: "[聊天记录]"}
 SENDER_PREFIX_RE = re.compile(r"^([a-zA-Z0-9_\-]+):\n")
+
+# ── 引用消息解析（审计 D1/D2/D3/D7/D8 修复）─────────────────────
+# D1：refermsg 标签可能带属性（微信服务端形态不受本控），"<refermsg>"
+# 包含判断对带属性形态全盲 → 统一用容忍属性的正则判定。
+REFER_MSG_RE = re.compile(r"<refermsg[\s>]")
+
+# 被引用消息类型 → 固定文案（精确类型开关：按 refermsg 的 type 字段全等
+# 判定，绝不猜类型、每类有兜底；替换原 type="?3"? 宽松正则，D2/D3）
+REFER_TYPE_LABELS = {
+    3: "[图片]", 6: "[文件]", 34: "[语音]", 42: "[名片]", 43: "[视频]",
+    47: "[表情包]", 48: "[位置]", 49: "[链接]", 50: "[通话]", 19: "[聊天记录]",
+}
+
+# 微信 4.x/5.0 packed_info 复合 localType：完整值 = 子类型 << 16 | 基本类型(49)
+# （已知形态：244813135921=引用、266287972401=拍一拍、8594229559345=红包、
+# 8589934592049=转账）。低 16 位折叠后都是 49，需按完整值区分子类型文案。
+COMPOSITE_49_LABELS = {
+    244813135921 >> 16: "[引用]",
+    266287972401 >> 16: "[拍一拍]",
+    8594229559345 >> 16: "[红包]",
+    8589934592049 >> 16: "[转账]",
+}
+
+# 合并转发 recordinfo 的 dataitem datatype → 文案（无法识别的给 [消息] 兜底）
+RECORD_DATATYPE_LABELS = {
+    "1": "", "2": "[图片]", "3": "[图片]", "4": "[视频]", "5": "[链接]",
+    "6": "[文件]", "8": "[动画表情]", "17": "[文件]",
+}
+
+
+def has_refermsg(text: str) -> bool:
+    """refermsg 存在性判定：容忍标签属性（D1）。
+
+    原实现 `"<refermsg>" in text` 对 `<refermsg type="3">` 等带属性形态
+    全盲，引用关系静默丢失；服务端形态不受本控，判定必须容忍属性。
+    """
+    return bool(text) and bool(REFER_MSG_RE.search(text))
+
+
+def composite_49_subtype(ltype) -> int:
+    """packed_info 复合 localType 的子类型段（非复合或基本类型非 49 返回 0）。"""
+    if not ltype or ltype <= 0xFFFF or (ltype & 0xFFFF) != 49:
+        return 0
+    return ltype >> 16
+
+
+def _tag_text(src: str, tag: str) -> str:
+    """提取 <tag>…</tag> 的原文（未命中返回空串，永不为 None）。"""
+    m = re.search(rf"<{tag}>(.*?)</{tag}>", src or "", re.S)
+    return m.group(1) if m else ""
 
 
 from siwx import paths as _paths
@@ -210,19 +265,23 @@ def _contact_names(acc_dir: Path) -> dict:
                         best = v
                         break
                 names[un] = best
-        except sqlite3.Error:
+        except sqlite3.Error as e:
             # schema 不匹配 → 降级到仅 username
+            _logger.detailed("api", f"[contact] contact.db schema 降级（仅 username）"
+                                    f"db={p.name}: {e}")
             try:
                 for (un,) in conn.execute("SELECT username FROM contact"):
                     if (un or "").strip():
                         names[(un or "").strip()] = (un or "").strip()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e2:
+                _logger.detailed("api", f"[contact] contact.db 降级查询也失败"
+                                        f"db={p.name}: {e2}")
         finally:
             conn.close()
-    except Exception:
-        # 数据库损坏 / 无法打开 → 返回空（不阻塞会话列表）
-        pass
+    except Exception as e:
+        # 数据库损坏 / 无法打开 → 返回空（不阻塞会话列表）；空结果会进缓存
+        _logger.warn("api", f"[contact] contact.db 打不开，联系人名降级为空 db={p.name}: "
+                            f"{type(e).__name__}: {e}")
     with _CACHE_LOCK:
         _CONTACT_CACHE[key] = (sig, names)
     return names
@@ -267,14 +326,17 @@ def _contact_names_for(acc_dir: Path, usernames) -> dict:
                             break
                     if un:
                         names[un] = best
-        except sqlite3.Error:
+        except sqlite3.Error as e:
             # schema 不匹配时退回全量函数，保持兼容性。
+            _logger.detailed("api", f"[contact] contact.db schema 降级（回退全量读取）"
+                                    f"db={p.name}: {e}")
             all_names = _contact_names(acc_dir)
             names = {u: all_names.get(u, u) for u in wanted}
         finally:
             conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.warn("api", f"[contact] contact.db 打不开，联系人名降级 db={p.name}: "
+                            f"{type(e).__name__}: {e}")
     with _CACHE_LOCK:
         _CONTACT_CACHE[(str(p), tuple(wanted))] = (sig, names)
     return names
@@ -290,16 +352,21 @@ def _decode_content(content) -> str:
     if raw[:4] == ZSTD_MAGIC and _ZCTX is not None:
         try:
             raw = _ZCTX.decompressobj().decompress(raw)
-        except Exception:
+        except Exception as e:
+            # 只记 hex 头 + 长度，绝不透传正文（_FILE_LOG 存未脱敏原文）
+            _logger.detailed("parse", f"[content] zstd 解压失败 len={len(raw)} "
+                                      f"head={raw[:16].hex()}: {type(e).__name__}")
             return ""
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
+        _logger.detailed("parse", f"[content] UTF-8 解码失败 len={len(raw)} "
+                                  f"head={raw[:16].hex()}")
         return ""
 
 
 def _fmt(ltype: int, text: str) -> str:
-    t = ltype & 0xFFFF
+    t = (ltype or 0) & 0xFFFF
     if t == 1:
         return text
     if t == 57:
@@ -311,29 +378,58 @@ def _fmt(ltype: int, text: str) -> str:
     if t in (10000, 10002):
         return text or "[系统消息]"
     if t == 49:
-        if "<refermsg>" in text:
+        if has_refermsg(text):
             # 引用消息（外层 49、内层 57）：与 t==57 同口径，只取回复文本，
-            # 不带 "[链接]" 前缀；CDATA 由 _xml_text 一并剥离
+            # 不带 "[链接]" 前缀；CDATA 由 _xml_text 一并剥离。
+            # has_refermsg 容忍带属性形态（D1）。
             m = re.search(r"<title>(.*?)</title>", text, re.S)
             return (_xml_text(m.group(1)) if m else None) or "[引用]"
+        # D5：appmsg type=19 合并转发（recordinfo）→ 逐条热解析，
+        # 不再把内部消息整包丢弃、只显示 "[链接] 标题"
+        if _is_recordinfo(text):
+            rec = _parse_recordinfo(text)
+            head = f"[聊天记录] {rec['title']}".rstrip()
+            if rec["items"]:
+                preview = "；".join(
+                    f"{it['sender'] or '未知'}: {it['text']}"
+                    for it in rec["items"][:3])
+                tail = "…" if rec["count"] > 3 else ""
+                return f"{head}（{rec['count']} 条：{preview}{tail}）"
+            return head
         m = re.search(r"<title>(.*?)</title>", text, re.S)
+        # packed_info 复合类型（转账/红包/拍一拍）按完整 localType 细分文案
+        label = COMPOSITE_49_LABELS.get(composite_49_subtype(ltype), "[链接]")
         if m:
             # 剥离 CDATA 包装，避免 content 出现 <![CDATA[...]]> 原文
-            return f"[链接] {_xml_text(m.group(1))}".rstrip()
-        return "[链接]"
+            return f"{label} {_xml_text(m.group(1))}".rstrip()
+        return label
     return FALLBACK_LABEL.get(t, f"[类型{t}]")
+
+
+def _is_recordinfo(text: str) -> bool:
+    """appmsg type=19 合并转发（聊天记录）识别。
+
+    只认明确标记：<recordinfo> 元素或 <appmsg type="19">；
+    不做 "type=19" 子串匹配（会误中 datatype="19" 等无关属性）。"""
+    if not text:
+        return False
+    return "<recordinfo>" in text or bool(
+        re.search(r'<appmsg\s[^>]*type="19"', text))
 
 
 def _sender_map(conn) -> dict:
     """real_sender_id(rowid) → wxid（分片内有效）。"""
     try:
         return {rid: un for rid, un in conn.execute("SELECT rowid, user_name FROM Name2Id")}
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        # 静默归零 → 群消息发送者只能显示为空/会话名
+        _logger.detailed("api", f"[sender] Name2Id 读取失败，发送者映射降级为空: {e}")
         return {}
 
 
 @bp.get("/accounts")
 def accounts():
+    _logger.detailed("api", "[accounts] 请求")
     out = []
     for acc in _accounts():
         d = _out_root() / acc
@@ -344,8 +440,9 @@ def accounts():
                 conn = sqlite3.connect(sdb)
                 sessions = conn.execute("SELECT COUNT(*) FROM SessionTable").fetchone()[0]
                 conn.close()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e:
+                _logger.detailed("api", f"[accounts] session.db 读取失败 "
+                                        f"account={acc}: {e}")
         out.append({"wxid": acc, "sessions": sessions})
     return jsonify({"accounts": out})
 
@@ -380,26 +477,31 @@ def sessions():
                 if un and not _is_ghost_session(un, summary, ts):
                     items[un] = {"username": un, "summary": summary,
                                  "last_time": ts}
-        except sqlite3.Error:
+        except sqlite3.Error as e:
             # SessionTable 损坏 → 尝试 Name2Id。这里没有摘要/时间，按幽灵会话规则不
             # 做空会话过滤，否则损坏库下会完全没有列表。
+            _logger.warn("api", f"[sessions] SessionTable 读取失败，降级 Name2Id "
+                                f"account={account}: {e}")
             try:
                 for (un,) in conn.execute("SELECT user_name FROM Name2Id"):
                     if un and un not in items:
                         items[un] = {"username": un, "summary": "", "last_time": 0}
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e2:
+                _logger.warn("api", f"[sessions] Name2Id 降级也失败 account={account}: {e2}")
         conn.close()
 
     if not items:
+        _logger.warn("api", f"[sessions] session.db 无会话，降级扫描 message 分片 "
+                            f"account={account}")
         for db in sorted((acc / "message").glob("message_*.db")):
             conn = sqlite3.connect(db)
             try:
                 for (un,) in conn.execute("SELECT user_name FROM Name2Id"):
                     if un and un not in items:
                         items[un] = {"username": un, "summary": "", "last_time": 0}
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e:
+                _logger.warn("api", f"[sessions] 分片 Name2Id 读取失败 account={account} "
+                                    f"db={db.name}: {e}")
             finally:
                 conn.close()
 
@@ -464,38 +566,173 @@ def _xml_text(s):
 def _parse_appmsg(text: str):
     """type 49/57 公共字段：title/url/des。"""
     def g(tag):
-        m = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.S)
-        return _xml_text(m.group(1)) if m else None
+        return _xml_text(_tag_text(text, tag)) if _tag_text(text, tag) else None
     return g("title"), g("url"), g("des")
 
 
 def _parse_refer(text: str):
-    """type 57 引用：refermsg → {displayname, content, ts}。"""
-    m = re.search(r"<refermsg>(.*?)</refermsg>", text, re.S)
+    """type 57 引用：refermsg → {displayname, content, ts}。
+
+    修复（对照 docs/audit-siwx-issues-2026-10-03.md）：
+    - D1：refermsg 定位容忍标签属性（<refermsg type="3"> 不再全盲）；
+    - D7：refermsg 无 <content>/content 为空时置空串兜底，不再对 None 做
+      re.search（真实库 182 条命中：此前 TypeError 使全量导出丢整会话、
+      聊天页 500）；
+    - D8：微信把嵌套 XML 以 HTML 实体形态存储，提取后必须 html.unescape，
+      否则 quote.content 是 "&lt;title&gt;…" 字面量（真实库 7358 条 / 23%）；
+    - D2/D3：删除 type="?3"? 宽松正则；被引用类型改按 refermsg 的 type
+      字段全等给固定文案，未识别类型剥标签兜底，绝不把嵌套 XML 原文直出。
+    """
+    m = re.search(r"<refermsg(\s[^>]*)?>(.*?)</refermsg>", text or "", re.S)
     if not m:
         return None
-    blk = m.group(1)
-    def g(tag):
-        mm = re.search(rf"<{tag}>(.*?)</{tag}>", blk, re.S)
-        return mm.group(1).strip() if mm else ""
-    dn = _xml_text(g("displayname"))
-    content = _xml_text(g("content"))
-    # 被引用内容本身可能是 XML（图片/链接）→ 归纳为可读文本
+    attrs, blk = m.group(1) or "", m.group(2)
+    dn = _xml_text(html.unescape(_tag_text(blk, "displayname")))
+    # D7：content 缺失/为空 → 空串（原实现对 None 做 re.search 直接崩溃）
+    content = _xml_text(html.unescape(_tag_text(blk, "content"))) or ""
+    # 被引用内容本身可能是 XML（图片/链接卡片）→ 优先取其 <title> 作可读文本
     inner = re.search(r"<title>(.*?)</title>", content, re.S)
     if inner:
-        content = inner.group(1)
-    if re.search(r"type=\"?3\"?", blk) or "<img" in content:
-        content = content if content and not content.startswith("<?xml") else "[图片]"
+        content = _xml_text(inner.group(1)) or ""
+    if not content.strip():
+        content = _refer_type_label(attrs, blk) or ""
+    elif re.match(r"<[a-zA-Z/?!]", content.lstrip()):
+        # 无 <title> 可提取的嵌套 XML（视频/表情/未识别卡片）→ 不透传原文
+        content = _refer_type_label(attrs, blk) or (
+            re.sub(r"<[^>]+>", " ", content).strip() or "[引用]")
     try:
-        ts = int(g("createtime") or 0)
+        ts = int((_tag_text(blk, "createtime") or "").strip() or 0)
     except ValueError:
         ts = 0
     return {"displayname": dn, "content": content[:500], "ts": ts}
 
 
+def _refer_type_label(attrs: str, blk: str):
+    """按 refermsg 的 type 字段全等判定被引用类型 → 固定文案（D2/D3）。
+
+    先取标签属性 type="N"，缺失时回退内层 <type>N</type>；均缺失返回 None。"""
+    tm = re.search(r'type\s*=\s*"(\d+)"', attrs)
+    if not tm:
+        tm = re.search(r"<type>\s*(\d+)\s*</type>", blk)
+    return REFER_TYPE_LABELS.get(int(tm.group(1))) if tm else None
+
+
+def _safe_parse_refer(text: str):
+    """_parse_refer 的兜底包装：解析异常只丢弃该条引用并打详细日志，
+    绝不让单条坏消息把整个会话的导出/聊天页拖垮（D7 调用点加固）。"""
+    try:
+        return _parse_refer(text)
+    except Exception as e:
+        _logger.detailed("parse",
+                         f"[refer] 引用解析异常已兜底: {type(e).__name__}: {e}; "
+                         f"raw={str(text)[:300]!r}")
+        return None
+
+
+def _parse_recordinfo(text: str) -> dict:
+    """appmsg type=19 合并转发热解析（D5，参照 forwardRecordParser 思路）。
+
+    按 <dataitem datatype="N"> 逐条提取 sourcename/sourcetime/datadesc/
+    datatitle，按 (datatype, sender, ts, desc, title) 组合键去重。
+    此前整条消息只显示 "[链接] 标题"，内部逐条消息全部丢弃
+    （真实库 2252 条受影响，其中 1206 条 datadesc 整体丢弃）。
+    返回 {"title": str, "count": int, "items": [{"sender","ts","text"}]}。
+    """
+    title = _xml_text(html.unescape(_tag_text(text, "title"))) or "聊天记录"
+    items, seen = [], set()
+    for m in re.finditer(r"<dataitem\s[^>]*>(.*?)</dataitem>", text or "", re.S):
+        blk = m.group(1)
+        dtm = re.search(r'datatype="(\d+)"', m.group(0))
+        dtype = dtm.group(1) if dtm else ""
+        sender = _xml_text(html.unescape(_tag_text(blk, "sourcename"))) or ""
+        try:
+            ts = int((_tag_text(blk, "sourcetime") or "").strip() or 0)
+        except ValueError:
+            ts = 0
+        desc = _xml_text(html.unescape(_tag_text(blk, "datadesc"))) or ""
+        dtitle = _xml_text(html.unescape(_tag_text(blk, "datatitle"))) or ""
+        key = (dtype, sender, ts, desc, dtitle)
+        if key in seen:
+            continue
+        seen.add(key)
+        body = desc or dtitle or RECORD_DATATYPE_LABELS.get(dtype, "[消息]")
+        items.append({"sender": sender, "ts": ts, "text": body[:200]})
+    return {"title": title, "count": len(items), "items": items}
+
+
+def parse_quote_or_link(t: int, text: str, local_id=None, ts=None):
+    """type 57 / 49 的引用与链接卡统一分流（公共函数）。
+
+    build_messages / messages / export_stream._enrich_row 三处原先逐字重复
+    同一段 md5/49-57 门控与引用分流逻辑，改类型判定必须三处同步——现收敛
+    到这里。返回 (quote, link, record)。
+
+    local_id / ts 为可选定位上下文（审计 §4.3）：解析"无异常但返回 None"
+    的兜底分支（即前端出现 [引用]/[链接] 文案的场景）会带这两个字段记
+    detailed 日志；解析**异常**路径已由 _safe_parse_refer 记录，不重复埋点。
+    """
+    def _raw_head(s: str) -> str:
+        # 正文只记 hex 头 + 长度（_FILE_LOG 存未脱敏原文，绝不透传正文）
+        return (s or "").encode("utf-8", "replace")[:16].hex()
+
+    quote = link = record = None
+    if t == 57:
+        quote = _safe_parse_refer(text)
+        if quote is None:
+            # ring=False：逐条埋点只进文件轨，防大导出冲掉日志页环形缓冲
+            _logger.detailed("parse", f"[quote] t=57 未匹配到 refermsg（将显示 [引用]）"
+                                      f"local_id={local_id} ts={ts} "
+                                      f"raw_len={len(text or '')} raw_head={_raw_head(text)}",
+                             ring=False)
+    elif t == 49:
+        if has_refermsg(text):
+            quote = _safe_parse_refer(text)
+            if quote is None:
+                _logger.detailed("parse", f"[quote] t=49 refermsg 解析为空（将显示 [引用]）"
+                                          f"local_id={local_id} ts={ts} "
+                                          f"raw_len={len(text or '')} raw_head={_raw_head(text)}",
+                                 ring=False)
+        elif _is_recordinfo(text):
+            record = _parse_recordinfo(text)
+        else:
+            title, url, des = _parse_appmsg(text)
+            if title or url:
+                link = {"title": title or "链接", "url": url, "desc": des}
+            else:
+                _logger.detailed("parse", f"[link] t=49 无 title/url（将显示 [链接]）"
+                                          f"local_id={local_id} ts={ts} "
+                                          f"raw_len={len(text or '')} raw_head={_raw_head(text)}",
+                                 ring=False)
+    return quote, link, record
+
+
+def enrich_message_row(t: int, text: str, packed):
+    """md5 / 气泡 md5 / 语音元数据采集（原三处逐字重复逻辑收敛于此）。"""
+    md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
+    voice_meta = voice.parse_voice_meta(text) if t == 34 else None
+    bubble_md5 = None
+    if t in (3, 47) and packed:
+        m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
+        bubble_md5 = m2.group().decode() if m2 else None
+    return md5, bubble_md5, voice_meta
+
+
+def message_kind(t: int, quote, link) -> str:
+    """按类型与解析结果定 kind（原三处重复逻辑收敛于此）。"""
+    if t == 57 or (t == 49 and quote):
+        return "quote"
+    if t == 49 and link and link.get("url"):
+        return "link"
+    return KIND_MAP.get(t, "text")
+
+
 def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
                    account: str = None):
-    """读取一个会话的全部消息并富化（导出与 API 共用）。
+    """读取一个会话的全部消息并富化。
+
+    生产调用方只有 MCP（mcp_server.tool_get_messages / tool_search_messages）；
+    导出走 export_stream.message_stream，API /messages 是端点内联查询
+    （原 docstring 的"导出与 API 共用"是过时描述，审计核查 B1 已更正）。
 
     account: 数据库归属账号（wxid），用于判定 is_me；None 时从 acc 推断。
     返回 dict 列表，字段同时服务前端（id/ts/kind/...）与导出（CipherTalk 风格）。
@@ -517,8 +754,9 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
                     f"origin_source, real_sender_id, message_content, "
                     f"packed_info_data FROM [{table}] ORDER BY create_time"):
                 rows.append(r + (smap,))
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            # 生产调用方只有 MCP：该分片 0 条消息 → MCP 工具结果缺段（数据完整性）
+            _logger.error("api", f"[build] 表查询失败 chat={chat} db={db.name}: {e}")
         finally:
             conn.close()
 
@@ -554,31 +792,10 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
             sender_wxid = ""
 
         t = ltype & 0xFFFF
-        md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
-        voice_meta = voice.parse_voice_meta(text) if t == 34 else None
-        bubble_md5 = None
-        if t in (3, 47) and packed:
-            m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
-            bubble_md5 = m2.group().decode() if m2 else None
+        md5, bubble_md5, voice_meta = enrich_message_row(t, text, packed)
 
-        quote = link = None
-        if t == 57:
-            quote = _parse_refer(text)
-        if t == 49:
-            if "<refermsg>" in text:
-                # 微信 5.0 库里引用消息外层是 49（与 export_stream._enrich_row
-                # 同口径），走引用分支并跳过 link 卡片
-                quote = _parse_refer(text)
-            else:
-                title, url, des = _parse_appmsg(text)
-                if title or url:
-                    link = {"title": title or "链接", "url": url, "desc": des}
-
-        kind = KIND_MAP.get(t, "text")
-        if t == 57 or (t == 49 and quote):
-            kind = "quote"
-        elif t == 49 and link and link.get("url"):
-            kind = "link"
+        quote, link, record = parse_quote_or_link(t, text, local_id=local_id, ts=ts)
+        kind = message_kind(t, quote, link)
 
         msgs.append({
             # 前端形状
@@ -595,7 +812,8 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
             "voice": voice_meta,
             "quote": quote,
             "link": link,
-            "text": _fmt(t, text) if t != 1 else text,
+            "record": record,
+            "text": _fmt(ltype, text) if t != 1 else text,
             # 导出形状（CipherTalk 风格）
             "localId": local_id,
             "platformMessageId": str(server_id or ""),
@@ -603,7 +821,7 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
             "localType": t,
             "typeName": TYPE_NAMES.get(t, f"类型{t}"),
             "rawContent": raw_text,
-            "content": _fmt(t, text) if t != 1 else text,
+            "content": _fmt(ltype, text) if t != 1 else text,
             "isSend": 1 if is_me else 0,
             "senderUsername": sender_wxid or chat,
             "senderDisplayName": names.get(sender_wxid, sender_wxid) if sender_wxid
@@ -663,8 +881,9 @@ def messages():
                 _log(f"[msg] 分片{shard_idx} {db.name}: 取 {len(rows)} 条候选")
             for r in rows:
                 candidates.append((r, smap))
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            _logger.detailed("api", f"[msg] 分片查询失败 account={account} chat={chat} "
+                                    f"db={db.name}: {e}")
         finally:
             conn.close()
 
@@ -701,31 +920,10 @@ def messages():
             sender_wxid = ""
 
         t = ltype & 0xFFFF
-        md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
-        voice_meta = voice.parse_voice_meta(text) if t == 34 else None
-        bubble_md5 = None
-        if t in (3, 47) and packed:
-            m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
-            bubble_md5 = m2.group().decode() if m2 else None
+        md5, bubble_md5, voice_meta = enrich_message_row(t, text, packed)
 
-        quote = link = None
-        if t == 57:
-            quote = _parse_refer(text)
-        if t == 49:
-            if "<refermsg>" in text:
-                # 微信 5.0 库里引用消息外层是 49（与 export_stream._enrich_row
-                # 同口径），走引用分支并跳过 link 卡片
-                quote = _parse_refer(text)
-            else:
-                title, url, des = _parse_appmsg(text)
-                if title or url:
-                    link = {"title": title or "链接", "url": url, "desc": des}
-
-        kind = KIND_MAP.get(t, "text")
-        if t == 57 or (t == 49 and quote):
-            kind = "quote"
-        elif t == 49 and link and link.get("url"):
-            kind = "link"
+        quote, link, record = parse_quote_or_link(t, text, local_id=local_id, ts=ts)
+        kind = message_kind(t, quote, link)
 
         msgs.append({
             "id": local_id, "platformMessageId": str(server_id or ""),
@@ -735,8 +933,8 @@ def messages():
             else (names.get(chat, chat) if not is_group else ""),
             "is_me": bool(is_me), "md5": md5, "bubble_md5": bubble_md5,
             "voice": voice_meta,
-            "quote": quote, "link": link,
-            "text": _fmt(t, text) if t != 1 else text,
+            "quote": quote, "link": link, "record": record,
+            "text": _fmt(ltype, text) if t != 1 else text,
         })
 
     # ── 插件层（无插件时零开销）──────────────────────────────
@@ -762,6 +960,7 @@ def timeline():
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
     month = (request.args.get("month") or "").strip()
+    _logger.detailed("api", f"[timeline] account={account} chat={chat} month={month or '全部'}")
     if month and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
         return jsonify({"error": "month 参数格式应为 YYYY-MM"}), 400
     acc = _out_root() / account
@@ -799,8 +998,9 @@ def timeline():
                     ts_min = int(mn)
                 if mx and mx > ts_max:
                     ts_max = int(mx)
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            _logger.detailed("api", f"[timeline] 分片查询失败 account={account} "
+                                    f"chat={chat} db={db.name}: {e}")
         finally:
             conn.close()
     result = {"account": account, "chat": chat, "total": total,
@@ -826,6 +1026,7 @@ def conversation_stats():
     by_hour = [0] * 24
     total = sent = 0
     ts_min = ts_max = 0
+    _logger.detailed("api", f"[stats] account={account} chat={chat}")
     for db in shards_for(acc, chat):
         conn = sqlite3.connect(db)
         try:
@@ -853,8 +1054,9 @@ def conversation_stats():
                     f"COUNT(*) FROM [{table}] WHERE create_time > 0 GROUP BY 1"):
                 if hour is not None:
                     by_hour[int(hour)] += int(cnt or 0)
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            _logger.detailed("api", f"[stats] 分片查询失败 account={account} "
+                                    f"chat={chat} db={db.name}: {e}")
         finally:
             conn.close()
     received = max(0, total - sent)
@@ -881,6 +1083,7 @@ def avatar():
     """
     account = request.args.get("account", "")
     username = request.args.get("username", "")
+    _logger.detailed("api", f"[avatar] account={account} username={username}")
 
     def _plugin_avatar():
         if not username:
@@ -918,7 +1121,10 @@ def avatar():
             if row and row[0]:
                 break
         conn.close()
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        # 非 pass：降级到插件头像解析器再 404，缺的是日志而非处理
+        _logger.detailed("api", f"[avatar] head_image.db 读取失败，降级插件解析器 "
+                                f"account={account} username={username}: {e}")
         data = _plugin_avatar()
         if data:
             return Response(data, mimetype="image/jpeg",
@@ -950,8 +1156,13 @@ def media_voice():
         svr_id = int(request.args.get("svr_id", "0") or request.args.get("server_id", "0") or 0)
     except ValueError:
         local_id = ts = svr_id = 0
+        # 参数非法静默归零 → 后续按 local_id=0 查询，大概率误导性 404
+        _logger.detailed("api", f"[voice] local_id/ts/svr_id 参数非法，已归零 "
+                                f"account={account} chat={chat}")
     if not account:
         return jsonify({"error": "参数缺失"}), 400
+    _logger.detailed("api", f"[voice] account={account} chat={chat} "
+                            f"local_id={local_id} ts={ts} fmt={fmt}")
     body, info = voice.get_voice(_out_root() / account, chat=chat,
                                  local_id=local_id, svr_id=svr_id, ts=ts)
     if body is None:
@@ -994,8 +1205,14 @@ def media_image():
         ts = int(request.args.get("ts", "0") or 0)
     except ValueError:
         local_id = ts = 0
+        # 参数非法静默归零 → 后续按 local_id=0 查询，大概率误导性 404
+        _logger.detailed("api", f"[image] local_id/ts 参数非法，已归零 "
+                                f"account={account} chat={chat} md5={(md5 or '')[:8]}")
     if not account:
         return jsonify({"error": "参数缺失"}), 400
+    # 高频端点：detailed 天然节流（仅详细模式可见）
+    _logger.detailed("api", f"[image] account={account} chat={chat} "
+                            f"local_id={local_id} ts={ts} md5={(md5 or '')[:8]} hq={hq}")
     body, info = media.get_image(account, md5, _out_root() / account,
                                  chat=chat or None, local_id=local_id or None,
                                  ts=ts or None, bubble_md5=bubble_md5 or None,

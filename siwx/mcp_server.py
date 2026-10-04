@@ -20,7 +20,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from siwx import __version__, paths, sns
+from siwx import __version__, logger, paths, sns
 from siwx.api_chat import (
     _contact_names, _decode_content, build_messages, message_tables_by_shard,
 )
@@ -72,7 +72,11 @@ def config_path() -> Path:
 def load_config() -> dict:
     try:
         return json.loads(config_path().read_text(encoding="utf-8"))
-    except Exception:
+    except FileNotFoundError:
+        return {}                            # 首次运行无配置，正常
+    except Exception as e:
+        # 损坏 → 全部工具静默恢复默认启用（安全相关开关失效），必须告警
+        mcp_log.warning("mcp_config.json 解析失败，工具开关已回默认: %s", e)
         return {}
 
 
@@ -115,8 +119,9 @@ def _session_list(account: str) -> list:
                 un = (un or "").strip()
                 if un:
                     items[un] = {"summary": (summary or "").strip(), "ts": ts or 0}
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            mcp_log.warning("session.db 读取失败 account=%s: %s",
+                            logger.desensitize_msg(account), e)
         finally:
             conn.close()
     out = [{"username": un, "display": names.get(un) or un,
@@ -144,8 +149,8 @@ def tool_get_status(_args) -> str:
     try:
         from siwx.discover import find_wechat_pids
         wechat_running = bool(find_wechat_pids())
-    except Exception:
-        pass
+    except Exception as e:
+        mcp_log.debug("微信进程检测失败: %s", e)
     return _json({"wechat_running": wechat_running,
                   "accounts": accs, "keystore_salts": len(store)})
 
@@ -222,8 +227,8 @@ def tool_search_messages(args) -> str:
             try:
                 smap = {rid: un for rid, un in
                         conn.execute("SELECT rowid, user_name FROM Name2Id")}
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e:
+                mcp_log.debug("Name2Id 读取失败 db=%s: %s", db.name, e)
             for t in tables:
                 if len(hits) >= limit or scanned >= SCAN_CAP:
                     break
@@ -242,10 +247,15 @@ def tool_search_messages(args) -> str:
                     hits.append({"chat": chat_name, "ts": ts or 0,
                                  "sender": sender, "type": ltype & 0xFFFF,
                                  "content": text[:300]})
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            # 分片查询失败 → 该分片静默跳过，全库搜索结果不完整
+            mcp_log.warning("全库搜索分片查询失败 db=%s: %s（结果可能不完整）",
+                            db.name, e)
         finally:
             conn.close()
+    if scanned >= SCAN_CAP:
+        # scanned 截断无失败标记会让人误以为已扫完全库
+        mcp_log.warning("全库搜索达到扫描上限 %d 行，结果不完整", SCAN_CAP)
     return _json({"scope": "全部会话", "scanned": scanned, "matches": hits[:limit],
                   "note": f"扫描上限 {SCAN_CAP} 行，命中即停"})
 
@@ -370,7 +380,9 @@ def tool_list_sns_accounts(_args) -> str:
             if db.is_file():
                 try:
                     st = sns.timeline_stats(db)
-                except Exception:
+                except Exception as e:
+                    # 统计失败伪装 0 条 → AI 客户端把"打不开"当"没发过动态"
+                    mcp_log.warning("sns 统计失败 %s: %s（伪装 0 条）", d.name, e)
                     st = {"count": 0}
                 out.append({"wxid": d.name, **st})
     return _json({"accounts": out,
@@ -483,8 +495,10 @@ def tool_get_sns_friends(args) -> str:
         names = _contact_names(paths.out_root() / account)
         for r in rows:
             r["display"] = names.get(r["username"]) or r["username"]
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 昵称解析失败不影响列表，但排行里会全是 wxid——留个痕迹
+        mcp_log.debug("sns 好友备注解析失败 account=%s: %s",
+                      logger.desensitize_msg(account), e)
     for r in rows:
         r.setdefault("display", r["username"])
     return _json({"account": account, "total": len(rows),
@@ -621,7 +635,8 @@ def _plugin_tools() -> list:
     try:
         from siwx.plugins import ensure_loaded, registry
         ensure_loaded()
-    except Exception:
+    except Exception as e:
+        mcp_log.warning("插件工具加载失败（本轮只暴露内置工具）: %s", e)
         return []
     builtin = {t["name"] for t in TOOLS}
     out = []
@@ -641,7 +656,8 @@ def _plugin_tool_handler(name: str):
     try:
         from siwx.plugins import ensure_loaded, registry
         ensure_loaded()
-    except Exception:
+    except Exception as e:
+        mcp_log.warning("插件工具系统不可用，工具 %s 无法解析: %s", name, e)
         return None
     for _i, t in registry.mcp_tools.sorted_items():
         if t.name == name:
@@ -666,7 +682,10 @@ def _tool_call(name: str, args: dict) -> str:
         is_plugin = h is not None
     if not h:
         raise ValueError(f"未知工具: {name}")
-    mcp_log.info("调用 %s args=%s", name, json.dumps(args, ensure_ascii=False)[:500])
+    # 审计 §2.4：mcp.log 不经 get_logs 的展示期脱敏，args 里的 keyword（≈聊天
+    # 内容片段）/account/chat 会明文落盘——落盘前先过 desensitize_msg
+    mcp_log.info("调用 %s args=%s", name,
+                 logger.desensitize_msg(json.dumps(args, ensure_ascii=False))[:500])
     t0 = time.time()
     try:
         result = h(args or {})
@@ -687,7 +706,8 @@ def _tool_call(name: str, args: dict) -> str:
     except Exception as e:
         dt = time.time() - t0
         tag = "插件工具 " if is_plugin else ""
-        mcp_log.error("失败 %s%s 耗时 %.2fs: %s", tag, name, dt, e)
+        mcp_log.error("失败 %s%s 耗时 %.2fs: %s", tag, name, dt,
+                      logger.desensitize_msg(str(e)))
         raise
 
 
@@ -722,7 +742,9 @@ def run_mcp_server() -> None:
             continue
         try:
             msg = json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            # 畸形 JSON-RPC 行零记录 → 协议层问题无从排查（截断防刷量）
+            mcp_log.debug("非法 JSON-RPC 行 (%s): %r", e, line[:120])
             continue
         if not isinstance(msg, dict):
             continue

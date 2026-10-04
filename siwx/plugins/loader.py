@@ -20,6 +20,8 @@ import hashlib
 import importlib.util
 import os
 import sys
+import time
+import traceback
 from pathlib import Path
 
 from siwx import logger as log
@@ -51,8 +53,9 @@ def ensure_root() -> Path:
     root = plugins_root()
     try:
         root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    except OSError as e:
+        # 静默的表象是"装了插件但一个都没加载"
+        log.warn("plugin", f"插件目录创建失败: {root} ({type(e).__name__})")
     return root
 
 
@@ -63,7 +66,9 @@ def _iter_candidates(root: Path) -> list:
     out = []
     try:
         entries = sorted(root.iterdir(), key=lambda p: p.name)
-    except OSError:
+    except OSError as e:
+        # 与"目录真为空"不可区分会让插件无声消失
+        log.warn("plugin", f"插件目录读取失败: {root} ({type(e).__name__})")
         return []
 
     for p in entries:
@@ -203,17 +208,31 @@ def load_all(reset: bool = False) -> _report.PluginLoadReport:
 
     log.info("plugin", f"发现 {len(candidates)} 个插件候选（{root}）")
     for kind, path, name in candidates:
+        t0 = time.perf_counter()
         try:
             mod = _load_module(kind, name, path)
         except BaseException as e:          # 插件 import 期任何异常都不外泄
             rep.add_error(name, "import", e)
             log.error("plugin", f"{name} 导入失败，已跳过: {type(e).__name__}: {e}")
+            # 单行 error 无堆栈难以定位（插件顶层做重活/依赖缺失都长一样）
+            log.detailed(f"plugin:{name}", f"导入堆栈:\n{traceback.format_exc(limit=3)}")
             continue
+        t_import = time.perf_counter()
+        ok = False
         try:
-            _apply_module(mod, registry, rep, name)
+            ok = bool(_apply_module(mod, registry, rep, name))
         except BaseException as e:
             rep.add_error(name, "register", e)
             log.error("plugin", f"{name} 注册异常，已跳过: {e}")
+        # 逐插件计时 + 成功埋点（import 慢常见于插件顶层做重活，分段计时定位）
+        ms_total = (time.perf_counter() - t0) * 1000
+        ms_import = (t_import - t0) * 1000
+        if ok:
+            st = next((s for s in rep.statuses if s.name == name), None)
+            log.detailed(f"plugin:{name}",
+                         f"加载成功 version={getattr(st, 'version', '?')} "
+                         f"耗时={ms_total:.1f}ms (import {ms_import:.1f}ms) "
+                         f"hooks={getattr(st, 'hooks', {})}")
 
     registry._loaded = True
     log.info("plugin", rep.summary())
@@ -261,4 +280,6 @@ def plugin_ui_dir(name: str) -> Path | None:
             p = Path(d)
             if p.is_dir():
                 return p
+    # 插件页面 404 时无从查起——未找到页面目录必须留痕
+    log.detailed("plugin", f"plugin_ui_dir({name}) 未找到页面目录")
     return None

@@ -15,6 +15,8 @@ import platform as _platform
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from siwx import logger as log
+
 # 支持的原子条件键（用于文档与校验提示）
 KNOWN_KEYS = (
     "requires_decrypted", "requires_account", "wechat_running",
@@ -42,23 +44,27 @@ class ConditionContext:
                 for d in root.iterdir():
                     if (d / "message").is_dir():
                         accounts.append(d.name)
-        except Exception:
-            pass
+        except Exception as e:
+            # 采集失败 → requires_decrypted/requires_account 条件把插件页静默隐藏
+            log.detailed("plugin", f"条件上下文: 解密账号目录扫描失败: "
+                                   f"{type(e).__name__}: {e}")
 
         running = False
         try:
             if _platform.system() == "Windows":
                 from siwx.discover import find_wechat_pids
                 running = bool(find_wechat_pids())
-        except Exception:
-            pass
+        except Exception as e:
+            log.detailed("plugin", f"条件上下文: 微信进程检测失败: "
+                                   f"{type(e).__name__}: {e}")
 
         version = "0.0.0"
         try:
             from siwx import __version__
             version = __version__
-        except Exception:
-            pass
+        except Exception as e:
+            log.detailed("plugin", f"条件上下文: 版本号获取失败: "
+                                   f"{type(e).__name__}: {e}")
 
         return cls(decrypted_accounts=accounts, wechat_running=running,
                    version=version, plugin_config=dict(plugin_config or {}))
@@ -120,6 +126,9 @@ def evaluate(condition, ctx: ConditionContext = None) -> bool:
     if not condition:
         return True
     if not isinstance(condition, dict):
+        # 条件非 dict 被宽放为"显示"——与异常时"隐藏"方向不一致，留痕
+        log.detailed("plugin", f"页面条件非 dict（{type(condition).__name__}），"
+                               f"宽放为显示")
         return True
     if ctx is None:
         ctx = ConditionContext.build()
@@ -157,7 +166,11 @@ def evaluate(condition, ctx: ConditionContext = None) -> bool:
                 return False
 
         return True
-    except Exception:
+    except Exception as e:
+        # "交由上层记录"的上层并不存在——这里只记键名，绝不记条件值
+        log.warn("plugin", f"页面条件求值异常，页面隐藏: "
+                           f"keys={sorted(map(str, condition.keys()))}: "
+                           f"{type(e).__name__}")
         return False
 
 

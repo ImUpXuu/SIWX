@@ -18,6 +18,7 @@ import re
 import sys
 
 from siwx import __version__
+from siwx import logger as _slog
 
 # 打码用户名：C:\Users\xxx / /Users/xxx / /home/xxx → <user>
 _HOME_PATTERNS = (
@@ -51,7 +52,9 @@ def _plugin_line() -> str | None:
     """插件系统状态；插件不可用时返回 None。"""
     try:
         from siwx.plugins import loader
-    except Exception:
+    except Exception as e:
+        # 审计 §3.6：import 失败整行消失，bug 报告缺"插件系统坏了"线索
+        _slog.detailed("env", f"插件系统导入失败: {type(e).__name__}: {e}")
         return None
     if not loader.plugins_enabled():
         return "已关闭（SIWX_NO_PLUGINS=1）"
@@ -91,9 +94,12 @@ def _collect(mask_user: bool) -> dict:
     try:
         from siwx.auto_update import is_frozen
         frozen = bool(is_frozen())
-    except Exception:
-        frozen = False
-    info["运行模式"] = "打包产物" if frozen else "源码运行"
+        info["运行模式"] = "打包产物" if frozen else "源码运行"
+    except Exception as e:
+        # 审计核查 agent-3 C.5：探测失败不能回退 False——打包产物会被误报成
+        # "源码运行"，这是报告正确性问题，except 分支填"未知"
+        info["运行模式"] = "未知"
+        _slog.detailed("env", f"运行模式探测失败: {type(e).__name__}: {e}")
 
     os_name, os_version = _os_display()
     info["操作系统"] = os_name
@@ -107,8 +113,12 @@ def _collect(mask_user: bool) -> dict:
         info["数据目录"] = show(paths.data_dir())
         info["输出目录"] = show(paths.out_root())
         info["日志目录"] = show(paths.app_root() / "logs")
-    except Exception:
-        pass
+    except Exception as e:
+        # 审计 §3.6:104-111：目录四行整块消失（path 问题恰是最常见故障），
+        # warn + "不可读"占位（对齐下方密钥库做法）
+        _slog.warn("env", f"paths 段采集失败: {type(e).__name__}: {e}")
+        for _k in ("程序目录", "数据目录", "输出目录", "日志目录"):
+            info.setdefault(_k, "不可读")
 
     try:
         from siwx import keystore

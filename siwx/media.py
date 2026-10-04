@@ -19,13 +19,26 @@ from pathlib import Path
 
 from Crypto.Cipher import AES
 
+from siwx import logger as _media_logger
+
 V2_MAGIC = b"\x07\x08V2\x08\x07"
 V1_MAGIC = b"\x07\x08V1\x08\x07"
 V1_FIXED_KEY = b"cfcd208495d565ef"          # 社区已知固定 key（原项目记录）
 DEFAULT_XOR = 0xC9
 
-# 事件钩子：serve 模式下由 server 注入 tui.log，CLI 下默认静默
-event = lambda msg: None
+
+def _default_event(msg: str) -> None:
+    """媒体诊断事件默认进结构化轨（审计 §2.2）：CLI/serve 下开 Debug 均可见，
+    不再是 no-op。serve 模式由 server 再叠加 TUI 实时输出。
+    ring=False：图片三级来源诊断是逐张埋点，只进文件轨防冲环形缓冲。"""
+    try:
+        _media_logger.detailed("media", str(msg), ring=False)
+    except Exception:
+        pass
+
+
+# 事件钩子：默认结构化轨；serve 模式下由 server 注入 TUI 双写
+event = _default_event
 
 _IMAGE_SIGS = (
     (b"\xff\xd8\xff", "jpeg", "image/jpeg"),
@@ -61,7 +74,15 @@ def _key_file() -> Path:
 def _load_key_cache() -> dict:
     try:
         return json.loads(_key_file().read_text(encoding="utf-8"))
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        # 审计 §4.4：区分"缓存损坏"与"缓存没坏但密钥不对"——损坏只是少了一条
+        # 密钥来源（candidate_keys 还有 kvcomm 派生兜底），但要可见
+        try:
+            _media_logger.detailed("media", f"密钥缓存读取失败: {type(e).__name__}")
+        except Exception:
+            pass
         return {}
 
 
@@ -108,6 +129,7 @@ def _image_sig(data: bytes):
 # DLL 全局单例 + 串行锁：浏览器并发请求下重复 LoadLibrary 会互相踩崩
 
 _VOIP_FN = None
+_VOIP_TRIED = False        # 审计 §4.4：失败告警每进程只发一次，否则每张 wxgf 刷一条
 _VOIP_LOCK = threading.Lock()
 
 
@@ -126,13 +148,19 @@ def _find_voip_dll():
 
 
 def _get_voip_fn():
-    global _VOIP_FN
+    global _VOIP_FN, _VOIP_TRIED
     if _VOIP_FN is not None:
         return _VOIP_FN
     import ctypes
 
     dll_path = _find_voip_dll()
     if not dll_path:
+        if not _VOIP_TRIED:
+            _VOIP_TRIED = True
+            try:
+                _media_logger.warn("media", "VoipEngine.dll 未找到，wxgf 将无法转码")
+            except Exception:
+                pass
         return None
     try:
         if hasattr(os, "add_dll_directory"):
@@ -143,7 +171,14 @@ def _get_voip_fn():
                        ctypes.POINTER(ctypes.c_int), ctypes.c_int64]
         fn.restype = ctypes.c_int64
         _VOIP_FN = fn
-    except Exception:
+    except Exception as e:
+        if not _VOIP_TRIED:
+            _VOIP_TRIED = True
+            try:
+                _media_logger.warn("media",
+                                   f"VoipEngine.dll 加载失败，wxgf 将无法转码: {e}")
+            except Exception:
+                pass
         return None
     return _VOIP_FN
 
@@ -170,12 +205,21 @@ def convert_wxgf(data: bytes):
                 ret = fn(ctypes.addressof(in_buf), len(data),
                          ctypes.addressof(out_buf), ctypes.byref(out_sz),
                          ctypes.addressof(cfg))
-            except Exception:
+            except Exception as e:
+                try:
+                    _media_logger.detailed("media",
+                                           f"wxgf转码调用异常: {type(e).__name__}: {e}")
+                except Exception:
+                    pass
                 return None
             if ret == 0 and out_sz.value > 0:
                 out = out_buf.raw[: out_sz.value]
                 if _image_sig(out)[0]:
                     return out
+    try:
+        _media_logger.detailed("media", f"wxgf转码失败（全部 mode 无有效输出）{len(data)}B")
+    except Exception:
+        pass
     return None
 
 
@@ -184,15 +228,34 @@ def _xor_table(xor_key: int) -> bytes:
 
 
 def decrypt_v2_body(data: bytes, aes_key: bytes, xor_key: int):
-    """V2 整文件解密 → (bytes, ext) 或 (None, None)。"""
+    """V2 整文件解密 → (bytes, ext) 或 (None, None)。
+
+    审计 §4.4（方案②）：三处失败在函数内部直接 detailed 区分原因
+    （too-short / bad-aes-size / head-not-image），不改返回签名、
+    不动 5 个解包调用点。head-not-image 是"密钥错或密文损坏"的混合信号
+    （V2 无签名字段，用 reason 码 head-not-image 而非 sig-miss）。"""
     if len(data) < 31:
+        try:
+            _media_logger.detailed("media", f"V2解密失败 too-short len={len(data)}")
+        except Exception:
+            pass
         return None, None
     aes_size = struct.unpack("<I", data[6:10])[0]
     if aes_size <= 0 or 15 + aes_size + 16 > len(data):
+        try:
+            _media_logger.detailed(
+                "media", f"V2解密失败 bad-aes-size aes_size={aes_size} len={len(data)}")
+        except Exception:
+            pass
         return None, None
     head = AES.new(aes_key, AES.MODE_ECB).decrypt(data[15: 15 + aes_size])
     ext, ctype = _image_sig(head)
     if ext is None:
+        try:
+            _media_logger.detailed(
+                "media", f"V2解密失败 head-not-image head={head[:8].hex()}")
+        except Exception:
+            pass
         return None, None
     tail = data[15 + aes_size + 16: 15 + aes_size + 16 + struct.unpack(
         "<I", data[10:14])[0]]
@@ -209,7 +272,10 @@ def candidate_keys(wxid_full: str):
         try:
             out.append((bytes.fromhex(cache["aes"]), int(cache["xor"], 16)))
         except (KeyError, ValueError):
-            pass
+            try:
+                _media_logger.detailed("media", f"缓存密钥格式非法 wx={wx_clean}")
+            except Exception:
+                pass
     for code in find_kvcomm_codes():
         for wx in (wx_clean, wxid_full):
             aes = hashlib.md5(f"{code}{wx}".encode()).hexdigest()[:16].encode()
@@ -229,6 +295,12 @@ def resolve_image_path(acc_out_dir: Path, md5: str, wxid: str = None):
     """hardlink 链路：md5 → (file_name, dir1, dir2) → 绝对路径。"""
     hl = acc_out_dir / "hardlink" / "hardlink.db"
     if not hl.is_file() or not md5 or len(md5) != 32:
+        # 审计 §4.4：hardlink 链路不可用此前全静默
+        try:
+            _media_logger.detailed(
+                "media", f"hardlink不可用 db={hl.is_file()} md5_len={len(md5 or '')}")
+        except Exception:
+            pass
         return []
     conn = sqlite3.connect(hl)
     try:

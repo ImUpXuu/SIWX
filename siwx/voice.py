@@ -22,6 +22,8 @@ import tempfile
 import wave
 from pathlib import Path
 
+from siwx import logger as _voice_logger
+
 
 SILK_MAGIC = b"#!SILK_V3"
 WAV_MAGIC = b"RIFF"
@@ -53,6 +55,12 @@ def parse_voice_meta(text: str) -> dict | None:
         try:
             return int(attrs.get(name) or default)
         except (TypeError, ValueError):
+            # 审计 §4.5：属性非法回退 0（时长显示 0）此前无人知晓（量小）
+            try:
+                _voice_logger.detailed(
+                    "voice", f"voicemsg属性非法 {name}={attrs.get(name)!r}")
+            except Exception:
+                pass
             return default
 
     return {
@@ -220,8 +228,14 @@ def _decode_silk_to_pcm_with_pilk(data: bytes) -> tuple[bytes | None, str, str]:
     """默认用 pilk 解码 SILK；pilk 是项目依赖，不需要 ffmpeg。"""
     try:
         import pilk  # type: ignore
-    except Exception:
-        return None, "", ""
+    except Exception as e:
+        # 审计 §4.5：pilk 是默认依赖，导入失败 err 必须非空，
+        # 否则"默认依赖挂了"与"真的解不出"不可区分
+        try:
+            _voice_logger.detailed("voice", f"pilk 导入失败: {e}")
+        except Exception:
+            pass
+        return None, f"pilk 导入失败: {e}", ""
     try:
         with tempfile.TemporaryDirectory(prefix="siwx_voice_") as td:
             silk_path = Path(td) / "input.silk"
@@ -305,7 +319,13 @@ def _chat_id(conn, chat: str):
     try:
         row = conn.execute("SELECT rowid FROM Name2Id WHERE user_name=?", (chat,)).fetchone()
         return int(row[0]) if row else None
-    except (sqlite3.Error, TypeError, ValueError):
+    except (sqlite3.Error, TypeError, ValueError) as e:
+        # 审计 §4.5：映射失败静默，后续 VoiceInfo 查询命中率下降无人知晓
+        try:
+            _voice_logger.detailed(
+                "voice", f"Name2Id查询失败 chat={chat}: {type(e).__name__}")
+        except Exception:
+            pass
         return None
 
 
@@ -371,6 +391,12 @@ def get_voice(acc_dir: Path, chat: str = "", local_id: int = 0,
                     }
             finally:
                 conn.close()
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            # 审计 §4.5：media_*.db 损坏静默跳过——"真没有"与"库打不开"分不清。
+            # 必须绑定 e（原 `except sqlite3.Error:` 照抄文档会 NameError）
+            try:
+                _voice_logger.warn("voice", f"media分片打开失败: {db.name}: {e}")
+            except Exception:
+                pass
             continue
     return None, "语音数据不存在或尚未同步"

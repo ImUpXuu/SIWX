@@ -13,6 +13,7 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request
 
+from siwx import logger as log
 from siwx import paths
 from siwx import sns
 from siwx import sns_cdn
@@ -68,6 +69,9 @@ def _ts_arg(name: str, end: bool = False):
         return None
     ts = sns.parse_ts_arg(raw)
     if ts is None:
+        # 非法时间参数被静默忽略：用户以为在筛时间范围，实际是全量
+        log.detailed("sns", f"[filter] {name} 时间参数无法解析，已忽略"
+                            f"（退化为不过滤）: {raw!r}")
         return None
     if end and re.fullmatch(r"\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*", str(raw)):
         ts += 86399
@@ -99,7 +103,8 @@ def _avatar_usernames(acc_dir: Path | None, usernames) -> set:
                         found.add(u)
         finally:
             con.close()
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        log.detailed("sns", f"[avatar] head_image.db 批量查询失败 db={db.name}: {e}")
         return set()
     # 自己的头像：SNS 里的 user_name 通常是原始 wxid，但输出目录名可能是 wxid_xxx_6409
     for u in wanted:
@@ -135,7 +140,10 @@ def accounts():
                 try:
                     st = sns.timeline_stats(db)
                     out.append({"wxid": d.name, **st})
-                except Exception:
+                except Exception as e:
+                    # 统计失败伪装 0 条 → 前端把"打不开"当"没发过动态"
+                    log.warn("sns", f"[accounts] {d.name} 统计失败，伪装 0 条: "
+                                    f"{type(e).__name__}: {e}")
                     out.append({"wxid": d.name, "count": 0})
     return jsonify({"accounts": out})
 
@@ -194,6 +202,7 @@ def timeline():
             sql += " LIMIT ?"
             args.append(limit)
         scanned = 0
+        parsed_fail = 0
         for tid, who, content in con.execute(sql, args):
             scanned += 1
             if keyword and scanned > KEYWORD_MAX_SCAN:
@@ -206,6 +215,8 @@ def timeline():
                 continue
             feed = sns.parse_timeline(content)
             if feed is None:
+                # 解析失败的动态静默消失（实测全库约 0.3% 失败率）
+                parsed_fail += 1
                 continue
             feed.update(tid=tid, ts_ms=sns.sns_id_to_ms(tid), ts=ts_sec,
                         user_name=(who or b"").decode("utf-8", "replace") if isinstance(who, bytes) else (who or ""))
@@ -218,6 +229,9 @@ def timeline():
                 break
     finally:
         con.close()
+    # 循环外记三计数（scanned/parsed/skipped），失败明细不逐条打防刷屏
+    log.detailed("sns", f"[timeline] account={account} scanned={scanned} "
+                        f"parsed={len(rows)} 解析失败={parsed_fail}")
     next_tid = rows[-1]["tid"] if rows else None
     return jsonify({"timeline": [_feed_json(x) for x in rows], "next_before_tid": next_tid,
                     "has_more": len(rows) >= limit})
@@ -376,6 +390,7 @@ def export():
 
     with _server._lock:
         if _server._job["running"]:
+            log.warn("sns", f"[export] 任务被拒绝: 已有任务在运行 account={account}")
             return jsonify({"error": "已有任务在运行"}), 409
         _server._job.update({"running": True, "mode": "sns_export", "done": False,
                              "ok": False, "logs": [], "report": None})

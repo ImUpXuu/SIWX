@@ -7,6 +7,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from siwx import keystore
+from siwx import logger as log
 
 bp = Blueprint("settings_api", __name__, url_prefix="/api/settings")
 
@@ -37,8 +38,12 @@ def load_auto_sync() -> dict:
         data = json.loads(_auto_sync_file().read_text(encoding="utf-8"))
         if isinstance(data, dict):
             cfg.update(data)
-    except Exception:
-        pass
+    except FileNotFoundError:
+        pass                                # 首次运行无配置文件，正常
+    except Exception as e:
+        # 损坏 → 静默回默认会让用户的 enabled=true 无声丢弃，定时同步悄悄停摆
+        log.warn("settings", f"auto_sync.json 解析失败，已回默认（下次保存将覆盖）: "
+                             f"{type(e).__name__}: {e}")
     try:
         cfg["interval_minutes"] = max(1, min(int(cfg.get("interval_minutes") or 30), 1440))
     except (TypeError, ValueError):
@@ -142,12 +147,21 @@ def clear():
         for t in targets:
             if t.exists():
                 shutil.rmtree(t, ignore_errors=True)
-                removed.append(t.name)
+                if t.exists():
+                    # rmtree ignore_errors 失败不可见（假成功）——目录仍在就不进 removed
+                    log.warn("settings", f"[clear] 目录删除失败（可能被占用）: {t}")
+                else:
+                    removed.append(t.name)
     elif kind == "keys":
         p = keystore.store_path()
         if p.is_file():
-            p.unlink()
-            removed.append("keystore.bin")
+            try:
+                p.unlink()
+                removed.append("keystore.bin")
+            except OSError as e:
+                log.warn("settings", f"[clear] 密钥库删除失败: {e}")
     else:
         return jsonify({"error": "未知 kind（output / keys）"}), 400
+    # 破坏性操作必须留痕
+    log.info("settings", f"[clear] kind={kind} wxid={wxid} removed={removed}")
     return jsonify({"removed": removed})

@@ -17,6 +17,28 @@ def _fmt_date(ts):
     return datetime.fromtimestamp(ts or 0).strftime("%Y年%m月%d日")
 
 
+def _msg_entry(m):
+    """单条消息 → CHAT_DATA entry（build_chat_data 与流式写出共用）。"""
+    entry = {
+        "timestamp": m["createTime"],
+        "sender": m["senderUsername"],
+        "senderName": m["senderDisplayName"],
+        "type": m["localType"],
+        "content": m["content"],
+        "rawContent": m["rawContent"][:8000],
+        "isSend": m["isSend"],
+    }
+    if m.get("mediaFile"):
+        entry["mediaPath"] = m["mediaFile"]
+    if m.get("quote"):
+        entry["quote"] = {"sender": m["quote"]["displayname"],
+                          "content": m["quote"]["content"]}
+    if m.get("link"):
+        entry["link"] = {"title": m["link"]["title"],
+                         "url": m["link"]["url"] or ""}
+    return entry
+
+
 def build_chat_data(session, msgs, avatar_map):
     """把内部消息格式转为 CHAT_DATA 嵌入格式。"""
     members_map = {}
@@ -29,26 +51,7 @@ def build_chat_data(session, msgs, avatar_map):
             members.append({"id": un, "name": name,
                             "avatar": avatar_map.get(un, "")})
 
-    messages = []
-    for m in msgs:
-        entry = {
-            "timestamp": m["createTime"],
-            "sender": m["senderUsername"],
-            "senderName": m["senderDisplayName"],
-            "type": m["localType"],
-            "content": m["content"],
-            "rawContent": m["rawContent"][:8000],
-            "isSend": m["isSend"],
-        }
-        if m.get("mediaFile"):
-            entry["mediaPath"] = m["mediaFile"]
-        if m.get("quote"):
-            entry["quote"] = {"sender": m["quote"]["displayname"],
-                              "content": m["quote"]["content"]}
-        if m.get("link"):
-            entry["link"] = {"title": m["link"]["title"],
-                             "url": m["link"]["url"] or ""}
-        messages.append(entry)
+    messages = [_msg_entry(m) for m in msgs]
 
     is_group = session.get("isGroup", False)
     return {
@@ -66,6 +69,52 @@ def build_chat_data(session, msgs, avatar_map):
         "avatarFiles": avatar_map,
         "messages": messages,
     }
+
+
+def _meta_dict(session, message_count):
+    is_group = session.get("isGroup", False)
+    return {
+        "sessionId": session["wxid"],
+        "sessionName": session["displayName"],
+        "isGroup": is_group,
+        "exportTime": int(datetime.now().timestamp() * 1000),
+        "messageCount": message_count,
+        "dateRange": {"start": session["firstTimestamp"],
+                      "end": session["lastTimestamp"]},
+        "ownerId": session.get("ownerId", ""),
+    }
+
+
+def stream_html_head(f, session, members, avatar_map):
+    """流式渲染（P1 修复）：写 HTML 头 + CHAT_DATA 前缀。
+
+    此前 _write_html_streaming 把全部消息 accumulate 成 lines 再一次性
+    render_html，3 万条会话内存翻倍 + 单个巨型字符串，与"万条不 OOM"
+    目标矛盾。现在消息体边消费边写文件句柄，内存 O(1)（除成员表）。
+    约定：head 之后用 stream_html_msg 逐条写、stream_html_tail 收尾。
+    """
+    head_obj = {"meta": _meta_dict(session, session.get("messageCount", 0)),
+                "members": members, "avatarFiles": avatar_map}
+    head = _script_safe_json(head_obj)
+    # 去掉结尾 }，拼 ,"messages":[ —— 与 IncrementalJSONWriter 同手法
+    f.write(_HTML_HEAD)
+    f.write(f"\n<script>window.CHAT_DATA = {head[:-1]},\"messages\":[")
+    f.flush()
+
+
+def stream_html_msg(f, m, first: bool):
+    """写单条消息 entry；first=False 时前置逗号。"""
+    if not first:
+        f.write(",")
+    f.write(_script_safe_json(_msg_entry(m)))
+
+
+def stream_html_tail(f, count: int, title: str):
+    """写 CHAT_DATA 收尾 + 渲染器脚本。count 为实际写出的消息数。"""
+    f.write("]};</script>\n")
+    f.write(f"\n<script>\nconst MSG_COUNT = {count};\n"
+            f"const CHAT_TITLE = {_script_safe_json(title)};\n")
+    f.write(_HTML_RENDERER + "\n</script>\n</body>\n</html>")
 
 
 def _script_safe_json(obj) -> str:
@@ -222,7 +271,8 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
 .lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:1000;
           align-items:center;justify-content:center;cursor:zoom-out}
 .lightbox.active{display:flex}
-.lightbox img{max-width:95vw;max-height:95vh;object-fit:contain;border-radius:4px}
+.lightbox img{max-width:95vw;max-height:95vh;object-fit:contain;border-radius:4px;
+              -webkit-touch-callout:default}
 .loading{text-align:center;padding:20px;color:var(--sub);font-size:13px}
 @media(max-width:600px){.msg-bubble{max-width:80%}.msg-image{max-width:220px}}
 </style>
@@ -337,7 +387,9 @@ _HTML_RENDERER = r"""
       if (t === 43) return '<video class="msg-video" controls preload="metadata" src="'+p+'"></video>';
       if (t === 47) return '<img class="msg-emoji" src="'+p+'" loading="lazy" onclick="window.__lb(this.src)">';
       if (t === 34) return '<div class="msg-voice"><audio controls src="'+p+'"></audio></div>';
-      return '<img class="msg-image" src="'+p+'" loading="lazy">';
+      // 审计 D6：未知类型不再兜底渲染成 <img>（"错挂成图"的放大器），回退纯文本
+      console.warn('[render] unknown type', t, 'ts=' + msg.timestamp, 'path=' + p);
+      return esc(content) || '<em style="opacity:.5">无内容</em>';
     }
 
     if (t === 3) return '<div class="msg-image broken">📷 图片未下载</div>';
@@ -415,14 +467,22 @@ _HTML_RENDERER = r"""
     document.getElementById('lightboxImg').src = src;
   };
   window.__imgErr = function(img) {
+    // 审计 §4.6：onerror 静默处理，破图无从排查；src 在 removeAttribute 之前取
+    console.warn('[img-err]', img.getAttribute('src'), 'ts=' + (img.getAttribute('data-ts') || ''));
     img.classList.add('broken');
     img.removeAttribute('src');
     img.style.width = '200px'; img.style.height = '60px';
     img.textContent = '📷 图片';
   };
-  document.getElementById('lightbox').addEventListener('click', function() {
+  var lightbox = document.getElementById('lightbox');
+  lightbox.addEventListener('click', function() {
     this.classList.remove('active');
   });
+  // 审计 F5：触屏适配——导出页原先只有 click，触屏设备无法关闭灯箱；
+  // 轻触关闭，长按图片保留系统级保存/分享菜单（-webkit-touch-callout）。
+  lightbox.addEventListener('touchend', function(e) {
+    this.classList.remove('active');
+  }, {passive: true});
 
   function applyFilter() {
     filtered = messages.filter(function(m) {

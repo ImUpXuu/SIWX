@@ -13,15 +13,25 @@
 `stats.compute_stats()` 的签名缓存；只有显式 `refresh=1` 或 POST /refresh 才重算。
 """
 import re
+import traceback
 
 from flask import Blueprint, jsonify, request
 
+from siwx import logger as log
 from siwx import stats as _stats
 
 
 bp = Blueprint("stats_api", __name__, url_prefix="/api/stats")
 
 _DATE_RE = re.compile(r"^(\d{4})-(\d{2})(?:-(\d{2}))?")
+
+
+def _stats_log():
+    """接通 stats._scan 的既有 log 回调（审计核查 B3/C2：该通道此前从未被传参）。
+
+    进结构化轨 detailed（stats 标签），详细模式下可看到分片数/总条数/私聊
+    发送者数与缓存来源标记。"""
+    return lambda m: log.detailed("stats", m)
 
 
 def _date_arg(name: str):
@@ -70,10 +80,13 @@ def overview():
     force = request.args.get("refresh") == "1"
 
     try:
-        raw = _stats.compute_stats(account, force=force)
+        raw = _stats.compute_stats(account, force=force, log=_stats_log())
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:                       # 统计失败不应拖垮面板
+        # 500 兜底绕过了全局 errorhandler —— traceback 必须在这里补记
+        log.error("stats", f"[overview] account={account} 统计失败: "
+                           f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}")
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
     return jsonify(_stats.summarize(raw, start=start, end=end))
@@ -86,7 +99,7 @@ def types():
     if not account:
         return jsonify({"error": "缺少 account 参数"}), 400
     try:
-        raw = _stats.compute_stats(account)
+        raw = _stats.compute_stats(account, log=_stats_log())
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 404
     su = _stats.summarize(raw)
@@ -102,9 +115,12 @@ def refresh():
         _stats.clear_cache(account or None)
         if not account:
             return jsonify({"ok": True, "cleared": "all"})
-        raw = _stats.compute_stats(account, force=True)
+        raw = _stats.compute_stats(account, force=True, log=_stats_log())
         return jsonify({"ok": True, "account": account, "total": raw.get("total", 0)})
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
+        # 500 兜底绕过了全局 errorhandler —— traceback 必须在这里补记
+        log.error("stats", f"[refresh] account={account} 重算失败: "
+                           f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}")
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500

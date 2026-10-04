@@ -29,6 +29,7 @@ import threading
 import time
 from pathlib import Path
 
+from siwx import logger as log
 from siwx import paths
 
 RAW_BASE = "https://raw.gh.1s.fan/ImUpXuu/SIWX/main"
@@ -37,6 +38,24 @@ GITHUB_REPO = "ImUpXuu/SIWX"
 VERSION_URLS = [f"{RAW_BASE}/version.json", f"{GITHUB_RAW_BASE}/version.json"]
 TIMEOUT = 10
 DOWNLOAD_TIMEOUT = 300
+
+# 更新链域名白名单（审计 S1/S5）：version.json 提供的下载/哈希 URL 必须落在
+# 这些域名内，否则跳过该候选（GitHub Release 直链兜底不受影响），防止
+# manifest 把下载源指到任意域名。
+_ALLOWED_UPDATE_HOSTS = {
+    "github.com", "objects.githubusercontent.com",
+    "raw.githubusercontent.com", "raw.gh.1s.fan",
+}
+
+
+def _host_allowed(url: str) -> bool:
+    """URL 的 host 是否在更新链白名单内。"""
+    try:
+        from urllib.parse import urlsplit
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _ALLOWED_UPDATE_HOSTS
 
 
 def current_version() -> str:
@@ -89,7 +108,10 @@ def fetch_remote_version() -> dict | None:
                 data = json.loads(r.read().decode("utf-8"))
                 if isinstance(data, dict) and data.get("version"):
                     candidates.append(data)
-        except Exception:
+        except Exception as e:
+            # 网络错误全部丢弃会让"无更新"与"检查失败"对前端不可区分
+            log.detailed("update", f"[check] {base_url} 拉取失败: "
+                                   f"{type(e).__name__}: {e}")
             continue
 
     if not candidates:
@@ -129,12 +151,13 @@ def _asset_name(remote: dict, plat: str) -> str:
 
 
 def _asset_urls(remote: dict, plat: str) -> list:
-    """候选下载地址：version.json 提供的在前，GitHub Release 直链兜底在后。"""
+    """候选下载地址：version.json 提供的在前（域名白名单校验），GitHub Release
+    直链兜底在后。"""
     ver = remote.get("version", "")
     urls = []
     key = "macos_dmg" if plat == "macos" else "windows"
     primary = remote.get("assets", {}).get(key, "")
-    if primary:
+    if primary and _host_allowed(primary):
         urls.append(primary)
     fallback = (f"https://github.com/{GITHUB_REPO}/releases/download/"
                 f"v{ver}/{_asset_name(remote, plat)}")
@@ -157,7 +180,9 @@ def _download_file(url: str, dest: Path, attempts: int = 2) -> bool:
                         break
                     f.write(chunk)
             return True
-        except Exception:
+        except Exception as e:
+            log.warn("update", f"[download] 第 {i + 1}/{attempts} 次下载失败: "
+                               f"{type(e).__name__}: {e}")
             if dest.exists():
                 dest.unlink(missing_ok=True)
             if i + 1 < attempts:
@@ -174,9 +199,12 @@ def _download_asset(remote: dict, plat: str, dest: Path) -> bool:
 
 
 def _verify_sha256(file_path: Path, expected_sha: str) -> bool:
-    """校验文件 SHA-256。"""
+    """校验文件 SHA-256。
+
+    fail-closed（审计 S1）：expected_sha 为空返回 False 而不是 True——
+    静默放行等于校验形同虚设；调用方必须在拿到期望哈希后才允许安装。"""
     if not expected_sha:
-        return True
+        return False
     try:
         import hashlib
         h = hashlib.sha256()
@@ -187,15 +215,23 @@ def _verify_sha256(file_path: Path, expected_sha: str) -> bool:
                     break
                 h.update(chunk)
         return h.hexdigest().lower() == expected_sha.strip().lower()
-    except Exception:
+    except Exception as e:
+        # IO 错误（权限/磁盘/占用）≠ 文件损坏，勿让上层文案误导
+        log.warn("update", f"[verify] 校验过程异常（IO 错误，非文件损坏）: "
+                           f"{type(e).__name__}: {e}")
         return False
 
 
 def _get_asset_sha(remote: dict, platform_key: str) -> str:
-    """从远程 version.json 获取指定平台产物的 SHA-256。"""
+    """从远程 version.json 获取指定平台产物的 SHA-256。
+
+    哈希 URL 同样受域名白名单约束（审计 S1/S5）：哈希源不在白名单内时
+    返回空串，由 run_update 拒绝安装，而不是静默跳过校验。"""
     sha_url = remote.get("sha256", "")
     asset_name = _asset_name(remote, platform_key)
     if not sha_url or not asset_name:
+        return ""
+    if not _host_allowed(sha_url):
         return ""
     try:
         import urllib.request
@@ -204,8 +240,9 @@ def _get_asset_sha(remote: dict, platform_key: str) -> str:
             for line in r.read().decode("utf-8").splitlines():
                 if asset_name in line:
                     return line.split()[0]
-    except Exception:
-        pass
+    except Exception as e:
+        # sha 拉取失败会让 run_update 拒绝安装（fail-closed），必须留痕
+        log.warn("update", f"[sha] SHA-256 清单拉取失败: {type(e).__name__}: {e}")
     return ""
 
 
@@ -222,6 +259,8 @@ def run_update(remote: dict, progress=None) -> dict:
     if not ver:
         return {"ok": False, "message": "远程版本信息缺少 version 字段"}
 
+    log.info("update", f"[run] 开始更新: v{current_version()} → v{ver} "
+                       f"平台={plat}")
     # 下载到系统临时目录；装到哪个盘由安装阶段决定（支持跨盘复制）
     tmp_dir = Path(tempfile.gettempdir()) / "siwx_update"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -231,14 +270,20 @@ def run_update(remote: dict, progress=None) -> dict:
         progress(10, f"下载 v{ver}...")
     if not _download_asset(remote, plat, dest):
         return {"ok": False, "message": "下载失败，请检查网络"}
+    log.info("update", f"[run] 下载完成: {dest.name} ({dest.stat().st_size} 字节)")
 
-    # 校验
+    # 校验（审计 S1：哈希缺失时拒绝安装，不再静默跳过校验继续安装）
     if progress:
         progress(50, "校验 SHA-256...")
     expected_sha = _get_asset_sha(remote, plat)
-    if expected_sha and not _verify_sha256(dest, expected_sha):
+    if not expected_sha:
+        dest.unlink(missing_ok=True)
+        return {"ok": False,
+                "message": "无法获取官方 SHA-256 校验值，已拒绝安装（防更新链投毒）"}
+    if not _verify_sha256(dest, expected_sha):
         dest.unlink(missing_ok=True)
         return {"ok": False, "message": "SHA-256 校验失败，文件可能损坏"}
+    log.info("update", f"[run] SHA-256 校验通过，进入安装: {plat}")
 
     # 安装
     if progress:
@@ -310,12 +355,14 @@ def _replace_windows_exe(new_exe: Path, ver: str, expected_sha: str = "") -> dic
                 os.rename(backup, running)
                 raise
     except Exception as e:
+        log.warn("update", f"[install] 替换失败: {type(e).__name__}: {e}")
         return {"ok": False, "message": f"替换失败: {e}"}
 
     try:
         subprocess.Popen([str(target), "serve"], cwd=str(app_dir))
-    except Exception:
+    except Exception as e:
         # 新文件已就位，但拉起失败：不退出旧进程，让用户手动启动
+        log.warn("update", f"[install] 新版拉起失败，需手动启动: {e}")
         return {"ok": True, "message": f"已更新到 v{ver}，请手动启动新版程序"}
     _schedule_exit()
     return {"ok": True, "message": f"已更新到 v{ver}，新版即将自动启动"}
@@ -415,11 +462,13 @@ def _replace_macos_app(dmg: Path, ver: str) -> dict:
                 os.rename(tmp_bin, running)
                 launch_cmd = [str(running), "serve"]
         except Exception as e:
+            log.warn("update", f"[install] macOS 替换失败: {type(e).__name__}: {e}")
             return {"ok": False, "message": f"替换失败: {e}"}
 
         try:
             subprocess.Popen(launch_cmd)
-        except Exception:
+        except Exception as e:
+            log.warn("update", f"[install] 新版拉起失败，需手动启动: {e}")
             return {"ok": True, "message": f"已更新到 v{ver}，请手动启动新版程序"}
         _schedule_exit()
         return {"ok": True, "message": f"已更新到 v{ver}，新版即将自动启动"}

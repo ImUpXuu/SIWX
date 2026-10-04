@@ -22,6 +22,7 @@ import threading
 import time
 from pathlib import Path
 
+from siwx import logger as log
 from siwx import paths as _paths
 
 
@@ -99,7 +100,9 @@ def signature(account: str):
                 if e.name.endswith(".db"):
                     st = e.stat()
                     items.append((e.name, st.st_size, st.st_mtime_ns))
-    except OSError:
+    except OSError as e:
+        # 签名不可用 → 缓存永不命中，每次请求都全量重扫（约 2.4s/8 万条）
+        log.detailed("stats", f"{account} 分片签名不可用: {type(e).__name__}: {e}")
         return None
     items.sort()
     return tuple(items)
@@ -143,7 +146,9 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
            "by_day": {}, "ts_min": 0, "ts_max": 0}
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        # 分片打不开 → 统计总量无声偏低（数据完整性）
+        log.warn("stats", f"分片打开失败: {db.name}: {e}（结果可能不完整）")
         return out
     try:
         tables = _shard_tables(conn)
@@ -157,8 +162,10 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
                 un = (un or "").strip()
                 if un:
                     own.setdefault("Msg_" + hashlib.md5(un.encode()).hexdigest(), un)
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            # 失败 → 该分片的私聊排行降级为空（排行里少数据）
+            log.detailed("stats", f"Name2Id 读取失败 db={db.name}: {e}"
+                                  f"（私聊排行降级）")
 
         # 会话归属：私聊表写入 username，其余（群聊/公众号/系统）写入空串，
         # 这样后面的 `WHERE cid <> ''` 就天然只捞出私聊消息。
@@ -183,7 +190,8 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
                 f"CAST(strftime('%H', create_time, 'unixepoch', 'localtime') AS INTEGER) AS h, "
                 f"((CAST(strftime('%w', create_time, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7) AS w "
                 f"FROM ({union}) WHERE create_time > 0")
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            log.warn("stats", f"分片聚合建表失败: {db.name}: {e}（结果可能不完整）")
             return out
 
         # 主聚合：一趟 GROUP BY 同时喂给全局类型/月/小时/星期和日级桶。
@@ -229,8 +237,12 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
                 b["by_chat"][un] = b["by_chat"].get(un, 0) + cnt
 
         conn.execute("DROP TABLE _siwx_s")
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        # 主聚合兜底：空分片（total=0）失败可能是真的没数据，不 warn 防误报
+        if out["total"]:
+            log.warn("stats", f"分片聚合中断: {db.name}: {e}（结果可能不完整）")
+        else:
+            log.detailed("stats", f"分片聚合失败(空分片?): {db.name}: {e}")
     finally:
         conn.close()
     return out
@@ -430,7 +442,8 @@ def _contact_flags(account: str) -> dict:
     out: dict = {}
     try:
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        log.detailed("stats", f"contact.db 打不开（认证标记降级）db={p.name}: {e}")
         return {}
     try:
         for un, vf, al in conn.execute(
@@ -438,9 +451,10 @@ def _contact_flags(account: str) -> dict:
             un = (un or "").strip()
             if un:
                 out[un] = (int(vf or 0), (al or "").strip())
-    except sqlite3.Error:
+    except sqlite3.Error as e:
         # 老测试/旧库可能没有 verify_flag；没有认证信息时只靠 username 规则过滤。
-        pass
+        log.detailed("stats", f"verify_flag 读取失败（公众号识别降级）"
+                              f"db={p.name}: {e}")
     finally:
         conn.close()
     with _CACHE_LOCK:
@@ -480,7 +494,9 @@ def _contact_name_map(account: str) -> dict:
     names: dict = {}
     try:
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        log.detailed("stats", f"contact.db 打不开（昵称表降级为空）"
+                              f"db={p.name}: {e}")
         return names
     try:
         for un, remark, nick, alias in conn.execute(
@@ -488,8 +504,10 @@ def _contact_name_map(account: str) -> dict:
             un = (un or "").strip()
             if un:
                 names[un] = _best_contact_name(un, remark, nick, alias)
-    except sqlite3.Error:
-        # schema 不匹配时退化为无昵称，不影响统计主流程。
+    except sqlite3.Error as e:
+        # schema 不匹配时退化为无昵称，不影响统计主流程——排行里全是 wxid 的原因
+        log.detailed("stats", f"contact.db schema 不匹配（昵称降级为空）"
+                              f"db={p.name}: {e}")
         names = {}
     finally:
         conn.close()
@@ -545,7 +563,13 @@ def _load_disk_cache(account: str, sig):
         return None
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except ValueError as e:
+        # 损坏 → 静默重算并覆盖，用户侧只见"突然变慢"
+        log.warn("stats", f"统计缓存 JSON 损坏，忽略并全量重算（下次会覆盖）"
+                          f"{p.name}: {e}")
+        return None
+    except OSError as e:
+        log.warn("stats", f"统计缓存读取失败 {p.name}: {type(e).__name__}")
         return None
     if data.get("version") != _CACHE_VERSION:
         return None
@@ -563,32 +587,55 @@ def _save_disk_cache(account: str, sig, stats: dict) -> None:
         p.write_text(json.dumps({"version": _CACHE_VERSION, "sig": list(sig),
                                  "stats": stats}, ensure_ascii=False),
                      encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as e:
+        # 不影响进程内 _MEM_CACHE，但跨进程/重启后每次都要全量重扫（约 2.4s/8 万条）
+        log.detailed("stats", f"统计缓存写入失败（重启后需全量重扫）"
+                              f"{p.name}: {type(e).__name__}: {e}")
 
 
 def compute_stats(account: str, force: bool = False, log=None) -> dict:
-    """计算（或命中缓存返回）某账号的聊天统计。"""
+    """计算（或命中缓存返回）某账号的聊天统计。
+
+    log 为既有回调通道（api_stats 传 lambda 转 logger.detailed("stats", ...)），
+    这里补充耗时与缓存来源（mem/disk/miss）标记——审计核查 C2/B3：该通道
+    此前从未被传参，属"接通现有通道而非另起 detailed"。
+    """
     if not _msg_dir(account).is_dir():
         raise FileNotFoundError("账号不存在或未解密")
+
+    t0 = time.perf_counter()
+
+    def _l(msg):
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
 
     sig = signature(account)
     if not force and sig is not None:
         with _CACHE_LOCK:
             hit = _MEM_CACHE.get(account)
             if hit is not None and _sig_equal(hit[0], sig):
+                _l(f"[stats] {account}: 缓存命中(mem) "
+                   f"耗时={(time.perf_counter() - t0) * 1000:.1f}ms")
                 return hit[1]
         disk = _load_disk_cache(account, sig)
         if disk is not None:
             with _CACHE_LOCK:
                 _MEM_CACHE[account] = (sig, disk)
+            _l(f"[stats] {account}: 缓存命中(disk) "
+               f"耗时={(time.perf_counter() - t0) * 1000:.1f}ms")
             return disk
 
+    _l(f"[stats] {account}: 缓存未命中(miss)，开始全量扫描")
     stats = _scan(account, log=log)
     if sig is not None:
         _save_disk_cache(account, sig, stats)
         with _CACHE_LOCK:
             _MEM_CACHE[account] = (sig, stats)
+    _l(f"[stats] {account}: 全量扫描完成(miss) "
+       f"耗时={(time.perf_counter() - t0) * 1000:.0f}ms")
     return stats
 
 

@@ -112,9 +112,20 @@ def cmd_auto(args) -> int:
     return 2
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", ""}
+
+
 def cmd_serve(args) -> int:
     from siwx.server import run_server
-    run_server(args.host, args.port, open_browser=not args.no_open)
+    # 审计 S2：绑定非回环地址 = 局域网内任何设备可无凭证访问全部 API
+    # （触发导出、读日志等），必须显式 --trust-lan 确认。
+    host = (getattr(args, "host", "") or "").strip()
+    if host not in _LOOPBACK_HOSTS and not getattr(args, "trust_lan", False):
+        print(f"错误: --host {host} 会把控制台暴露给局域网（API 无鉴权）。\n"
+              f"如确需局域网访问，请加 --trust-lan 显式确认风险。", file=sys.stderr)
+        return 2
+    run_server(host, args.port, open_browser=not args.no_open,
+               trust_lan=bool(getattr(args, "trust_lan", False)))
     return 0
 
 
@@ -146,6 +157,11 @@ def main() -> int:
     if platform.system() not in ("Windows", "Darwin"):
         print("stories-in-wx 仅支持 Windows 和 macOS。")
         return 1
+    # CLI 模式也装崩溃钩子 + siwx.log（审计 §2.3：此前 keys/decrypt/auto/mcp/
+    # doctor 崩溃没有 crash.log）。serve 模式下 server 导入会二次调用（幂等）。
+    from siwx.logging_setup import install_crash_hooks, setup_file_logger
+    setup_file_logger()
+    install_crash_hooks()
     ap = argparse.ArgumentParser(
         prog="siwx",
         description="stories-in-wx — 微信 4.x 密钥提取与解密 (自研)")
@@ -155,6 +171,9 @@ def main() -> int:
                         help="并行解密进程数 (默认 CPU 核数, 上限 8)")
     common.add_argument("--no-cache", action="store_true",
                         help="忽略缓存强制重跑")
+    common.add_argument("--detailed", action="store_true",
+                        help="开启详细日志（Debug 埋点全量记录；"
+                             "亦可用环境变量 SIWX_LOG_LEVEL=detailed）")
     sub = ap.add_subparsers(dest="cmd")
 
     p_auto = sub.add_parser("auto", parents=[common],
@@ -180,6 +199,9 @@ def main() -> int:
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8787)
     p_serve.add_argument("--no-open", action="store_true")
+    p_serve.add_argument("--trust-lan", action="store_true",
+                         help="绑定非回环地址时必须显式确认（API 无鉴权，"
+                              "局域网内任何设备均可访问）")
     p_serve.set_defaults(fn=cmd_serve)
 
     p_mcp = sub.add_parser("mcp", parents=[common], help="MCP 服务器 (stdio, 供 AI 客户端接入)")
@@ -193,6 +215,14 @@ def main() -> int:
     _register_plugin_commands(sub, common)
 
     args = ap.parse_args()
+    # Debug 级别入口（审计 §2.3）：--detailed / SIWX_LOG_LEVEL 环境变量，
+    # 会话级生效不持久化；持久化只由 Web 设置页写入。
+    if getattr(args, "detailed", False):
+        from siwx import loglevel
+        loglevel.apply("detailed", persist=False)
+    else:
+        from siwx import loglevel
+        loglevel.startup()
     if not getattr(args, "cmd", None):
         # 裸跑（双击 exe）→ 默认启动 Web 控制台
         return cmd_serve(argparse.Namespace(host="127.0.0.1", port=8787,
@@ -217,7 +247,9 @@ def _register_plugin_commands(sub, common) -> None:
     try:
         from siwx.plugins import ensure_loaded, registry
         ensure_loaded()
-    except Exception:
+    except Exception as e:
+        from siwx import logger as _log
+        _log.warn("plugin", f"插件 CLI 命令注册失败: {type(e).__name__}: {e}")
         return
     if not registry.cli_commands:
         return
@@ -267,6 +299,7 @@ def _register_plugin_commands(sub, common) -> None:
 def _make_plugin_handler(handler, plugin: str, name: str):
     """包装插件 handler，保证异常不把 CLI 打崩、退出码统一。"""
     def _run(args):
+        import traceback
         from siwx import logger as log
         try:
             rc = handler(args)
@@ -274,7 +307,10 @@ def _make_plugin_handler(handler, plugin: str, name: str):
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            log.error("plugin", f"{plugin} 的 CLI 命令 {name} 执行失败: {e}")
+            log.error("plugin", f"{plugin} 的 CLI 命令 {name} 执行失败: "
+                                f"{type(e).__name__}: {e}")
+            log.detailed("plugin",
+                         f"{plugin}.{name} traceback:\n{traceback.format_exc(limit=3)}")
             tui.log(f"插件命令 {name} 失败: {e}")
             return 1
     return _run
