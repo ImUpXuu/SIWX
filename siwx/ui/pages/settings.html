@@ -10,21 +10,21 @@
       <div class="s-item">
         <b>日志模式</b>
         <span class="dim">详细模式记录所有操作步骤，便于排查问题（会增加日志量）</span>
-        <div id="s-log-level" style="width:auto;min-width:150px"></div>
+        <div class="s-ctl-dd" id="s-log-level"></div>
       </div>
       <div class="s-item">
         <b>导出脱敏日志</b>
         <span class="dim">导出时自动去除密钥/wxid/路径等敏感信息，可安全分享用于调试</span>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div class="s-ctl">
           <label class="f-chk"><input type="checkbox" id="s-log-desensitize" checked> 脱敏</label>
-          <button class="btn" id="s-export-log">📥 导出日志</button>
+          <button class="btn" id="s-export-log">导出日志</button>
         </div>
       </div>
       <div class="s-item">
         <b>环境信息</b>
         <span class="dim">版本、运行模式、系统与架构、关键目录。提 issue 时粘贴这段内容，能大幅加快定位</span>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="btn" id="s-copy-env">📋 复制环境信息</button>
+        <div class="s-ctl">
+          <button class="btn" id="s-copy-env">复制环境信息</button>
           <span class="dim" id="s-copy-env-status"></span>
         </div>
       </div>
@@ -55,15 +55,15 @@
   <div class="card s-card">
     <div class="card-head"><h2>清除缓存</h2><span class="hint">清除后下次运行会重新提取/解密</span></div>
     <div class="s-actions">
-      <div class="s-item">
+      <div class="s-item s-item-danger">
         <b>清除解密输出</b>
         <span class="dim">删除 output 目录下的明文数据库（密钥保留，重跑解密即可恢复）</span>
-        <button class="btn btn-danger" id="s-clear-output">🗑 清除解密输出</button>
+        <button class="btn btn-danger" id="s-clear-output">清除解密输出</button>
       </div>
-      <div class="s-item">
+      <div class="s-item s-item-danger">
         <b>清除密钥库</b>
         <span class="dim">删除 DPAPI 加密的密钥缓存（下次提取需微信在线重新收割）</span>
-        <button class="btn btn-danger" id="s-clear-keys">🗑 清除密钥库</button>
+        <button class="btn btn-danger" id="s-clear-keys">清除密钥库</button>
       </div>
     </div>
   </div>
@@ -74,7 +74,7 @@
       <div class="s-item">
         <b>重新运行引导</b>
         <span class="dim">回到"欢迎 → 选号 → 提取 → 解密"的分步引导</span>
-        <button class="btn btn-primary" id="s-rerun-guide">🧭 重新运行引导</button>
+        <button class="btn" id="s-rerun-guide">重新运行引导</button>
       </div>
     </div>
   </div>

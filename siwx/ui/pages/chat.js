@@ -1,7 +1,9 @@
-/* 聊天查看 —— 微信风格气泡 + 时间轴 + 消息选择/复制 */
-import { createDropdown, openMenu, closeMenu } from '/widgets.js?v=2026100203';
+/* 聊天查看 —— 微信风格气泡 + 时间轴 + 消息选择/复制。
+   账号来自全局账号卡（SX.getAccount），本页不再自选；
+   复制/提示统一走 SX.copyText / SX.toast；图片交互用事件委托，无内联事件。 */
+import { openMenu, closeMenu } from '/widgets.js?v=2026100601';
 
-const { esc, fetchJSON, fmtTs, fmtListTs } = window.SX;
+const { esc, fetchJSON, fmtTs, fmtListTs, copyText, toast, getAccount, go } = window.SX;
 
 let account = null;
 let sessions = [];
@@ -10,6 +12,8 @@ let officialOpen = false;
 let earliest = 0;
 let earliestId = 0;      // 翻页游标第二分量：同一秒的消息按 local_id 续翻
 let hasMore = false;
+let hasNewer = false;    // 时间轴跳转后窗口之后（更新）的消息是否可继续加载
+let ownerWxid = null;    // 服务端解析的本人展示 wxid（账号目录名可能带设备后缀）
 let loading = false;
 let loadedMessages = [];
 // 请求代数守卫：fresh 加载（打开会话/跳转/刷新）递增序号，使仍在飞的
@@ -20,32 +24,29 @@ let timelineDayCache = new Map();
 let selectionMode = false;
 let selectedKeys = new Set();
 let rangeAnchorKey = null;
-let accDrop = null;
 let bottomFollow = null;
+// 头像 404 标记：失败过的头像不再反复请求（几百会话 = 几百次请求的风暴源）
+const avaFailed = new Set();
 
 function el(id) { return document.getElementById(id); }
 
+/** 页面存活哨兵：视图被下一次导航换掉后，仍在飞的异步回调必须就此止步，
+ *  否则对已卸载元素 el(...).innerHTML 赋值会抛 null 错误（app.js 兜底横幅）。 */
+function gone() { return !document.getElementById('chat-wrap'); }
+
+const EMPTY_CTA = '<div class="c-empty">还没有解密产物<br>' +
+  '<button class="btn btn-primary" id="c-go-guide" type="button">去引导设置</button></div>';
+
+function bindGuideCta() {
+  el('c-go-guide')?.addEventListener('click', () => go('#/guide'));
+}
+
 async function init() {
-  accDrop = createDropdown({ options: [], placeholder: '选择账号', label: '微信账号' });
-  el('c-account').appendChild(accDrop.el);
-  try {
-    const { accounts } = await fetchJSON('/api/chat/accounts');
-    if (!accounts.length) {
-      el('c-sessions').innerHTML =
-        '<div class="c-empty">还没有解密产物 — 请先在"引导设置"完成解密</div>';
-      return;
-    }
-    accDrop.options = accounts.map(a => ({ value: a.wxid, label: a.wxid }));
-    account = accDrop.value;
-    accDrop.onChange = (v) => {
-      account = v;
-      currentChat = null;
-      resetChatView();
-      loadSessions();
-    };
-    await loadSessions();
-  } catch (e) {
-    el('c-sessions').innerHTML = `<div class="c-empty">${esc(e.message)}</div>`;
+  account = getAccount();
+  if (!account) {
+    el('c-sessions').innerHTML = EMPTY_CTA;
+    bindGuideCta();
+    return;
   }
 
   el('c-search').addEventListener('input', () => renderSessions(el('c-search').value));
@@ -55,14 +56,14 @@ async function init() {
     btn.disabled = true;
     el('c-sessions').innerHTML = '<div class="c-loading">增量同步中…</div>';
     try {
-      const acc = accDrop?.value || account;
       const r = await fetch('/api/run', {
         method: 'POST', headers: {'content-type': 'application/json'},
-        body: JSON.stringify({ mode: 'sync', export_opts: { account: acc } }),
+        body: JSON.stringify({ mode: 'sync', export_opts: { account } }),
       });
       if (r.status === 409) { el('c-sessions').innerHTML = '<div class="c-empty">已有任务在运行</div>'; return; }
       for (let i = 0; i < 300; i++) {
         await new Promise(res => setTimeout(res, 1000));
+        if (gone()) return;
         const j = await (await fetch('/api/job')).json();
         if (!j.running) break;
         if (j.logs.length) {
@@ -73,9 +74,9 @@ async function init() {
       await loadSessions();
       if (currentChat) await Promise.all([loadMessages(true), loadTimeline()]);
     } catch (e) {
-      el('c-sessions').innerHTML = `<div class="c-empty">刷新失败: ${esc(e.message)}</div>`;
+      if (!gone()) el('c-sessions').innerHTML = `<div class="c-empty">刷新失败: ${esc(e.message)}</div>`;
     } finally {
-      btn.disabled = false;
+      if (!gone()) btn.disabled = false;
     }
   });
   el('c-select').addEventListener('click', () => setSelectionMode(true));
@@ -92,7 +93,7 @@ async function init() {
 
   // 跳转导出页并预选当前会话；若处于多选状态，把所选范围一并带过去
   el('c-export').addEventListener('click', () => {
-    if (!currentChat) { window.alert('先在左侧打开一个会话'); return; }
+    if (!currentChat) { toast('先在左侧打开一个会话', true); return; }
     const preset = { account, chat: currentChat.username, display: currentChat.display };
     if (selectionMode && selectedKeys.size) {
       const tss = [...selectedKeys]
@@ -114,20 +115,41 @@ async function init() {
     location.hash = '#/export';
   });
 
-  // 消息区事件委托：复制单条、选择/范围选择、多选范围菜单（右键 / 长按）
+  // 消息区事件委托：复制单条、图片查看、选择/范围选择、多选范围菜单（右键 / 长按）
   el('c-msgs').addEventListener('click', async (ev) => {
+    if (ev.target.closest('.c-load-newer')) {
+      loadNewer();
+      return;
+    }
     const copyBtn = ev.target.closest('.m-copy');
     if (copyBtn) {
       ev.stopPropagation();
       const row = copyBtn.closest('.m-row');
       const msg = messageByKey(row?.dataset.key);
-      if (msg) await copyText(messageCopyText(msg), copyBtn, '已复制');
+      if (msg) await copyWithFlash(copyBtn, messageCopyText(msg), '已复制');
+      return;
+    }
+    const img = ev.target.closest('.m-img');
+    if (img) {
+      window.open(img.src + '&hq=1');
       return;
     }
     const row = ev.target.closest('.m-row[data-key]');
     if (!row || !selectionMode) return;
     toggleMessageSelection(row.dataset.key, ev.shiftKey);
   });
+  // 图片加载失败：error 不冒泡，捕获阶段接管；重试 URL 放 dataset，
+  // 不再用内联 onerror（兼容 CSP no-unsafe-inline），头像失败同时记入标记
+  el('c-msgs').addEventListener('error', (ev) => {
+    const img = ev.target;
+    if (!img || img.tagName !== 'IMG') return;
+    if (img.dataset.ava !== undefined) {
+      avaFailed.add(img.dataset.ava);
+      img.remove();
+    } else if (img.dataset.retry) {
+      SX.imgFallback(img, img.dataset.retry);
+    }
+  }, true);
   el('c-msgs').addEventListener('contextmenu', (ev) => {
     if (!selectionMode) return;
     const row = ev.target.closest('.m-row[data-key]');
@@ -165,35 +187,27 @@ async function init() {
       loading = false;
     }
   });
-}
 
-function resetChatView() {
-  loadedMessages = [];
-  timelineMonths = [];
-  timelineDayCache.clear();
-  earliest = 0;
-  earliestId = 0;
-  hasMore = false;
-  setSelectionMode(false);
-  el('c-title').textContent = '微信';
-  el('c-sub').textContent = '选择一个会话查看聊天记录';
-  el('c-msgs').innerHTML = '<div class="c-tip">选择一个会话查看聊天记录</div>';
-  el('c-timeline-list').innerHTML = '<div class="tl-empty">打开会话后可按月份跳转</div>';
-  el('c-timeline').classList.remove('pinned');
-  el('c-select').disabled = true;
-  el('c-stats').disabled = true;
+  await loadSessions();
 }
 
 async function loadSessions() {
+  if (gone()) return;
   el('c-sessions').innerHTML = '<div class="c-loading">加载会话…</div>';
   officialOpen = false;
   const t0 = performance.now();
-  const { sessions: ss } = await fetchJSON(
-    `/api/chat/sessions?account=${encodeURIComponent(account)}`);
-  sessions = ss;
-  renderSessions('');
-  const ms = Math.round(performance.now() - t0);
-  if (el('c-sub') && !currentChat) el('c-sub').textContent = `${ss.length} 个会话 · ${ms}ms`;
+  try {
+    const { sessions: ss } = await fetchJSON(
+      `/api/chat/sessions?account=${encodeURIComponent(account)}`);
+    if (gone()) return;
+    sessions = ss;
+    renderSessions('');
+    const ms = Math.round(performance.now() - t0);
+    if (el('c-sub') && !currentChat) el('c-sub').textContent = `${ss.length} 个会话 · ${ms}ms`;
+  } catch (e) {
+    if (gone()) return;
+    el('c-sessions').innerHTML = `<div class="c-empty">${esc(e.message)}</div>`;
+  }
 }
 
 function isOfficial(s) {
@@ -205,9 +219,11 @@ function ownerUsername() {
 }
 
 function avatarImg(username) {
+  if (avaFailed.has(username)) return '';
   const src = `/api/chat/avatar?account=${encodeURIComponent(account)}` +
               `&username=${encodeURIComponent(username)}`;
-  return `<img loading="lazy" src="${src}" onerror="this.remove()">`;
+  // 失败由 #c-msgs 的捕获级 error 委托处理（记入 avaFailed 并移除）
+  return `<img loading="lazy" src="${src}" data-ava="${esc(username)}" alt="">`;
 }
 
 function sessionRow(s, extra = '') {
@@ -266,6 +282,8 @@ async function openChat(s) {
   earliest = 0;
   earliestId = 0;
   hasMore = false;
+  hasNewer = false;
+  ownerWxid = null;
   loadSeq++;               // 使切换会话前仍在飞的旧请求失效
   loadedMessages = [];
   setSelectionMode(false);
@@ -336,15 +354,21 @@ async function loadMessages(fresh, opts = {}) {
   const before = opts.before || (!fresh && earliest ? earliest : 0);
   // 游标为 (ts, localId) 组合：同一秒多条消息只按时间戳 `<` 翻页会被跳过
   const beforeId = (!fresh && !opts.before && before && earliestId) ? earliestId : 0;
+  // 正向翻页（时间轴跳转后继续往后看）：游标取已载入的最后一条
+  const after = opts.after || 0;
+  const afterId = after ? (opts.afterId || 0) : 0;
   const limit = opts.limit || 80;
   const url = `/api/chat/messages?account=${encodeURIComponent(account)}` +
     `&chat=${encodeURIComponent(s.username)}` +
     (before ? `&before=${before}` : '') +
     (beforeId ? `&before_id=${beforeId}` : '') +
+    (after ? `&after=${after}` : '') +
+    (afterId ? `&after_id=${afterId}` : '') +
     `&limit=${limit}`;
   const data = await fetchJSON(url);
-  if (seq !== loadSeq || s !== currentChat) return false;   // 过期响应，丢弃
+  if (gone() || seq !== loadSeq || s !== currentChat) return false;   // 过期响应，丢弃
   const box = el('c-msgs');
+  ownerWxid = data.owner || ownerWxid;
   if (fresh) {
     selectedKeys.clear();
     rangeAnchorKey = null;
@@ -358,17 +382,65 @@ async function loadMessages(fresh, opts = {}) {
     } else {
       stopBottomFollow();
     }
+  } else if (after) {
+    // 正向追加：新消息接在尾部，视口跳到新内容
+    const prevLast = loadedMessages[loadedMessages.length - 1];
+    loadedMessages = mergeMessages(data.messages, loadedMessages);
+    const added = data.messages.filter(m => prevLast && (m.ts > prevLast.ts ||
+      (m.ts === prevLast.ts && (m.id || 0) > (prevLast.id || 0))));
+    box.insertAdjacentHTML('beforeend',
+      renderMessageList(added.length ? added : data.messages));
+    refreshRenderedPositions();
+    refreshSelectionUI();
   } else {
     loadedMessages = mergeMessages(data.messages, loadedMessages);
     box.insertAdjacentHTML('afterbegin', renderMessageList(data.messages, true));
     refreshRenderedPositions();
     refreshSelectionUI();
   }
-  earliest = loadedMessages.length ? loadedMessages[0].ts : earliest;
-  earliestId = loadedMessages.length ? (loadedMessages[0].id || 0) : earliestId;
-  hasMore = data.has_more;
+  if (after) {
+    hasNewer = !!data.has_more;          // 正向：has_more 表示还有更新的
+  } else {
+    // 反向/跳转：has_more 表示还有更早的；has_newer 由服务端判定
+    // （跳转窗口的次日零点游标之后是否仍有消息）
+    hasMore = data.has_more;
+    hasNewer = fresh ? !!data.has_newer : hasNewer;
+    earliest = loadedMessages.length ? loadedMessages[0].ts : earliest;
+    earliestId = loadedMessages.length ? (loadedMessages[0].id || 0) : earliestId;
+  }
+  refreshNewerButton();
   updateSubtitle();
   return true;
+}
+
+/** 底部"加载之后的消息"按钮：时间轴跳转只载入窗口内消息，窗口之后
+ *  （更新）的消息此前无入口可达——滑到底就断了。有更晚消息时渲染按钮。 */
+function refreshNewerButton() {
+  const box = el('c-msgs');
+  if (!box) return;
+  box.querySelectorAll('.c-newer').forEach(n => n.remove());
+  if (hasNewer && loadedMessages.length) {
+    box.insertAdjacentHTML('beforeend',
+      '<div class="c-newer"><button class="c-load-newer" type="button">加载之后的消息 ↓</button></div>');
+  }
+}
+
+async function loadNewer() {
+  const box = el('c-msgs');
+  const last = loadedMessages[loadedMessages.length - 1];
+  if (!last || !hasNewer || loading || !currentChat) return;
+  loading = true;
+  box.insertAdjacentHTML('beforeend',
+    '<div class="c-loading" id="newer-tip">加载之后的消息…</div>');
+  try {
+    await loadMessages(false, { after: last.ts || 0, afterId: last.id || 0 });
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {
+    toast('加载失败: ' + (e.message || e), true);
+  } finally {
+    document.getElementById('newer-tip')?.remove();
+    loading = false;
+  }
 }
 
 function mergeMessages(a, b) {
@@ -418,7 +490,10 @@ function bubble(m) {
     return `<div class="m-row sys" data-key="${esc(msgKey(m))}" data-ts="${m.ts || 0}"><div class="m-bubble">${esc(m.text)}</div><button class="m-copy">复制</button></div>`;
   }
   const who = m.is_me ? 'me' : '';
-  const avaUser = m.is_me ? ownerUsername() : (m.sender_wxid || currentChat.username);
+  // 本人头像用服务端解析的 owner wxid：账号目录名可能带设备后缀，
+  // 直接用 ownerUsername() 剥不干净（微信 4.x 后缀是十六进制段）
+  const avaUser = m.is_me ? (ownerWxid || ownerUsername())
+                          : (m.sender_wxid || currentChat.username);
   const ava = `<div class="cell-ava">${avaHtml(avaUser, (m.sender_name || '?').slice(0, 2).toUpperCase())}</div>`;
   const name = (!m.is_me && currentChat && currentChat.is_group && m.sender_name)
     ? `<div class="m-name">${esc(m.sender_name)}</div>` : '';
@@ -450,10 +525,9 @@ function bubble(m) {
                 (m.bubble_md5 ? `&bubble_md5=${encodeURIComponent(m.bubble_md5)}` : '') +
                 `&chat=${encodeURIComponent(currentChat.username)}` +
                 `&local_id=${m.id || 0}&ts=${m.ts || 0}`;
-    const retrySrc = src + '&r=' + Date.now();
-    inner = `<img class="m-img" loading="lazy" src="${src}" alt="图片"
-              onclick="window.open(this.src + '&hq=1')"
-              onerror="SX.imgFallback(this, '${esc(retrySrc)}')">`;
+    // 失败重试由捕获级 error 委托接管，重试 URL 放 data-retry（不带 r 参数，
+    // imgFallback 会自行拼缓存穿透参数）；点击查看大图由 click 委托处理
+    inner = `<img class="m-img" loading="lazy" src="${src}" alt="图片" data-retry="${esc(src)}">`;
   } else if (m.kind === 'sticker') {
     inner = '[动画表情]';
   } else {
@@ -485,6 +559,7 @@ async function loadTimeline() {
   timelineDayCache.clear();
   try {
     const data = await fetchJSON(`/api/chat/timeline?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(currentChat.username)}`);
+    if (gone()) return;
     timelineMonths = data.months || [];
     renderTimelineMonths();
   } catch (e) {
@@ -513,7 +588,11 @@ function renderTimelineMonths() {
       if (section.classList.contains('open')) section.classList.remove('open');
       else open();
     });
-    section.addEventListener('mouseenter', open, { once: false });
+    // 悬停只展开已缓存月份；未缓存月份需点击展开——否则扫一遍时间轴
+    // 会对每个月各打出一次聚合查询（实测 3 秒 30+ 条请求）
+    section.addEventListener('mouseenter', () => {
+      if (timelineDayCache.has(section.dataset.month)) expandTimelineMonth(section);
+    }, { once: false });
   });
 }
 
@@ -534,6 +613,7 @@ async function expandTimelineMonth(section) {
   inner.innerHTML = '<div class="tl-empty">加载日期…</div>';
   try {
     const data = await fetchJSON(`/api/chat/timeline?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(currentChat.username)}&month=${encodeURIComponent(month)}`);
+    if (gone()) return;
     const days = data.days || [];
     timelineDayCache.set(month, days);
     renderTimelineDays(inner, days);
@@ -720,36 +800,16 @@ function openRangeMenu(key, x, y) {
 async function copySelectedMessages() {
   const picked = loadedMessages.filter(m => selectedKeys.has(msgKey(m)));
   if (!picked.length) return;
-  await copyText(picked.map(messageCopyText).join('\n'), el('c-copy-selected'), '已复制所选');
+  await copyWithFlash(el('c-copy-selected'), picked.map(messageCopyText).join('\n'), '已复制所选');
 }
 
-function messageCopyText(m) {
-  const sender = m.is_me ? '我' : (m.sender_name || currentChat?.display || '对方');
-  const body = m.kind === 'image' ? '[图片]'
-    : m.kind === 'voice' ? `[${voiceDuration(m.voice)}]`
-    : m.kind === 'link' && m.link ? `${m.link.title || '链接'} ${m.link.url || ''}`
-    : (m.text || m.content || '');
-  return `[${fmtTs(m.ts)}] ${sender}: ${body}`;
-}
-
-async function copyText(text, btn, doneText) {
+/** SX.copyText + 按钮闪字反馈；失败走全局 toast（不再 window.alert） */
+async function copyWithFlash(btn, text, doneText) {
   try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.focus();
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
-    }
+    await copyText(text);
     flashButton(btn, doneText || '已复制');
   } catch (e) {
-    window.alert('复制失败：' + e.message);
+    toast('复制失败：' + (e.message || e), true);
   }
 }
 
@@ -767,26 +827,46 @@ function flashButton(btn, text) {
 function updateSubtitle() {
   if (!currentChat) return;
   const type = currentChat.is_group ? '群聊' : '私聊';
-  const more = hasMore ? ' · 向上滚动加载更早' : '';
+  let more = '';
+  if (hasMore && hasNewer) more = ' · 两侧都有未载入消息';
+  else if (hasMore) more = ' · 向上滚动加载更早';
+  else if (hasNewer) more = ' · 点击底部按钮加载之后的消息';
   el('c-sub').textContent = `${type} · 已载入 ${loadedMessages.length} 条${more}`;
 }
+
+/* ── 会话统计弹层：Esc 关闭 + 焦点闭环 ───────────────────────── */
+let statsModalPrevFocus = null;
+let statsModalKeyHandler = null;
 
 async function openStatsModal() {
   if (!currentChat) return;
   const modal = el('c-stats-modal');
   const body = el('c-stats-body');
+  statsModalPrevFocus = document.activeElement;
   modal.classList.remove('hidden');
+  el('c-stats-close').focus();
+  statsModalKeyHandler = (ev) => {
+    if (ev.key === 'Escape') { ev.preventDefault(); closeStatsModal(); }
+  };
+  document.addEventListener('keydown', statsModalKeyHandler);
   body.innerHTML = '<div class="c-loading">正在统计这个会话…</div>';
   try {
     const d = await fetchJSON(`/api/chat/stats?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(currentChat.username)}`);
+    if (gone() || modal.classList.contains('hidden')) return;
     body.innerHTML = renderStats(d);
   } catch (e) {
-    body.innerHTML = `<div class="c-empty">统计失败：${esc(e.message)}</div>`;
+    if (!gone()) body.innerHTML = `<div class="c-empty">统计失败：${esc(e.message)}</div>`;
   }
 }
 
 function closeStatsModal() {
   el('c-stats-modal').classList.add('hidden');
+  if (statsModalKeyHandler) {
+    document.removeEventListener('keydown', statsModalKeyHandler);
+    statsModalKeyHandler = null;
+  }
+  if (statsModalPrevFocus && statsModalPrevFocus.isConnected) statsModalPrevFocus.focus();
+  statsModalPrevFocus = null;
 }
 
 function renderStats(d) {
@@ -814,5 +894,9 @@ function renderStats(d) {
 export function destroy() {
   stopBottomFollow();
   closeMenu();
+  if (statsModalKeyHandler) {
+    document.removeEventListener('keydown', statsModalKeyHandler);
+    statsModalKeyHandler = null;
+  }
 }
 export { init };

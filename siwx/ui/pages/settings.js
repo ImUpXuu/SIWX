@@ -1,7 +1,7 @@
 /* 设置页 —— 版本与更新 / 缓存总览 / 清除 / 重新运行引导 */
-import { createDropdown } from '/widgets.js?v=2026100203';
+import { createDropdown } from '/widgets.js?v=2026100601';
 
-const { esc, fetchJSON, go, resetSetup, copyText } = window.SX;
+const { esc, fetchJSON, go, resetSetup, copyText, toast } = window.SX;
 
 function el(id) { return id ? document.getElementById(id) : null; }
 
@@ -41,6 +41,8 @@ async function loadAutoSync() {
   const status = el('s-auto-sync-status');
   try {
     const cfg = await fetchJSON('/api/settings/auto-sync');
+    // 切页后视图已卸载，在飞回调直接放弃（否则对 null 赋值报错）
+    if (!status || !el('s-auto-sync-enabled')) return;
     el('s-auto-sync-enabled').checked = !!cfg.enabled;
     el('s-auto-sync-interval').value = cfg.interval_minutes || 30;
     const ok = cfg.last_ok === null || cfg.last_ok === undefined ? '' : (cfg.last_ok ? ' · 上次成功' : ' · 上次失败');
@@ -57,6 +59,7 @@ async function saveAutoSync() {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ enabled, interval_minutes: interval }),
   });
+  if (!el('s-auto-sync-interval')) return;   // 切页后视图已卸载
   el('s-auto-sync-interval').value = cfg.interval_minutes || interval;
   await loadAutoSync();
 }
@@ -78,12 +81,12 @@ async function loadVersion() {
       lines.push(`<div class="ov-row"><span>最新版本</span><span class="pill pill-amber">v${esc(rv)} ↗</span></div>`);
       lines.push(`<div class="ov-row"><span>更新内容</span><span class="dim">${notes}</span></div>`);
       if (chk.update_available) {
-        lines.push(`<div class="ov-row"><button class="btn btn-primary" id="s-do-update">⬆ 更新到 v${esc(rv)}</button></div>`);
+        lines.push(`<div class="ov-row"><button class="btn btn-primary" id="s-do-update">更新到 v${esc(rv)}</button></div>`);
       } else {
         lines.push(`<div class="ov-row"><span class="dim">源码运行模式，请手动 git pull 更新</span></div>`);
       }
     } else {
-      lines.push(`<div class="ov-row"><span>状态</span><span class="pill pill-green">✓ 已是最新</span></div>`);
+      lines.push(`<div class="ov-row"><span>状态</span><span class="pill pill-green">已是最新</span></div>`);
     }
     box.innerHTML = lines.join('');
     meta.textContent = `打包产物: ${cur.frozen} · 平台: ${cur.platform}`;
@@ -93,21 +96,21 @@ async function loadVersion() {
       btn.addEventListener('click', async () => {
         if (!window.confirm('确定更新？应用将自动重启。')) return;
         btn.disabled = true;
-        btn.textContent = '⏳ 更新中...';
+        btn.textContent = '更新中…';
         try {
           const r = await fetchJSON('/api/update/do', {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify(chk.remote || {}),
           });
           if (r.ok) {
-            window.alert(r.message || '更新已启动，应用将重启');
+            toast(r.message || '更新已启动，应用将重启');
           } else {
-            window.alert('更新失败: ' + (r.message || '未知错误'));
+            toast('更新失败：' + (r.message || '未知错误'), true);
             btn.disabled = false;
-            btn.textContent = `⬆ 更新到 v${esc(chk.remote?.version || '')}`;
+            btn.textContent = `更新到 v${esc(chk.remote?.version || '')}`;
           }
         } catch (e) {
-          window.alert('更新失败: ' + e.message);
+          toast('更新失败：' + e.message, true);
           btn.disabled = false;
         }
       });
@@ -132,13 +135,13 @@ function pluginControl(plugin, it) {
 
   if (it.type === 'bool') {
     return `<label class="f-chk"><input type="checkbox" data-plg="${esc(plugin)}" data-key="${esc(it.key)}"
-              data-type="bool" id="${id}"${val ? ' checked' : ''}> ${val ? '已开启' : '已关闭'}</label>`;
+              data-type="bool" id="${id}"${val ? ' checked' : ''}> <span data-plg-bool-label>${val ? '已开启' : '已关闭'}</span></label>`;
   }
   if (it.type === 'choice') {
     // 先渲染占位挂载点，loadPluginSettings 渲染完 innerHTML 后统一水合成自绘下拉
     return `<div class="f-input sxw-mount" id="${id}" data-plg="${esc(plugin)}" data-key="${esc(it.key)}"
               data-type="choice" data-choices="${esc(JSON.stringify(it.choices || []))}"
-              data-value="${esc(val ?? '')}" style="width:auto;min-width:150px"></div>`;
+              data-value="${esc(val ?? '')}"></div>`;
   }
   if (it.type === 'int' || it.type === 'float') {
     const step = it.type === 'float' ? ' step="any"' : '';
@@ -256,8 +259,8 @@ async function loadPluginSettings() {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ plugin, values: readPluginValues(plugin) }),
         });
-        status.textContent = '✓ 已保存';
-        status.style.color = 'var(--ok, #16a34a)';
+        status.textContent = '已保存';
+        status.style.color = 'var(--accent-fg)';
         // 回填：服务端可能对越界值做了夹紧
         Object.entries(r.values || {}).forEach(([k, v]) => {
           const inp = box.querySelector(`[data-plg="${CSS.escape(plugin)}"][data-key="${CSS.escape(k)}"]`);
@@ -265,12 +268,11 @@ async function loadPluginSettings() {
           const t = inp.dataset.type;
           if (t === 'bool') { inp.checked = !!v; }
           else if (t === 'choice') { const drop = plgChoiceDrop.get(inp); if (drop) drop.value = v; }
-          else if (t === 'int' || t === 'float') { inp.value = v != null ? v : ''; }
           else { inp.value = v != null ? v : ''; }
         });
       } catch (e) {
-        status.textContent = '✗ ' + e.message;
-        status.style.color = 'var(--danger, #dc2626)';
+        status.textContent = '保存失败：' + e.message;
+        status.style.color = 'var(--danger)';
       } finally {
         btn.disabled = false;
       }
@@ -281,7 +283,8 @@ async function loadPluginSettings() {
   box.querySelectorAll('[data-plg]').forEach(inp => {
     inp.addEventListener('change', () => {
       if (inp.dataset.type === 'bool') {
-        inp.parentElement.lastChild.textContent = inp.checked ? ' 已开启' : ' 已关闭';
+        const label = inp.parentElement.querySelector('[data-plg-bool-label]');
+        if (label) label.textContent = inp.checked ? '已开启' : '已关闭';
       }
       const st = box.querySelector(`[data-plg-status="${CSS.escape(inp.dataset.plg)}"]`);
       if (st) st.textContent = '';
@@ -302,9 +305,9 @@ export async function init() {
   el('s-auto-sync-save').addEventListener('click', async () => {
     try {
       await saveAutoSync();
-      window.alert('自动刷新设置已保存');
+      toast('自动刷新设置已保存');
     } catch (e) {
-      window.alert('保存失败: ' + e.message);
+      toast('保存失败：' + e.message, true);
     }
   });
 
@@ -314,7 +317,7 @@ export async function init() {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ kind: 'output' }),
       });
-      window.alert('已清除解密输出');
+      toast('已清除解密输出');
       loadOverview();
     }));
 
@@ -324,7 +327,7 @@ export async function init() {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ kind: 'keys' }),
       });
-      window.alert('已清除密钥库');
+      toast('已清除密钥库');
       loadOverview();
     }));
 
@@ -348,7 +351,7 @@ export async function init() {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ level: v }),
     });
-    window.alert(`日志模式已切换为: ${v === 'detailed' ? '详细' : '粗略'}`);
+    toast(`日志模式已切换为：${v === 'detailed' ? '详细' : '粗略'}`);
   };
 
   async function loadLogSettings() {
@@ -371,7 +374,7 @@ export async function init() {
       a.click();
       URL.revokeObjectURL(a.href);
     } catch (e) {
-      window.alert('导出失败: ' + e.message);
+      toast('导出失败：' + e.message, true);
     }
   });
 
@@ -382,9 +385,10 @@ export async function init() {
     try {
       const d = await fetchJSON('/api/settings/env');
       const ok = await copyText(d.text || '');
-      status.textContent = ok ? '✓ 已复制，可直接粘贴到 issue' : '✗ 复制失败，请手动选择';
+      status.textContent = ok ? '已复制，可直接粘贴到 issue' : '复制失败，请手动选择';
+      if (ok) toast('环境信息已复制');
     } catch (e) {
-      status.textContent = '✗ ' + e.message;
+      status.textContent = '失败：' + e.message;
     }
   });
 

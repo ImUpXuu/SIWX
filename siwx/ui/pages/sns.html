@@ -14,10 +14,12 @@
     </div>
   </header>
 
-  <!-- 筛选栏 -->
+  <!-- 筛选栏（账号由壳层侧栏的全局账号卡管理，本页不再自选） -->
   <div class="sns-bar">
     <div class="sns-search">
-      <span class="sns-search-icon" aria-hidden="true">🔍</span>
+      <span class="sns-search-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      </span>
       <input v-model.trim="kwInput" placeholder="搜索朋友圈内容、标题、歌手、视频号…">
       <button v-show="kwInput" class="sns-search-clear" title="清除"
               @click="clearKeyword">✕</button>
@@ -25,7 +27,9 @@
     <div class="sns-chips">
       <button class="sns-chip" data-pop="range" :class="{ on: !!rangeOn }" aria-haspopup="true"
               @click="togglePop('range')">
-        <span class="sns-chip-icon">🗓</span><span>{{ rangeLabel }}</span>
+        <span class="sns-chip-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>
+        </span><span>{{ rangeLabel }}</span>
       </button>
       <button class="sns-chip sns-chip-user" data-pop="user" :class="{ on: !!username }" aria-haspopup="true"
               @click="togglePop('user')">
@@ -36,15 +40,14 @@
         <span class="sns-chip-caret">▾</span>
       </button>
       <span class="sns-bar-gap"></span>
-      <select v-model="account" class="sns-account" title="选择账号"
-              @change="onAccountChange">
-        <option v-for="a in accounts" :key="a.wxid" :value="a.wxid">
-          {{ a.wxid }} · {{ a.count || 0 }} 条
-        </option>
-      </select>
-      <button class="sns-icon-btn" title="刷新" @click="refresh">⟳</button>
+      <button class="sns-icon-btn" title="刷新" aria-label="刷新" @click="refresh">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+      </button>
       <button class="sns-icon-btn sns-export-toggle" data-pop="export" title="导出朋友圈"
-              aria-haspopup="true" @click="togglePop('export')">📦 导出</button>
+              aria-haspopup="true" @click="togglePop('export')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>
+        <span>导出</span>
+      </button>
       <span class="sns-meta">{{ metaText }}</span>
     </div>
   </div>
@@ -97,7 +100,9 @@
       <button class="sns-pop-close" title="关闭" @click="pops.user = false">✕</button></div>
     <div class="sns-user-tools">
       <div class="sns-search sns-search-sm">
-        <span class="sns-search-icon" aria-hidden="true">🔍</span>
+        <span class="sns-search-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        </span>
         <input v-model="userQuery" placeholder="搜索昵称 / 微信号">
       </div>
       <select v-model="userSort" class="sns-user-sort" title="排序方式">
@@ -167,7 +172,9 @@
       <sns-post v-for="p in timeline" :key="String(p.tid)" :post="p"></sns-post>
     </template>
   </div>
+  <!-- 无限滚动：滚动接近底部自动加载，按钮仅作为兜底点击入口 -->
   <button class="sns-more" v-show="hasMore && !loading" @click="loadMore">加载更多</button>
+  <button class="sns-more" v-show="hasMore && loading" disabled>加载中…</button>
 
   <div class="sns-modal" v-show="modal.visible" @click.self="closeModal">
     <div class="sns-modal-mask" @click="closeModal"></div>
@@ -184,9 +191,17 @@
     </div>
   </div>
 
+  <!-- 灯箱：前后翻页 + 键盘 ←/→ + 计数 -->
   <div class="sns-lightbox" v-show="lightbox.visible" @click="lightbox.visible = false">
     <video v-if="lightbox.video" :src="lightbox.src" controls autoplay loop muted playsinline
            @click.stop></video>
     <img v-else :src="lightbox.src" alt="">
+    <template v-if="lightbox.items.length > 1">
+      <button class="sns-lb-nav sns-lb-prev" title="上一张（←）" aria-label="上一张"
+              @click.stop="lbStep(-1)">‹</button>
+      <button class="sns-lb-nav sns-lb-next" title="下一张（→）" aria-label="下一张"
+              @click.stop="lbStep(1)">›</button>
+      <span class="sns-lb-count" @click.stop>{{ lightbox.index + 1 }} / {{ lightbox.items.length }}</span>
+    </template>
   </div>
 </div>

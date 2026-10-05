@@ -1,10 +1,6 @@
 <div class="st-wrap">
   <div class="st-bar">
     <div class="st-bar-main">
-      <div class="st-filter st-filter-account">
-        <label class="st-label">统计账号</label>
-        <div id="st-account"></div>
-      </div>
       <div class="st-filter st-filter-range">
         <label class="st-label">时间范围</label>
         <div class="st-range-row">
@@ -19,13 +15,11 @@
     </div>
     <div class="st-actions">
       <span class="hint" id="st-meta"></span>
-      <button id="st-refresh" class="btn">⟳ 重新统计</button>
+      <button id="st-refresh" class="btn">重新统计</button>
     </div>
   </div>
 
-  <!-- 占位提示与正文容器是兄弟节点。
-       注意：render() 会整体覆写 #st-body.innerHTML，若把占位符放在里面，
-       它会被销毁，后续 el('st-empty') 拿到 null 并抛错。 -->
+  <!-- 占位提示与正文容器是兄弟节点：render() 会整体覆写 #st-body.innerHTML -->
   <div class="st-empty" id="st-empty">选择账号后开始统计…</div>
   <div id="st-body"></div>
 </div>

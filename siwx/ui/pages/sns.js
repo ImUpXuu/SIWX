@@ -165,7 +165,7 @@ const QUICK_RANGES = [
 
 const store = Vue.reactive({
   account: '',
-  accounts: [],
+  accounts: [],                // /api/sns/accounts：用于校验全局账号有无朋友圈库
   friends: [],
   friendsLoaded: false,
   friendsLoading: false,
@@ -191,7 +191,7 @@ const store = Vue.reactive({
   userQuery: '',
   userSort: 'count-desc',
 
-  lightbox: { visible: false, src: '', video: false },
+  lightbox: { visible: false, src: '', video: false, items: [], index: 0 },
   modal: { visible: false, post: null, error: '' },
   meAvaOk: false,
   activeMenuTid: null,
@@ -243,10 +243,24 @@ function fmtDur(sec) {
   return `${Math.floor(n / 60)}:${pad(n % 60)}`;
 }
 
-function toast(text) {
-  store.notice = text || '';
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => { store.notice = ''; }, 2600);
+/* 轻反馈走全局 toast（壳层统一体系）；store.notice 只承载常驻提示
+   （如"本地朋友圈图片只包含已下载资源"这类说明性文案） */
+function toast(text, err) {
+  window.SX.toast(text, err);
+}
+
+/* ── 灯箱翻页（模块级：卡片组件与页面级键盘导航共用）────────── */
+function lbSync() {
+  const lb = store.lightbox;
+  const cur = lb.items[lb.index];
+  if (cur) { lb.src = cur.src; lb.video = cur.video; }
+}
+function lbStep(delta) {
+  const lb = store.lightbox;
+  const next = lb.index + delta;
+  if (next < 0 || next >= lb.items.length) return;
+  lb.index = next;
+  lbSync();
 }
 
 /** 媒体加载失败：**必须可见**（以前是静默隐藏，用户只看到空白） */
@@ -317,17 +331,23 @@ const SnsPost = {
   methods: {
     relTime, fullTime, mediaUrl, emojiUrl, displayOf, fmtDur,
     mediaFail(ev, isVideo) { onMediaErrorEl(ev.target, isVideo); },
+    /** 灯箱以整条动态的媒体列表为画廊：点开任意一张即可 ←/→ 翻页 */
     openMedia(ev, m) {
       ev.preventDefault();
-      const lp = m.live_photo;
-      if (lp && lp.url) {
-        store.lightbox = { visible: true, src: mediaUrl(lp), video: true };
-      } else {
-        store.lightbox = { visible: true, src: mediaUrl(m), video: false };
-      }
+      const list = this.items.map(x => ({
+        // 实况照片点开播放的是视频流，翻页时保持同样的取流规则
+        src: (x.live_photo && x.live_photo.url) ? mediaUrl(x.live_photo) : mediaUrl(x),
+        video: !!(x.type === 6 || (x.live_photo && x.live_photo.url)),
+      }));
+      store.lightbox = {
+        visible: true, items: list,
+        index: Math.max(0, this.items.indexOf(m)),
+        src: '', video: false,
+      };
+      lbSync();
     },
     openCoverVideo(url) {
-      if (url) store.lightbox = { visible: true, src: url, video: true };
+      if (url) store.lightbox = { visible: true, src: url, video: true, items: [], index: 0 };
     },
     openDetail() {
       store.activeMenuTid = null;
@@ -360,7 +380,7 @@ const SnsPost = {
         <template v-if="card">
           <a v-if="card.kind === 'music'" class="sns-card sns-card--music"
              :href="card.url" target="_blank" rel="noreferrer">
-            <div class="sns-card-body"><div class="sns-card-tag">🎵 音乐</div>
+            <div class="sns-card-body"><div class="sns-card-tag">音乐</div>
               <div class="sns-card-title">{{ (card.music && card.music.album) || card.title || '音乐' }}</div>
               <div class="sns-card-sub">{{ ((card.music && card.music.singer) || card.description || '') + (card.music && card.music.duration_ms ? ' · ' + fmtDur(card.music.duration_ms / 1000) : '') }}</div></div>
           </a>
@@ -371,7 +391,7 @@ const SnsPost = {
                  @click="openCoverVideo(finderVideoUrl)"
                  @error="$event.target.remove()">
             <div class="sns-card-body">
-              <div class="sns-card-tag">📹 视频号</div>
+              <div class="sns-card-tag">视频号</div>
               <div class="sns-card-title">{{ card.finder && card.finder.nickname }}</div>
               <div class="sns-card-sub">{{ [(card.finder && card.finder.media_count ? card.finder.media_count + ' 个作品' : ''), fmtDur(card.duration)].filter(Boolean).join(' · ') }}</div>
               <div class="sns-card-desc">{{ card.description || '' }}</div></div>
@@ -380,18 +400,18 @@ const SnsPost = {
             <img v-if="coverUrl" class="sns-card-cover" loading="lazy" :src="coverUrl"
                  alt="直播封面" @error="$event.target.remove()">
             <div class="sns-card-body">
-              <div class="sns-card-tag">📺 视频号直播</div>
+              <div class="sns-card-tag">视频号直播</div>
               <div class="sns-card-title">{{ card.live && card.live.nickname }}</div>
               <div class="sns-card-desc">{{ card.live && card.live.desc }}</div></div>
           </div>
           <div v-else-if="card.kind === 'note'" class="sns-card sns-card--note">
             <div class="sns-card-body">
-              <div class="sns-card-tag">📝 笔记</div>
+              <div class="sns-card-tag">笔记</div>
               <div class="sns-card-desc">{{ (card.note && card.note.text) || card.title || '' }}</div></div>
           </div>
           <a v-else class="sns-card sns-card--link"
              :href="card.url" target="_blank" rel="noreferrer">
-            <div class="sns-card-body"><div class="sns-card-tag">🔗 链接</div>
+            <div class="sns-card-body"><div class="sns-card-tag">链接</div>
               <div class="sns-card-title">{{ card.title || card.url || '' }}</div>
               <div class="sns-card-sub">{{ card.source || '' }}</div>
               <div class="sns-card-desc">{{ card.description || '' }}</div></div>
@@ -451,6 +471,7 @@ let _pollTimer = null;
 let _docClick = null;
 let _keyDown = null;
 let _kwTimer = null;
+let _io = null;
 
 const SnsPage = {
   components: { 'sns-post': SnsPost, 'sns-ava': SnsAva },
@@ -530,8 +551,6 @@ const SnsPage = {
         this.load(true);
       }, 350);
     },
-    // 账号是「挂载后」才拉到的：这里重载本人头像，否则首屏那次必然失败且不再重试
-    account() { this.preloadMeAvatar(); },
   },
   methods: {
     avaUrl,
@@ -677,14 +696,6 @@ const SnsPage = {
       store.keyword = '';
       this.load(true);
     },
-    onAccountChange() {
-      store.before = null;
-      store.friendsLoaded = false;
-      store.friends = [];
-      store.meAvaOk = false;
-      this.applyUser('');
-      this.ensureFriends(true);
-    },
 
     /* ── 弹层 / 灯箱 ── */
     closeModal() { store.modal.visible = false; },
@@ -764,40 +775,77 @@ export async function init(view) {
     if (!ev.target.closest('.sns-ops')) store.activeMenuTid = null;
   };
   _keyDown = ev => {
-    if (ev.key !== 'Escape') return;
-    if (store.pops.range || store.pops.user || store.pops.export) {
-      store.pops.range = store.pops.user = store.pops.export = false;
+    if (ev.key === 'Escape') {
+      if (store.pops.range || store.pops.user || store.pops.export) {
+        store.pops.range = store.pops.user = store.pops.export = false;
+        return;
+      }
+      if (store.lightbox.visible) { store.lightbox.visible = false; return; }
+      if (store.modal.visible) store.modal.visible = false;
       return;
     }
-    if (store.lightbox.visible) { store.lightbox.visible = false; return; }
-    if (store.modal.visible) store.modal.visible = false;
+    // 灯箱打开时 ←/→ 翻页
+    if (store.lightbox.visible && store.lightbox.items.length > 1) {
+      if (ev.key === 'ArrowLeft') { lbStep(-1); ev.preventDefault(); }
+      else if (ev.key === 'ArrowRight') { lbStep(1); ev.preventDefault(); }
+    }
   };
   document.addEventListener('click', _docClick);
   document.addEventListener('keydown', _keyDown);
 
   _app = Vue.createApp(SnsPage);
-  const vm = _app.mount(view);
+  const vm2 = _app.mount(view);
+  vm = vm2;
 
-  // 首屏数据
+  // 账号来自壳层全局账号卡；朋友圈库可用性仍由 /api/sns/accounts 校验
+  // （wxid 可能带设备后缀，精确匹配失败时按"剥后缀"再对一次）
+  const global = window.SX.getAccount();
+  if (!global) {
+    store.emptyText = '还没有解密产物 —— 请先在「引导设置」完成解密';
+    return;
+  }
+  store.account = global;
+
   try {
     const d = await fetchJSON('/api/sns/accounts');
     store.accounts = d.accounts || [];
     if (!store.accounts.length) throw new Error('没有找到已解密的朋友圈数据库');
-    store.account = store.accounts[0].wxid;
-    const a = store.accounts[0];
-    store.notice = `本地朋友圈图片只包含微信已经下载过的资源；未下载的会尝试从 CDN 获取。数据库共 ${a.count || 0} 条动态。`;
+    const clean = String(global).replace(/_[0-9a-f]{4}$/i, '');
+    const matched = store.accounts.find(a => a.wxid === global || a.wxid === clean);
+    if (matched) {
+      store.notice = `本地朋友圈图片只包含微信已经下载过的资源；未下载的会尝试从 CDN 获取。数据库共 ${matched.count || 0} 条动态。`;
+    } else {
+      // 全局账号没有朋友圈库：退回第一条可用库并说明，避免整页空白
+      store.account = store.accounts[0].wxid;
+      store.notice = `当前微信号没有朋友圈数据库，已显示「${store.accounts[0].wxid}」的内容（共 ${store.accounts[0].count || 0} 条动态）。`;
+    }
   } catch (e) {
     store.notice = e.message;
     store.emptyText = e.message;
     return;
   }
+  vm.preloadMeAvatar();
   store.timeline = [];
   store.before = null;
   await Promise.all([vm.load(true), vm.ensureFriends(true)]);
+
+  // 无限滚动：列表尾部进入视口前 240px 就预取下一页；按钮保留为兜底入口
+  const moreBtn = view.querySelector('.sns-more');
+  if (moreBtn && 'IntersectionObserver' in window) {
+    _io = new IntersectionObserver(entries => {
+      if (entries.some(e => e.isIntersecting) && store.hasMore && !store.loading) {
+        vm.loadMore();
+      }
+    }, { rootMargin: '240px' });
+    _io.observe(moreBtn);
+  }
 }
+
+let vm = null;
 
 export function destroy() {
   if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  if (_io) { _io.disconnect(); _io = null; }
   if (_docClick) { document.removeEventListener('click', _docClick); _docClick = null; }
   if (_keyDown) { document.removeEventListener('keydown', _keyDown); _keyDown = null; }
   clearTimeout(_kwTimer);
@@ -805,4 +853,5 @@ export function destroy() {
   store.modal.visible = false;
   store.activeMenuTid = null;
   if (_app) { try { _app.unmount(); } catch (e) { /* 忽略 */ } _app = null; }
+  vm = null;
 }

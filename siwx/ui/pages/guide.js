@@ -1,5 +1,5 @@
 /* 引导页 —— 3 个独立分步屏；第 3 步一键提取+解密（合并） */
-const { esc, fetchJSON, startJob, renderLog, go, setSetupDone } = window.SX;
+const { esc, fetchJSON, startJob, renderLog, go, setSetupDone, setAccount, toast } = window.SX;
 
 let state = { step: 1, account: null, running: false };
 
@@ -27,17 +27,19 @@ async function screen1() {
   try {
     const s = await fetchJSON('/api/status');
     state.wechatRunning = s.wechat_running;
-    const wx = s.wechat_running ? `✅ 微信运行中（${s.pids.length} 进程）`
-                                : `⚠️ 微信未运行 —— 提取密钥需要微信在线，请先启动并登录`;
+    const wx = s.wechat_running
+      ? `<div><span class="dot ok"></span>微信运行中（${s.pids.length} 进程）</div>`
+      : `<div><span class="dot warn"></span>微信未运行 —— 提取密钥需要微信在线，请先启动并登录</div>`;
     const accs = s.accounts.length
-      ? `✅ 发现 ${s.accounts.length} 个微信号数据目录`
-      : `⚠️ 未自动找到微信数据目录 —— 可以继续下一步手动指定路径`;
-    const ks = s.stored_salts ? `✅ 密钥库已有 ${s.stored_salts} 条缓存`
-                              : `ℹ️ 密钥库为空（首次运行）`;
-    el.innerHTML = `<div>${wx}</div><div>${accs}</div><div>${ks}</div>`;
+      ? `<div><span class="dot ok"></span>发现 ${s.accounts.length} 个微信号数据目录</div>`
+      : `<div><span class="dot warn"></span>未自动找到微信数据目录 —— 可以继续下一步手动指定路径</div>`;
+    const ks = s.stored_salts
+      ? `<div><span class="dot ok"></span>密钥库已有 ${s.stored_salts} 条缓存</div>`
+      : `<div><span class="dot dim"></span>密钥库为空（首次运行）</div>`;
+    el.innerHTML = wx + accs + ks;
     document.getElementById('g-start').disabled = false;
   } catch (e) {
-    el.innerHTML = `❌ 后端离线：${e.message}`;
+    el.innerHTML = `<div><span class="dot err"></span>后端离线：${e.message}</div>`;
   }
 }
 
@@ -70,7 +72,7 @@ function renderAccounts() {
     const isSel = state.account && state.account.db_dir === a.db_dir;
     return `
     <div class="acc ${isSel ? 'sel' : ''}" data-i="${i}" data-manual="${isManual ? '1' : '0'}">
-      <div class="avatar" style="${isManual ? 'background:var(--text);color:var(--bg)' : ''}">${esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
+      <div class="avatar" ${isManual ? '' : ''}>${esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
       <div class="acc-main"><b>${esc(a.wxid)}</b><span>${a.db_count || '?'} 个数据库${isManual ? ' · 手动' : ''}</span></div>
       ${!isManual ? badge(a.keys_cached, a.total_salts) : '<span class="pill pill-gray">手动</span>'}
     </div>`;
@@ -100,7 +102,7 @@ function screen3() {
   if (state.account) {
     const isMac = navigator.platform === 'MacIntel' || navigator.platform === 'macOS' || navigator.platform.includes('Mac');
     const macHint = isMac
-      ? '<div class="g-macos-hint">⚠️ macOS 提示：若密钥未缓存，请在点击「提取并解密」前 <b>60 秒内重新登录微信</b>（退出再打开），确保密钥在内存中。</div>'
+      ? '<div class="g-macos-hint">macOS 提示：若密钥未缓存，请在点击「提取并解密」前 <b>60 秒内重新登录微信</b>（退出再打开），确保密钥在内存中。</div>'
       : '';
     document.getElementById('g3-hint').innerHTML =
       macHint +
@@ -148,12 +150,12 @@ function bindManualPath(prefix, opts = {}) {
     const path = manualPath.value.trim();
     if (!path) {
       manualMsg.textContent = '请输入路径';
-      manualMsg.style.color = 'var(--err-fg)';
+      manualMsg.className = 'g-manual-msg err';
       return;
     }
     manualAdd.disabled = true;
     const oldText = manualAdd.textContent;
-    manualAdd.textContent = '验证中...';
+    manualAdd.textContent = '验证中…';
     manualMsg.textContent = '';
     try {
       const r = await fetch('/api/discover/validate', {
@@ -166,18 +168,18 @@ function bindManualPath(prefix, opts = {}) {
         const accounts = rememberManualAccounts(d);
         const names = accounts.map(a => a.wxid).join('、');
         manualMsg.textContent = opts.firstStep
-          ? `✓ 已保存 ${accounts.length} 个账号: ${names}。现在可以点「开始配置」。`
-          : `✓ 已保存并添加 ${accounts.length} 个账号: ${names}`;
-        manualMsg.style.color = 'var(--ok-fg)';
+          ? `已保存 ${accounts.length} 个账号：${names}。现在可以点「开始配置」。`
+          : `已保存并添加 ${accounts.length} 个账号：${names}`;
+        manualMsg.className = 'g-manual-msg ok';
         manualPath.value = '';
         if (document.getElementById('g-accounts')) renderAccounts();
       } else {
-        manualMsg.textContent = `✗ ${d.error}`;
-        manualMsg.style.color = 'var(--err-fg)';
+        manualMsg.textContent = d.error;
+        manualMsg.className = 'g-manual-msg err';
       }
     } catch (e) {
-      manualMsg.textContent = `✗ 验证失败: ${e.message}`;
-      manualMsg.style.color = 'var(--err-fg)';
+      manualMsg.textContent = `验证失败: ${e.message}`;
+      manualMsg.className = 'g-manual-msg err';
     } finally {
       manualAdd.disabled = false;
       manualAdd.textContent = oldText;
@@ -230,7 +232,8 @@ export async function init(view) {
         if (g3Progress) g3Progress.classList.add('hidden');
         if (job.error) {
           if (g3Result) g3Result.innerHTML =
-            `<span class="badge badge-none">❌ ${esc(job.error)}</span>`;
+            `<span class="badge badge-none">提取失败：${esc(job.error)}</span>`;
+          toast('提取失败：' + job.error, true);
           return;
         }
         const accs = (job.report && job.report.accounts) || [];
@@ -249,6 +252,8 @@ export async function init(view) {
 
   document.getElementById('g-finish').addEventListener('click', () => {
     setSetupDone();
+    // 引导选定的账号即成为全站全局账号（不重载，马上跳转聊天页）
+    if (state.account && state.account.wxid) setAccount(state.account.wxid, { reload: false });
     go('#/chat');
   });
 }

@@ -16,23 +16,22 @@ function levelClass(m) {
 }
 
 function renderLogs(logs) {
+  // 轮询可能在切页后仍在飞，视图已卸载时直接放弃本轮渲染
   const box = el("log-box");
+  if (!box) return;
   const shown = logs.slice(-1000);
   const sig = shown.length ? `${shown.length}:${shown[shown.length - 1][0]}:${shown[shown.length - 1][1]}` : "0";
   if (sig === lastSig) return;
   lastSig = sig;
-  box.innerHTML = shown.map(([, m]) => {
-    const div = document.createElement("div");
-    div.className = levelClass(m);
-    div.textContent = m;
-    return div.outerHTML;
-  }).join("") || '<div class="log-line dim">暂无日志…</div>';
+  box.innerHTML = shown.map(([, m]) =>
+    `<div class="${levelClass(m)}">${esc(m)}</div>`).join("")
+    || '<div class="log-line dim">暂无日志…</div>';
   el("log-count").textContent = `${logs.length} 条`;
   if (autoScroll) box.scrollTop = box.scrollHeight;
 }
 
 async function poll() {
-  if (paused) return;
+  if (paused || document.hidden) return;
   try {
     const d = await fetchJSON("/api/logs");
     renderLogs(d.logs || []);
@@ -42,7 +41,7 @@ async function poll() {
 export async function init() {
   el("log-pause").addEventListener("click", () => {
     paused = !paused;
-    el("log-pause").textContent = paused ? "▶ 继续" : "⏸ 暂停";
+    el("log-pause").textContent = paused ? "继续" : "暂停";
   });
   el("log-clear").addEventListener("click", () => {
     el("log-box").innerHTML = "";

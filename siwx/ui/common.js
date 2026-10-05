@@ -114,12 +114,22 @@
     img.replaceWith(span);
   }
 
-  /* 打开导出目录/文件（资源管理器），仅限 exports 根内 */
-  function openPath(path) {
-    fetch('/api/export/open', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path }),
-    });
+  /* 打开导出目录/文件（资源管理器），仅限 exports 根内；失败给出提示 */
+  async function openPath(path) {
+    let r;
+    try {
+      r = await fetch('/api/export/open', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+    } catch (e) {
+      toast('打开目录失败：' + e.message, true);
+      return;
+    }
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      toast('打开目录失败：' + (j.error || `HTTP ${r.status}`), true);
+    }
   }
 
   /* ── 插件渲染器：结构化节点树 → HTML ─────────────────────────────
@@ -208,7 +218,37 @@
     return ok;
   }
 
+  /* ── 全局 toast：非阻断轻反馈，替代 window.alert ─────────────
+   * 统一挂在壳层，任何页面都能 SX.toast('已复制')；err=true 用危险色。 */
+  let _toastTimer = null;
+  function toast(text, err) {
+    let box = document.getElementById('sx-toast-box');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'sx-toast-box';
+      box.setAttribute('aria-live', 'polite');
+      document.body.appendChild(box);
+    }
+    box.innerHTML = '';
+    const t = document.createElement('div');
+    t.className = 'sx-toast' + (err ? ' err' : '');
+    t.textContent = text;
+    box.appendChild(t);
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => {
+      t.classList.add('out');
+      setTimeout(() => t.remove(), 200);
+    }, 2400);
+  }
+
+  /* ── 全局账号（状态本体在 app.js，这里做惰性转发）──────────────
+   * 页面用法：init 时 const account = SX.getAccount()；账号变化由壳层
+   * 统一重载页面，页面内不需要订阅事件。 */
+  function getAccount() { return window.__sxAccount ? window.__sxAccount.get() : null; }
+  function listAccounts() { return window.__sxAccount ? window.__sxAccount.list() : []; }
+  function setAccount(wxid, opts) { if (window.__sxAccount) window.__sxAccount.set(wxid, opts); }
+
   window.SX = { esc, timeStr, fmtTs, fmtListTs, fetchJSON, startJob, renderLog, go,
                 setupDone, setSetupDone, resetSetup, imgFallback, openPath,
-                renderNodes, copyText };
+                renderNodes, copyText, toast, getAccount, listAccounts, setAccount };
 })();
