@@ -1041,6 +1041,23 @@ class TestDecryptAtomic(unittest.TestCase):
         residue = list(dst.parent.glob("*.part"))
         self.assertEqual(residue, [], f"残留临时文件: {residue}")
 
+    def test_decrypted_body_equals_plaintext(self):
+        """整库解密的正文必须与原始明文**逐字节一致**（CBC 链式 XOR 回归）。
+
+        覆盖 page1（salt 特例，4000 字节密文）与后续页（4016 字节密文）两种长度。
+        现有用例只断言了大小与头部，此处补齐内容校验 —— 这是 strxor 改写
+        （v5.0.8 由大整数 XOR 换成 C 实现）最直接的回归防线。
+        """
+        from siwx.sqlcipher import decrypt_database, PAGE_SZ, RESERVE_SZ, SALT_SZ
+        dst = self.tmp / "out" / "body.db"
+        decrypt_database(self.src, dst, self.enc_key)
+        body_len = PAGE_SZ - RESERVE_SZ
+        plain1 = bytes((i * 3) & 0xFF for i in range(body_len - SALT_SZ))
+        plain2 = bytes((i * 5) & 0xFF for i in range(body_len))
+        zeros = b"\x00" * RESERVE_SZ
+        expect = b"SQLite format 3\x00" + plain1 + zeros + plain2 + zeros
+        self.assertEqual(dst.read_bytes(), expect)
+
 
 # ── 9. CLI --json ───────────────────────────────────────────────
 
@@ -1480,7 +1497,9 @@ class TestCryptoIntact(unittest.TestCase):
         self.assertEqual(sc.PAGE_SZ - sc.RESERVE_SZ + sc.IV_SZ - sc.SALT_SZ, 4016)
 
     def test_handwritten_cbc_matches_stdlib(self):
+        """手写 CBC 链式 XOR（现用 pycryptodome 的 C 实现 strxor）对齐标准库。"""
         from Crypto.Cipher import AES
+        from Crypto.Util import strxor
         from siwx.sqlcipher import PAGE_SZ, RESERVE_SZ, IV_SZ
         key, iv = bytes(range(32)), bytes(range(16, 32))
         for ct_len in (PAGE_SZ - RESERVE_SZ - IV_SZ, PAGE_SZ - RESERVE_SZ):
@@ -1488,9 +1507,31 @@ class TestCryptoIntact(unittest.TestCase):
             ct = AES.new(key, AES.MODE_CBC, iv).encrypt(pt)
             std = AES.new(key, AES.MODE_CBC, iv).decrypt(ct)
             raw = AES.new(key, AES.MODE_ECB).decrypt(ct)
-            prev = int.from_bytes(iv + ct[:len(ct) - 16], "little")
-            mine = (int.from_bytes(raw, "little") ^ prev).to_bytes(len(ct), "little")
+            mine = strxor.strxor(iv + ct[:len(ct) - 16], raw)
             self.assertEqual(mine, std, f"ct_len={ct_len}")
+
+    def test_decrypt_uses_c_strxor_not_bigint(self):
+        """源码层面确认页 CBC 的链式 XOR 走 C 实现 ``strxor``，而非大整数转换。
+
+        大整数 ``from_bytes``/``to_bytes`` 曾占单库解密耗时约 39%（v5.0.8 前）。
+        docstring 里会提到旧写法做说明，因此先用 ``ast`` 剥掉 docstring，
+        只在**真正的代码**里断言。
+        """
+        import ast
+        src = Path(__file__).resolve().parent.parent / "siwx" / "sqlcipher.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if (isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef))
+                    and body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body.pop(0)          # 丢弃 docstring
+        code = ast.unparse(tree)
+        self.assertIn("strxor", code, "页 CBC 未使用 strxor")
+        self.assertNotIn("from_bytes", code, "仍在用大整数 from_bytes")
+        self.assertNotIn("to_bytes", code, "仍在用大整数 to_bytes")
 
 
 # ── 数据安全修复：临时文件唯一性（D-2）─────────────────────────

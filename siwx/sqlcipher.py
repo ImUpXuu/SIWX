@@ -115,8 +115,16 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
     - 内联 CBC XOR：消除函数调用开销（~9% 提升）
     - 预计算常量：CT_LEN 提到循环外
     - 进度回调降频：每 100 页回调一次
+
+    优化（v5.0.8）:
+    - CBC 链式 XOR 由「大整数 ``from_bytes``/``to_bytes``」改为 pycryptodome 的
+      C 实现 ``strxor.strxor``。原写法占单库解密耗时约 39%（``from_bytes`` 28%
+      + ``to_bytes`` 11%），实测内核 164 → 419 MB/s、整账号端到端 1.39x，
+      输出**字节级等价**（见 ``tests/test_regressions.py::TestCryptoIntact``）。
+      ``strxor`` 属于既有的 pycryptodome 依赖，未引入任何新的外部依赖。
     """
     from Crypto.Cipher import AES
+    from Crypto.Util import strxor
 
     tmp_copy = None
     tmp_out = None
@@ -161,14 +169,13 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
             body_len = PAGE_SZ - RESERVE_SZ  # 4016
             CT_LEN = body_len - SALT_SZ      # 4000
             aes_dec = aes.decrypt
+            xor = strxor.strxor             # C 实现，等长入参
             zeros = b"\x00" * RESERVE_SZ
 
             # 页 1：前 16 字节是 salt，密文从 16 开始
             iv = page1[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + IV_SZ]
             ct = page1[SALT_SZ: body_len]
-            raw = aes_dec(ct)
-            prev_int = int.from_bytes(iv + ct[:CT_LEN - 16], "little")
-            pt = (int.from_bytes(raw, "little") ^ prev_int).to_bytes(CT_LEN, "little")
+            pt = xor(iv + ct[:CT_LEN - 16], aes_dec(ct))
             fout.write(SQLITE_HDR)
             fout.write(pt)
             fout.write(zeros)
@@ -181,9 +188,7 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
                     chunk = chunk + b"\x00" * (PAGE_SZ - len(chunk))
                 iv = chunk[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + IV_SZ]
                 ct = chunk[:body_len]
-                raw = aes_dec(ct)
-                prev_int = int.from_bytes(iv + ct[:len(ct) - 16], "little")
-                pt = (int.from_bytes(raw, "little") ^ prev_int).to_bytes(len(ct), "little")
+                pt = xor(iv + ct[:len(ct) - 16], aes_dec(ct))
                 fout.write(pt)
                 fout.write(zeros)
                 if progress and pgno % 100 == 0:
