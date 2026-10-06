@@ -12,11 +12,13 @@ async function load() {
     el('m-cmd').textContent = `"${cmd.command}" ${cmd.args.join(' ')}`;
     el('m-json').textContent = info.client_config;
     el('m-path').textContent = info.config_path;
-    el('m-tools').innerHTML = info.tools.map(t => `
+    el('m-tools').innerHTML = info.tools.length
+      ? info.tools.map(t => `
       <label class="m-tool">
         <input type="checkbox" data-t="${esc(t.name)}" ${t.enabled ? 'checked' : ''}>
         <div><b>${esc(t.name)}</b><span>${esc(t.description)}</span></div>
-      </label>`).join('');
+      </label>`).join('')
+      : '<div class="empty">暂无注册工具</div>';
   } catch (e) {
     el('m-tools').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
   }
@@ -42,21 +44,33 @@ async function save() {
   el('m-tools').querySelectorAll('input[type=checkbox]').forEach(cb => {
     tools[cb.dataset.t] = cb.checked;
   });
-  await fetchJSON('/api/mcp/config', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tools }),
-  });
-  el('m-save-msg').textContent = '已保存';
-  toast('MCP 工具配置已保存');
-  setTimeout(() => { el('m-save-msg').textContent = ''; }, 3000);
+  const btn = el('m-save');
+  btn.disabled = true;
+  try {
+    await fetchJSON('/api/mcp/config', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tools }),
+    });
+    const msg = el('m-save-msg');
+    if (msg) {
+      msg.textContent = '已保存';
+      setTimeout(() => { if (msg.isConnected) msg.textContent = ''; }, 3000);
+    }
+    toast('MCP 工具配置已保存');
+  } catch (e) {
+    toast('保存失败：' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function copy(target, btn) {
-  const text = el(target).textContent;
+  const text = el(target)?.textContent ?? '';
   const ok = await window.SX.copyText(text);
+  if (!btn.isConnected) return;
   if (ok) {
     btn.textContent = '已复制';
-    setTimeout(() => { btn.textContent = '复制'; }, 1500);
+    setTimeout(() => { if (btn.isConnected) btn.textContent = '复制'; }, 1500);
   } else {
     toast('复制失败，请手动选择', true);
   }
@@ -68,13 +82,15 @@ async function pollLogs() {
   if (pollTimer) clearInterval(pollTimer);
   const box = el('m-log');
   const render = (lines) => {
+    // 用户上翻阅读时不再强制拽回底部（距底 >40px 视为正在阅读）
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
     box.innerHTML = lines.map(ln => {
       let cls = 'log-line';
       if (ln.includes('[ERROR]')) cls += ' err';
       else if (ln.includes('完成')) cls += ' ok';
       return `<div class="${cls}">${esc(ln)}</div>`;
     }).join('') || '<div class="log-line dim">暂无日志…</div>';
-    box.scrollTop = box.scrollHeight;
+    if (stick) box.scrollTop = box.scrollHeight;
   };
   const fetchLogs = async () => {
     if (document.hidden) return;             // 后台标签页暂停轮询

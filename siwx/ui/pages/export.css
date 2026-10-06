@@ -95,10 +95,7 @@
 .res-meta a:hover { color: var(--accent-fg); }
 .res-meta.res-err { color: var(--danger); }
 .res-actions { padding: 8px 0; display: flex; gap: 12px; flex-wrap: wrap; }
-.res-actions a { color: var(--accent-fg); text-decoration: none; font-size: 13px; font-weight: 700;
-                 border: 1px solid var(--accent-line); background: var(--accent-soft);
-                 border-radius: var(--radius-sm); padding: 6px 12px; }
-.res-actions a:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+.res-actions .btn { text-decoration: none; font-size: 13px; min-height: 32px; padding: 5px 12px; }
 .res-logs-detail { margin-top: 10px; font-size: 12px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
 .res-logs-detail summary { cursor: pointer; color: var(--text); font-weight: 700; }
 .res-logs-detail.res-failed summary { color: var(--danger); }

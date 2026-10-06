@@ -254,6 +254,13 @@ function renderSessions() {
 function updateCount() {
   el('e-hint').textContent = `已选 ${selected.size} 个会话`;
   el('e-run').disabled = running || selected.size === 0;
+  // 全选框三态同步：手动逐个勾选后表头不能再显示空框
+  const kw = el('e-search').value;
+  const matched = sessions.filter(s => match(s, kw));
+  const picked = matched.filter(s => selected.has(s.username)).length;
+  const selall = el('e-selall');
+  selall.checked = matched.length > 0 && picked === matched.length;
+  selall.indeterminate = picked > 0 && picked < matched.length;
   renderRangeBanner();
 }
 
@@ -283,9 +290,8 @@ async function run() {
   updateCount();
   el('e-log').innerHTML = '';
   el('e-result').innerHTML = '';
-  el('e-progress-card').style.display = 'block';
+  el('e-progress-card').classList.remove('hidden');
   el('e-bar').style.width = '0%';
-  el('e-bar').style.animation = '';
   try {
     const r = await fetch('/api/run', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -305,10 +311,13 @@ async function run() {
 }
 
 function poll() {
+  let failStreak = 0;                    // 连续失败计数：后端挂掉时终局报错，不无限吞错
   pollTimer = setInterval(async () => {
     if (document.hidden) return;             // 后台标签页暂停轮询
+    if (gone()) { clearInterval(pollTimer); pollTimer = null; return; }
     try {
       const job = await (await fetch('/api/job')).json();
+      failStreak = 0;
       renderLogs(job.logs || []);
       // 进度条：解析最后一条 [export] N%
       let pct = 0;
@@ -324,13 +333,25 @@ function poll() {
         running = false;
         updateCount();
         el('e-bar').style.width = '100%';
-        el('e-bar').style.animation = 'none';
-        setTimeout(() => { el('e-progress-card').style.display = 'none'; }, 600);
+        const card = el('e-progress-card');
+        setTimeout(() => { if (card.isConnected) card.classList.add('hidden'); }, 600);
         renderResult(job);
         if (job.ok) toast('导出完成');
         else toast(job.error || '导出失败', true);
       }
-    } catch (e) { /* 忽略单次轮询失败 */ }
+    } catch (e) {
+      // 服务端重启/挂掉：连续失败就停下来给出错误态，进度条不再永久冻结
+      if (++failStreak >= 5) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        running = false;
+        if (!gone()) {
+          updateCount();
+          el('e-log').insertAdjacentHTML('beforeend',
+            `<div class="log-line err">与后端失去联系（${esc(e.message)}），已停止轮询，请刷新重试</div>`);
+        }
+      }
+    }
   }, 600);
 }
 
@@ -391,10 +412,10 @@ function renderResult(job) {
     lines.push(`<div class="res-meta">目录：<span class="mono">${esc(r.total_dir)}</span></div>`);
     // 路径只放 data 属性，点击时再从 dataset 读取——内联 onclick 拼
     // Windows 路径会被 JS 转义吃掉反斜杠（D:\x → D:x），后端必然拒绝
-    lines.push(`<div class="res-actions"><a href="#" data-open-path="${esc(r.total_dir)}">📂 打开目录</a></div>`);
+    lines.push(`<div class="res-actions"><a class="btn" href="#" data-open-path="${esc(r.total_dir)}">📂 打开目录</a></div>`);
   }
   if (r.zip) {
-    lines.push(`<div class="res-actions"><a href="/api/export/download?path=${encodeURIComponent(r.zip)}">📥 下载整体 ZIP</a></div>`);
+    lines.push(`<div class="res-actions"><a class="btn" href="/api/export/download?path=${encodeURIComponent(r.zip)}">📥 下载整体 ZIP</a></div>`);
   }
   if (r.zips && r.zips.length) {
     lines.push(`<div class="res-meta">共 ${r.zips.length} 个会话 ZIP（位于导出目录内）</div>`);

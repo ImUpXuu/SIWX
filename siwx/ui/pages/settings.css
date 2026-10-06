@@ -40,6 +40,8 @@
 }
 .plg-block .s-item { grid-template-columns: 190px minmax(0, 1fr); }
 .plg-block .s-item .f-input { justify-self: start; max-width: 100%; }
+.plg-block input.f-input[type="number"] { width: auto; min-width: 110px; }
+.plg-save-row { margin-top: 10px; justify-content: flex-start; }
 .plg-block .s-item > .f-chk { justify-self: start; }
 .plg-block textarea.f-input { width: 100%; resize: vertical; font-family: inherit; }
 .plg-block [data-plg-status] { font-size: 12px; }

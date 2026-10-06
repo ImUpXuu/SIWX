@@ -56,7 +56,9 @@ async function loadAutoSync() {
 
 async function saveAutoSync() {
   const enabled = el('s-auto-sync-enabled').checked;
-  const interval = Math.max(1, Math.min(Number(el('s-auto-sync-interval').value || 30), 1440));
+  const raw = Number(el('s-auto-sync-interval').value || 30);
+  const interval = Math.max(1, Math.min(raw, 1440));
+  if (raw !== interval) toast(`间隔超出范围，已按 ${interval} 分钟保存`);
   const cfg = await fetchJSON('/api/settings/auto-sync', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ enabled, interval_minutes: interval }),
@@ -114,6 +116,7 @@ async function loadVersion() {
         } catch (e) {
           toast('更新失败：' + e.message, true);
           btn.disabled = false;
+          btn.textContent = `更新到 v${chk.remote?.version || ''}`;
         }
       });
     }
@@ -151,7 +154,7 @@ function pluginControl(plugin, it) {
     const mx = it.max === null || it.max === undefined ? '' : ` max="${it.max}"`;
     return `<input class="f-input" type="number"${step}${mn}${mx} id="${id}"
               data-plg="${esc(plugin)}" data-key="${esc(it.key)}" data-type="${it.type}"
-              value="${esc(val ?? '')}" style="width:auto;min-width:110px">`;
+              value="${esc(val ?? '')}">`;
   }
   if (it.type === 'text') {
     return `<textarea class="f-input" id="${id}" data-plg="${esc(plugin)}" data-key="${esc(it.key)}"
@@ -225,7 +228,7 @@ async function loadPluginSettings() {
                   ${pluginControl(p.plugin, it)}
                 </div>`).join('')}
             </div>`).join('')}
-          <div class="s-inline" style="margin-top:10px">
+          <div class="s-inline plg-save-row">
             <button class="btn btn-primary" data-plg-save="${esc(p.plugin)}">保存</button>
             <span class="dim" data-plg-status="${esc(p.plugin)}"></span>
           </div>
@@ -297,6 +300,7 @@ async function loadPluginSettings() {
 /* ── 数据源管理：账号列表 / 手动目录 / 重新提取（原引导页的维护能力）── */
 
 let dsRunning = false;
+let dsStop = null;                 // startJob 的 stop 句柄，destroy 时停掉轮询
 
 function dsBadge(cached, total) {
   if (!total) return '<span class="badge badge-none">无数据</span>';
@@ -331,11 +335,14 @@ async function loadDatasources() {
 }
 
 async function runExtract(acc, btn) {
-  if (dsRunning || !acc) return;
+  if (dsRunning || !acc) {
+    if (dsRunning) toast('已有提取任务在运行，请等它结束', true);
+    return;
+  }
   dsRunning = true;
   const runBox = el('s-ds-run'), bar = el('s-ds-bar'), logBox = el('s-ds-log'), resBox = el('s-ds-result');
   runBox.hidden = false;
-  bar.style.width = '100%';
+  bar.style.width = '0';
   logBox.innerHTML = '';
   resBox.innerHTML = '';
   btn.disabled = true;
@@ -343,7 +350,7 @@ async function runExtract(acc, btn) {
   btn.textContent = '提取中…';
   try {
     await new Promise(resolve => {
-      startJob({ mode: 'auto', db_dir: acc.db_dir },
+      dsStop = startJob({ mode: 'auto', db_dir: acc.db_dir },
         logs => { if (el('s-ds-log')) renderLog(logBox, logs); },
         job => {
           if (job.error) {
@@ -368,6 +375,7 @@ async function runExtract(acc, btn) {
     });
   } finally {
     dsRunning = false;
+    dsStop = null;
     bar.style.width = '0';
     runBox.hidden = true;
     btn.disabled = false;
@@ -423,38 +431,56 @@ function confirmThen(msg, fn) {
 }
 
 export async function init() {
-  await loadVersion();
-  await loadOverview();
-  await loadAutoSync();
-  await loadPluginSettings();
+  // 四个加载互不依赖，并行取（此前串行 await，卡片逐个蹦出来）
+  await Promise.all([loadVersion(), loadOverview(), loadAutoSync(), loadPluginSettings()]);
 
-  el('s-auto-sync-save').addEventListener('click', async () => {
+  const saveBtn = el('s-auto-sync-save');
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
     try {
       await saveAutoSync();
       toast('自动刷新设置已保存');
     } catch (e) {
       toast('保存失败：' + e.message, true);
+    } finally {
+      if (saveBtn.isConnected) saveBtn.disabled = false;
     }
   });
 
-  el('s-clear-output').addEventListener('click', () =>
+  const clearOutput = el('s-clear-output');
+  clearOutput.addEventListener('click', () =>
     confirmThen('确定删除全部解密输出？\n（密钥保留，重跑解密即可恢复）', async () => {
-      await fetchJSON('/api/settings/clear', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ kind: 'output' }),
-      });
-      toast('已清除解密输出');
-      loadOverview();
+      clearOutput.disabled = true;
+      try {
+        await fetchJSON('/api/settings/clear', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'output' }),
+        });
+        toast('已清除解密输出');
+        loadOverview();
+      } catch (e) {
+        toast('清除失败：' + e.message, true);
+      } finally {
+        if (clearOutput.isConnected) clearOutput.disabled = false;
+      }
     }));
 
-  el('s-clear-keys').addEventListener('click', () =>
+  const clearKeys = el('s-clear-keys');
+  clearKeys.addEventListener('click', () =>
     confirmThen('确定清除密钥库？\n下次提取需要微信在线重新收割。', async () => {
-      await fetchJSON('/api/settings/clear', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ kind: 'keys' }),
-      });
-      toast('已清除密钥库');
-      loadOverview();
+      clearKeys.disabled = true;
+      try {
+        await fetchJSON('/api/settings/clear', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'keys' }),
+        });
+        toast('已清除密钥库');
+        loadOverview();
+      } catch (e) {
+        toast('清除失败：' + e.message, true);
+      } finally {
+        if (clearKeys.isConnected) clearKeys.disabled = false;
+      }
     }));
 
   el('s-rerun-wizard').addEventListener('click', () => {
@@ -479,11 +505,16 @@ export async function init() {
   });
   el('s-log-level').appendChild(logLevelDrop.el);
   logLevelDrop.onChange = async (v) => {
-    await fetchJSON('/api/logs/settings', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ level: v }),
-    });
-    toast(`日志模式已切换为：${v === 'detailed' ? '详细' : '粗略'}`);
+    try {
+      await fetchJSON('/api/logs/settings', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ level: v }),
+      });
+      toast(`日志模式已切换为：${v === 'detailed' ? '详细' : '粗略'}`);
+    } catch (e) {
+      toast('切换失败：' + e.message, true);
+      logLevelDrop.value = v === 'detailed' ? 'rough' : 'detailed';   // 回滚下拉视觉
+    }
   };
 
   async function loadLogSettings() {
@@ -495,10 +526,13 @@ export async function init() {
 
   // ── 脱敏日志导出 ──────────────────────────────────────
   el('s-export-log').addEventListener('click', async () => {
+    const btn = el('s-export-log');
     const desensitize = el('s-log-desensitize').checked;
     const url = `/api/logs/export?desensitize=${desensitize ? '1' : '0'}`;
+    btn.disabled = true;
     try {
       const r = await fetch(url);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const blob = await r.blob();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -507,6 +541,8 @@ export async function init() {
       URL.revokeObjectURL(a.href);
     } catch (e) {
       toast('导出失败：' + e.message, true);
+    } finally {
+      btn.disabled = false;
     }
   });
 
@@ -527,4 +563,9 @@ export async function init() {
   await loadLogSettings();
 }
 
-export function destroy() { /* no timers */ }
+export function destroy() {
+  if (dsStop) dsStop();                    // 切页后停止在飞的提取轮询
+  dsStop = null;
+  plgChoiceDrop.clear();                   // 释放已脱离 DOM 的下拉挂载引用
+  if (logLevelDrop) { logLevelDrop.destroy(); logLevelDrop = null; }
+}
