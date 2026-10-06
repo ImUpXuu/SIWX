@@ -7,7 +7,7 @@
  *   - 响应式状态集中在 store，子组件（sns-post / sns-ava）共享；
  *   - 好友列表到达后昵称/头像自动刷新（Vue 响应式，不再需要 rerenderList 补丁）。
  */
-const { esc, fetchJSON, copyText } = window.SX;
+const { fetchJSON, copyText } = window.SX;
 const pad = n => String(n).padStart(2, '0');
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -169,6 +169,7 @@ const store = Vue.reactive({
   friends: [],
   friendsLoaded: false,
   friendsLoading: false,
+  friendsError: '',
 
   timeline: [],
   before: null,
@@ -354,10 +355,16 @@ const SnsPost = {
     },
     openDetail() {
       store.activeMenuTid = null;
-      store.modal = { visible: true, post: null, error: '' };
-      fetchJSON(`/api/sns/detail?account=${encodeURIComponent(store.account)}&tid=${encodeURIComponent(this.tid)}`)
-        .then(d => { store.modal.post = d.post; })
-        .catch(e => { store.modal.error = e.message; });
+      const tid = this.tid;
+      store.modal = { visible: true, post: null, error: '', tid };
+      fetchJSON(`/api/sns/detail?account=${encodeURIComponent(store.account)}&tid=${encodeURIComponent(tid)}`)
+        .then(d => {
+          // 连点「详情」/切换目标时只应用当前打开的那一条
+          if (store.modal.visible && store.modal.tid === tid) store.modal.post = d.post;
+        })
+        .catch(e => {
+          if (store.modal.visible && store.modal.tid === tid) store.modal.error = e.message;
+        });
     },
     copyText_() {
       store.activeMenuTid = null;
@@ -645,11 +652,13 @@ const SnsPage = {
       if (store.friendsLoaded && !force) return;
       if (store.friendsLoading) return;
       store.friendsLoading = true;
+      store.friendsError = '';
       try {
         const d = await fetchJSON(`/api/sns/friends?account=${encodeURIComponent(store.account)}&limit=1000`);
         store.friends = d.friends || [];
         store.friendsLoaded = true;
       } catch (e) {
+        store.friendsError = e.message;      // 面板内常驻错误态，toast 一闪就没了
         toast('发布者加载失败：' + e.message);
       } finally {
         store.friendsLoading = false;
@@ -663,7 +672,12 @@ const SnsPage = {
 
     /* ── 列表加载 ── */
     async load(reset) {
-      if (store.loading || !store.account) return;
+      if (!store.account) return;
+      if (store.loading) {
+        // 加载中用户又改了筛选：记下来，本轮结束后补跑最后一次，不再静默吞掉
+        store._pendingLoad = store._pendingLoad || reset;
+        return;
+      }
       store.loading = true;
       if (reset) {
         store.before = null;
@@ -687,6 +701,11 @@ const SnsPage = {
         else toast(e.message);
       } finally {
         store.loading = false;
+        if (store._pendingLoad) {
+          const rerun = store._pendingLoad;
+          store._pendingLoad = false;
+          this.load(rerun);
+        }
       }
     },
     loadMore() { this.load(false); },
@@ -706,8 +725,10 @@ const SnsPage = {
     closePops() { store.pops.range = store.pops.user = store.pops.export = false; },
 
     /* ── 导出 ── */
-    async doExport() {
+    doExport() {
       if (store.exportMedia && !window.confirm('下载媒体会逐张访问 CDN，可能耗时较久，确定继续？')) return;
+      // 手输并发不受 min/max 属性拦截，这里统一钳制
+      store.exportConc = Math.min(16, Math.max(1, Number(store.exportConc) || 5));
       store.exportState = 'running';
       store.exportProgress = '';
       store.exportError = '';
@@ -752,7 +773,10 @@ const SnsPage = {
           store.exportResult = rep;
         } else {
           store.exportState = 'error';
-          store.exportError = job.error || last || '导出失败';
+          // 任务槽是全局单槽：report 不是本导出时说明被其他任务占了位，别拿别人的报错
+          store.exportError = job.error
+            || (rep.kind && rep.kind !== 'sns_export' ? '导出被其他任务打断，请重试' : '')
+            || last || '导出失败';
         }
       }, 800);
     },

@@ -1,7 +1,7 @@
 /* 聊天统计页 —— 账号来自全局账号卡（SX.getAccount），本页不再自选 */
 import { createDropdown, createDatePicker } from '/widgets.js?v=2026100601';
 
-const { esc, fmtTs, fetchJSON, getAccount, go } = window.SX;
+const { esc, fmtTs, fetchJSON, getAccount, go, toast } = window.SX;
 
 function el(id) { return document.getElementById(id); }
 function nf(n) { return (Number(n) || 0).toLocaleString('zh-CN'); }
@@ -9,6 +9,7 @@ function nf(n) { return (Number(n) || 0).toLocaleString('zh-CN'); }
 let account = null;
 let lastData = null;
 let busy = false;
+let pendingLoad = 0;             // busy 期间用户又改了筛选：0 无 / 1 普通刷新 / 2 强刷
 let rangeDrop = null;
 let startPick = null;
 let endPick = null;
@@ -46,6 +47,12 @@ function flushAnim() {
 
 /* ── 环形图（类型分布）────────────────────────────────────── */
 function donut(groups) {
+  // 色板只有 8 档：超过 8 类时合并为「其他」，避免扇区与图例撞色
+  if (groups.length > 8) {
+    const head = groups.slice(0, 7);
+    const rest = groups.slice(7);
+    groups = head.concat([{ label: `其他（${rest.length} 类）`, count: rest.reduce((s, g) => s + g.count, 0) }]);
+  }
   const total = groups.reduce((s, g) => s + g.count, 0) || 1;
   const size = 190, cx = size / 2, cy = size / 2;
   const r = 68, sw = 26;
@@ -177,14 +184,13 @@ function hourBars(hours) {
 function weekdayBars(days) {
   const names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
   const max = Math.max(...days, 1);
-  return `<div style="display:flex;flex-direction:column;gap:9px">${
+  return `<div class="st-week-rows">${
     days.map((v, i) => `
     <div class="st-mini">
-      <span style="width:38px;flex:none;font-size:12.5px">${names[i]}</span>
+      <span class="st-week-name">${names[i]}</span>
       <span class="track"><span class="fill" data-w="${(v / max * 100).toFixed(1)}"
         style="--i:${i}"></span></span>
-      <span style="width:66px;text-align:right;font-size:12.5px;font-weight:700;
-        font-variant-numeric:tabular-nums">${nf(v)}</span>
+      <span class="st-week-num">${nf(v)}</span>
     </div>`).join('')
   }</div>`;
 }
@@ -194,8 +200,8 @@ function rankTable(rows, maxLabel) {
   if (!rows.length) return '<div class="st-empty">暂无数据</div>';
   const max = Math.max(...rows.map(r => r.count), 1);
   return `<table class="st-table">
-    <thead><tr><th></th><th>${esc(maxLabel)}</th><th style="width:180px">占比</th>
-    <th style="text-align:right">消息数</th></tr></thead>
+    <thead><tr><th></th><th>${esc(maxLabel)}</th><th class="col-share">占比</th>
+    <th class="col-num">消息数</th></tr></thead>
     <tbody>${rows.map((r, i) => `
       <tr style="--i:${i}">
         <td class="idx">${i + 1}</td>
@@ -349,7 +355,12 @@ function currentRange() {
   if (v === 'custom') {
     let start = startPick && startPick.value ? startPick.value : null;
     let end = endPick && endPick.value ? endPick.value : null;
-    if (start && end && start > end) { const t = start; start = end; end = t; }
+    if (start && end && start > end) {
+      // 起止倒置：交换并回写日期框，用户看到的就是实际生效的范围
+      const t = start; start = end; end = t;
+      if (startPick && endPick) { startPick.value = start; endPick.value = end; }
+      toast('起止日期写反了，已自动交换');
+    }
     return { start, end };
   }
   if (v === 'all') return { start: null, end: null };
@@ -364,7 +375,11 @@ function setEmpty(show, html) {
 }
 
 async function load(force) {
-  if (!account || busy) return;
+  if (!account) return;
+  if (busy) {                     // 加载中改筛选：记下来，本轮结束后补跑
+    pendingLoad = Math.max(pendingLoad, force ? 2 : 1);
+    return;
+  }
   busy = true;
   const rf = el('st-refresh');
   if (rf) rf.disabled = true;
@@ -375,6 +390,10 @@ async function load(force) {
       body.innerHTML = `<div class="st-loading">${
         force ? '正在重新统计，请稍候…' : '正在统计…'}</div>`;
     }
+  } else {
+    // 已有数据时后台更新：给一个可见的进行中标记，正文保持可读
+    const m = el('st-meta');
+    if (m) m.textContent = '正在更新…';
   }
 
   const { start, end } = currentRange();
@@ -405,6 +424,11 @@ async function load(force) {
   } finally {
     busy = false;
     if (rf) rf.disabled = false;
+    if (pendingLoad) {
+      const f = pendingLoad > 1;
+      pendingLoad = 0;
+      load(f);
+    }
   }
 }
 

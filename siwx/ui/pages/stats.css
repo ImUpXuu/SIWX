@@ -81,25 +81,18 @@
 .st-chart .lbl { fill: var(--text); font-weight: 700; }
 .st-chart .val { fill: var(--text); font-weight: 700; }
 
-/* 环形图色阶：0 号为强调绿，其余灰阶；深浅主题各自声明，切主题无需重绘 */
+/* 环形图色阶：0 号为强调绿，其余由文字色/卡底色 color-mix 派生成灰阶，
+   深浅主题自动适配（不再手抄两份 hex） */
 .st-shade-0 { --shade: var(--accent); }
-.st-shade-1 { --shade: #5c615c; }
-.st-shade-2 { --shade: #7d827d; }
-.st-shade-3 { --shade: #9a9f99; }
-.st-shade-4 { --shade: #b5b9b3; }
-.st-shade-5 { --shade: #ced2cb; }
-.st-shade-6 { --shade: #e2e5df; }
-.st-shade-7 { --shade: #f0f2ec; }
+.st-shade-1 { --shade: color-mix(in srgb, var(--text) 64%, var(--card)); }
+.st-shade-2 { --shade: color-mix(in srgb, var(--text) 52%, var(--card)); }
+.st-shade-3 { --shade: color-mix(in srgb, var(--text) 42%, var(--card)); }
+.st-shade-4 { --shade: color-mix(in srgb, var(--text) 33%, var(--card)); }
+.st-shade-5 { --shade: color-mix(in srgb, var(--text) 25%, var(--card)); }
+.st-shade-6 { --shade: color-mix(in srgb, var(--text) 17%, var(--card)); }
+.st-shade-7 { --shade: color-mix(in srgb, var(--text) 10%, var(--card)); }
 .st-chart .st-arc { stroke: var(--shade); }
 .st-leg .sw { background: var(--shade); }
-[data-theme="dark"] .st-shade-0 { --shade: var(--accent); }
-[data-theme="dark"] .st-shade-1 { --shade: #b9bdb6; }
-[data-theme="dark"] .st-shade-2 { --shade: #9a9f99; }
-[data-theme="dark"] .st-shade-3 { --shade: #7d827d; }
-[data-theme="dark"] .st-shade-4 { --shade: #646963; }
-[data-theme="dark"] .st-shade-5 { --shade: #4d514c; }
-[data-theme="dark"] .st-shade-6 { --shade: #3a3e39; }
-[data-theme="dark"] .st-shade-7 { --shade: #2c302b; }
 
 /* 环形图 */
 .st-donut-wrap { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
@@ -121,6 +114,8 @@
 .st-table th { font-size: 11.5px; color: var(--muted); font-weight: 700; white-space: nowrap; }
 .st-table tr:last-child td { border-bottom: none; }
 .st-table td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; }
+.st-table th.col-share { width: 180px; }
+.st-table th.col-num { text-align: right; }
 .st-table td.idx { color: var(--muted); width: 30px; text-align: right; font-size: 12px; }
 .st-table .nm { word-break: break-all; }
 .st-wxid {
@@ -129,6 +124,13 @@
 }
 /* 行内占比条 */
 .st-mini { display: flex; align-items: center; gap: 9px; min-width: 150px; }
+/* 星期分布（纵向条列表）*/
+.st-week-rows { display: flex; flex-direction: column; gap: 9px; }
+.st-week-name { width: 38px; flex: none; font-size: 12.5px; }
+.st-week-num {
+  width: 66px; text-align: right; font-size: 12.5px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
 .st-mini .track {
   flex: 1; height: 7px; border: 1px solid var(--line); border-radius: 999px;
   background: var(--card-alt); overflow: hidden; min-width: 60px;

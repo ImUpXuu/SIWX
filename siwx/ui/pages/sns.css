@@ -61,7 +61,7 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 .sns-hero-ava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
 
 /* ── 筛选栏 ───────────────────────────────────────────── */
-.sns-bar { display: flex; flex-direction: column; gap: 8px; }
+.sns-bar { display: flex; flex-direction: column; gap: 8px; position: relative; }
 .sns-search {
   position: relative; display: flex; align-items: center;
   background: var(--wx-card); border: 1px solid var(--wx-line); border-radius: 8px; height: 40px;
@@ -91,6 +91,7 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 .sns-chip:hover { border-color: var(--wx-line-strong); }
 .sns-chip.on { border-color: var(--wx-link); color: var(--wx-link); background: var(--wx-range); }
 .sns-chip-icon { font-size: 12px; opacity: .7; }
+.sns-chip-icon svg { width: 14px; height: 14px; display: block; }
 .sns-chip-caret { font-size: 9px; color: var(--wx-muted); }
 .sns-chip span:not(.sns-chip-caret):not(.sns-chip-icon):not(.sns-chip-ava) {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -122,8 +123,9 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 }
 
 /* ── 浮层（时间范围 / 发布者 / 导出）───────────────────── */
+/* 以 .sns-bar 为定位基准（浮层是其子元素），不再用 96px/150px 魔法数硬对齐 */
 .sns-pop {
-  position: absolute; z-index: 30; top: 96px; left: 0; width: 340px; max-width: 92vw;
+  position: absolute; z-index: 30; top: calc(100% + 8px); left: 0; width: 340px; max-width: 92vw;
   background: var(--wx-card); border: 1px solid var(--wx-line); border-radius: 10px;
   box-shadow: 0 12px 32px rgba(0,0,0,.16); padding: 12px;
 }
@@ -188,7 +190,7 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 .sns-user-tools { display: flex; gap: 8px; margin-bottom: 8px; }
 .sns-user-tools .sns-search { flex: 1; }
 .sns-user-sort {
-  height: 34px; max-width: 150px; border: 1px solid var(--wx-line); border-radius: 8px;
+  height: 32px; max-width: 150px; border: 1px solid var(--wx-line); border-radius: 8px;
   background: var(--wx-card); font-size: 12.5px; color: var(--wx-text); padding: 0 6px;
 }
 .sns-user-list { max-height: 320px; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
@@ -209,6 +211,7 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 .sns-user-row .un { font-size: 11px; color: var(--wx-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sns-user-row .cnt { font-size: 12px; color: var(--wx-sub); flex: none; }
 .sns-user-empty { padding: 24px 0; text-align: center; color: var(--wx-muted); font-size: 12.5px; }
+.sns-user-empty .sns-btn-ghost { margin-top: 8px; }
 
 /* 导出面板 */
 .sns-export { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -233,7 +236,7 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 .sns-btn-primary:hover:not(:disabled) { opacity: .9; }
 .sns-btn-primary:disabled { opacity: .45; cursor: not-allowed; }
 .sns-btn-ghost {
-  height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--wx-line);
+  height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--wx-line);
   background: var(--wx-card); color: var(--wx-sub); font-size: 12.5px; cursor: pointer;
 }
 .sns-btn-ghost:hover { border-color: var(--wx-line-strong); color: var(--wx-text); }
@@ -277,6 +280,8 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
   width: auto; max-width: 220px; max-height: 260px; aspect-ratio: auto; cursor: zoom-in;
 }
 .sns-media--1 video { cursor: default; }
+/* 九宫格视频不可点开放大（无播放承诺），光标不装作可点 */
+.sns-media--2 video, .sns-media--3 video, .sns-media--4 video, .sns-media--n video { cursor: default; }
 .sns-media-cell .live-badge {
   position: absolute; left: 4px; top: 4px; pointer-events: none;
   font-size: 10px; padding: 1px 4px; border-radius: 2px;
@@ -338,11 +343,12 @@ a.sns-card:hover { background: var(--wx-hover); }
 
 /* 底部：时间 + 操作 */
 .sns-foot { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
-.sns-time { font-size: 12px; color: var(--wx-muted); }
+/* 时间是正文信息（不是装饰），用 sub 档保证对比度；muted 仅用于占位/装饰 */
+.sns-time { font-size: 12px; color: var(--wx-sub); }
 .sns-detail-link { font-size: 12px; color: var(--wx-link); cursor: pointer; }
 .sns-ops { margin-left: auto; position: relative; }
 .sns-ops-btn {
-  width: 28px; height: 18px; border-radius: 3px; border: 0; cursor: pointer;
+  width: 32px; height: 22px; border-radius: 4px; border: 0; cursor: pointer;
   background: var(--wx-ops); color: var(--wx-link); font-size: 12px; line-height: 1; letter-spacing: 1px;
 }
 .sns-ops-btn:hover { background: var(--wx-ops-hover); }
