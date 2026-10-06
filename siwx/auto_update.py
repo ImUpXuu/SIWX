@@ -31,6 +31,7 @@ from pathlib import Path
 
 from siwx import logger as log
 from siwx import paths
+from siwx import validate
 
 RAW_BASE = "https://raw.gh.1s.fan/ImUpXuu/SIWX/main"
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/ImUpXuu/SIWX/main"
@@ -47,6 +48,19 @@ _ALLOWED_UPDATE_HOSTS = {
     "raw.githubusercontent.com", "raw.gh.1s.fan",
 }
 
+# 只认域名时 github.com/attacker/repo 一样放行——白名单形同虚设。产物与哈希
+# URL 还必须落在本仓库路径下，这样即使代理被投毒也无法把下载源指到别处。
+_REPO_PATH_PREFIX = f"/{GITHUB_REPO}/releases/"
+
+# version 字段会被拼进文件名 / 安装目标路径 / 正则替换模板，必须是严格语义
+# 版本；否则 "9.9.9/../../.." 能逃出 tmp_dir/app_dir 并最终被 Popen 执行。
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+){0,2}$")
+
+
+def valid_version(v) -> bool:
+    """version 字段是否为安全可用的语义版本号。"""
+    return isinstance(v, str) and bool(_VERSION_RE.fullmatch(v))
+
 
 def _host_allowed(url: str) -> bool:
     """URL 的 host 是否在更新链白名单内。"""
@@ -56,6 +70,25 @@ def _host_allowed(url: str) -> bool:
     except ValueError:
         return False
     return host in _ALLOWED_UPDATE_HOSTS
+
+
+def _manifest_url_allowed(url: str) -> bool:
+    """manifest 提供的产物/哈希 URL：域名白名单 + 必须落在本仓库路径下。"""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(url)
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower()
+    if host not in _ALLOWED_UPDATE_HOSTS:
+        return False
+    if host == "github.com":
+        return u.path.startswith(_REPO_PATH_PREFIX)
+    if host in ("raw.githubusercontent.com", "raw.gh.1s.fan"):
+        return u.path.startswith(f"/{GITHUB_REPO}/")
+    # objects.githubusercontent.com 的路径由 GitHub 生成（Release 资源重定向），
+    # 攻击者无法往该域上传内容，放行。
+    return True
 
 
 def current_version() -> str:
@@ -107,6 +140,14 @@ def fetch_remote_version() -> dict | None:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 data = json.loads(r.read().decode("utf-8"))
                 if isinstance(data, dict) and data.get("version"):
+                    if not valid_version(data.get("version")):
+                        log.warn("update", f"[check] {base_url} 的 version 字段格式非法，"
+                                           f"已忽略该来源")
+                        continue
+                    if not _manifest_download_urls_ok(data):
+                        log.warn("update", f"[check] {base_url} 的下载/哈希地址不在本仓库"
+                                           f"路径下，已忽略该来源")
+                        continue
                     candidates.append(data)
         except Exception as e:
             # 网络错误全部丢弃会让"无更新"与"检查失败"对前端不可区分
@@ -125,6 +166,17 @@ def _version_tuple(v: str) -> tuple:
     while len(nums) < 3:
         nums.append(0)
     return tuple(nums)
+
+
+def _manifest_download_urls_ok(remote: dict) -> bool:
+    """manifest 声明的产物/哈希地址是否全部落在本仓库路径下。
+
+    代理源（raw.gh.1s.fan）可能被投毒，且 fetch_remote_version 取的是「版本号
+    最大者」——只投毒代理就能压过权威源。这里要求它的下载地址只能指向本仓库
+    releases，投毒最多退化成下载失败（DoS），无法指向攻击者产物。
+    """
+    urls = [remote.get("sha256") or ""] + list((remote.get("assets") or {}).values())
+    return all(_manifest_url_allowed(u) for u in urls if u)
 
 
 def has_update() -> tuple[bool, dict | None, str]:
@@ -157,7 +209,7 @@ def _asset_urls(remote: dict, plat: str) -> list:
     urls = []
     key = "macos_dmg" if plat == "macos" else "windows"
     primary = remote.get("assets", {}).get(key, "")
-    if primary and _host_allowed(primary):
+    if primary and _manifest_url_allowed(primary):
         urls.append(primary)
     fallback = (f"https://github.com/{GITHUB_REPO}/releases/download/"
                 f"v{ver}/{_asset_name(remote, plat)}")
@@ -231,7 +283,7 @@ def _get_asset_sha(remote: dict, platform_key: str) -> str:
     asset_name = _asset_name(remote, platform_key)
     if not sha_url or not asset_name:
         return ""
-    if not _host_allowed(sha_url):
+    if not _manifest_url_allowed(sha_url):
         return ""
     try:
         import urllib.request
@@ -258,6 +310,11 @@ def run_update(remote: dict, progress=None) -> dict:
     ver = remote.get("version", "")
     if not ver:
         return {"ok": False, "message": "远程版本信息缺少 version 字段"}
+    # version 会被拼进文件名 / 安装目标路径 / re.sub 替换模板：非法格式既能让
+    # dest/target 逃出 tmp_dir/app_dir（"../.." 穿越），也会让 re.sub 抛错。
+    if not valid_version(ver):
+        log.warn("update", f"[run] version 字段格式非法，拒绝安装: {ver!r}")
+        return {"ok": False, "message": f"远程版本号格式非法，已拒绝安装: {ver}"}
 
     log.info("update", f"[run] 开始更新: v{current_version()} → v{ver} "
                        f"平台={plat}")
@@ -265,6 +322,8 @@ def run_update(remote: dict, progress=None) -> dict:
     tmp_dir = Path(tempfile.gettempdir()) / "siwx_update"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     dest = tmp_dir / _asset_name(remote, plat)
+    if not validate.within(dest, tmp_dir):
+        return {"ok": False, "message": "产物落地路径越界，已拒绝安装"}
 
     if progress:
         progress(10, f"下载 v{ver}...")
@@ -338,6 +397,10 @@ def _replace_windows_exe(new_exe: Path, ver: str, expected_sha: str = "") -> dic
     running = Path(sys.executable).resolve()
     cur = current_version()
     target = app_dir / _target_exe_name(running.name, cur, ver)
+    # 落点断言：target 只能是 app_dir 下的文件名，绝不允许穿越到别处再 Popen
+    if not validate.within(target, app_dir):
+        log.warn("update", f"[install] 安装目标越界，已拒绝: {target}")
+        return {"ok": False, "message": "安装目标路径越界，已拒绝安装"}
     try:
         if target.resolve() != running:
             # 带版本号命名：新文件是新名字，完全不碰正在运行的旧 exe

@@ -230,10 +230,12 @@ def _decompress(raw: bytes, encoding: str | None) -> bytes:
 
 def fetch(url: str, timeout: float = 15.0, ctx=None) -> tuple[bytes, dict]:
     """下载 URL，返回 (body, headers)。body 已解压。"""
+    # 曾默认关闭 TLS 校验（check_hostname=False + CERT_NONE），生产链路
+    # （/api/sns/media、/api/sns/emoji、贴纸、朋友圈导出）全走这里 —— 中间人
+    # 可替换 CDN 返回的任意字节。create_default_context() 本身就校验证书，
+    # 显式传 ctx 的调用方（诊断脚本）仍可自定。
     if ctx is None:
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         raw = resp.read()

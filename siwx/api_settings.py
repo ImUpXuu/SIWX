@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, request
 
 from siwx import keystore
 from siwx import logger as log
+from siwx import validate
 
 bp = Blueprint("settings_api", __name__, url_prefix="/api/settings")
 
@@ -142,8 +143,15 @@ def clear():
     removed = []
     if kind == "output":
         root = _out_root()
-        targets = ([root / wxid] if wxid
-                   else [d for d in root.iterdir() if d.is_dir()]) if root.is_dir() else []
+        if wxid:
+            # 单账号清除：wxid 是裸请求值，此前 root/wxid 直接 rmtree，可删任意
+            # 绝对路径（"C:/Users/..." 会顶掉 root）。必须先过账号名校验 + 越界检查。
+            target = validate.account_dir(wxid, must_exist=False)
+            if target is None:
+                return jsonify({"error": "wxid 非法"}), 400
+            targets = [target]
+        else:
+            targets = [d for d in root.iterdir() if d.is_dir()] if root.is_dir() else []
         for t in targets:
             if t.exists():
                 shutil.rmtree(t, ignore_errors=True)

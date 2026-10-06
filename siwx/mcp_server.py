@@ -20,7 +20,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from siwx import __version__, logger, paths, sns
+from siwx import __version__, logger, paths, sns, validate
 from siwx.api_chat import (
     _contact_names, _decode_content, build_messages, message_tables_by_shard,
 )
@@ -104,10 +104,21 @@ def _accounts() -> list:
     return out
 
 
-def _session_list(account: str) -> list:
-    acc_dir = paths.out_root() / account
-    if not (acc_dir / "message").is_dir():
+def _acc_dir(account: str) -> Path:
+    """校验账号名并返回其解密产物目录；无效/越界抛 ValueError。
+
+    与 api_sns/api_chat 共用 siwx.validate 的同一条规则（单段名 + resolve()/
+    relative_to 越界兜底）。此前这里只裸拼 paths.out_root() / account，`..`
+    能上跳一级。
+    """
+    p = validate.account_dir(account, must_exist=False)
+    if p is None or not (p / "message").is_dir():
         raise ValueError(f"账号不存在或未解密: {account}")
+    return p
+
+
+def _session_list(account: str) -> list:
+    acc_dir = _acc_dir(account)
     names = _contact_names(acc_dir)
     items = {}
     sdb = acc_dir / "session" / "session.db"
@@ -171,9 +182,7 @@ def tool_get_messages(args) -> str:
     account = args["account"]
     chat = args["chat"]
     limit = min(int(args.get("limit", 100) or 100), 500)
-    acc_dir = paths.out_root() / account
-    if not (acc_dir / "message").is_dir():
-        raise ValueError(f"账号不存在或未解密: {account}")
+    acc_dir = _acc_dir(account)
     msgs = build_messages(acc_dir, chat, account=account)
     page = msgs[-limit:] if len(msgs) > limit else msgs
     slim = [{"ts": m["createTime"], "sender": m["senderDisplayName"],
@@ -189,9 +198,7 @@ def tool_search_messages(args) -> str:
     kw = args["keyword"]
     chat = args.get("chat") or None
     limit = min(int(args.get("limit", 30) or 30), 100)
-    acc_dir = paths.out_root() / account
-    if not (acc_dir / "message").is_dir():
-        raise ValueError(f"账号不存在或未解密: {account}")
+    acc_dir = _acc_dir(account)
     kw_l = kw.lower()
 
     if chat:
@@ -265,9 +272,7 @@ def tool_export_chat(args) -> str:
     account = args["account"]
     chat = args["chat"]
     fmt = args.get("format", "json")
-    acc_dir = paths.out_root() / account
-    if not (acc_dir / "message").is_dir():
-        raise ValueError(f"账号不存在或未解密: {account}")
+    acc_dir = _acc_dir(account)
     res = exporter.run_export(acc_dir, account, chat, "", fmt,
                               want_messages=True,
                               want_media=bool(args.get("media", False)),
@@ -287,20 +292,20 @@ def tool_export_chat(args) -> str:
 # 设计红线（与聊天工具一致）：AI 客户端拿不到 CDN 媒体（MCP 返回纯文本），
 # 所以**所有形状都去掉 URL** —— 长 token 对 AI 只是无意义噪音。
 
-SNS_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
+SNS_ACCOUNT_RE = validate.ACCOUNT_RE
 SNS_KEYWORD_SCAN = 5000     # 关键词搜索最多解析的 XML 条数（实测 0.19ms/条，全库 5684 条约 1s）
 
 
 def _sns_db(account: str) -> Path:
     """校验账号名并返回其 sns.db 路径；无效抛 ValueError。
 
-    与 api_sns._account_dir 同一条正则：account 只作为 output/<account>/
-    的单个路径组件使用，`../..` / `a\\b` 一律拒绝（路径穿越防护）。
+    与 api_sns._account_dir 同一条规则（siwx.validate）：account 只作为
+    output/<account>/ 的单个路径组件，且必须 resolve 后仍落在 out_root 内
+    —— 旧实现只靠正则，而正则允许 ".."，`account=".."` 能上跳一级。
     """
-    if not account or not SNS_ACCOUNT_RE.fullmatch(account):
-        raise ValueError(f"账号名非法: {account!r}")
-    db = paths.out_root() / account / "sns" / "sns.db"
-    if not db.is_file():
+    root = validate.account_dir(account, must_exist=False)
+    db = (root / "sns" / "sns.db") if root else None
+    if not db or not db.is_file():
         raise ValueError(f"账号不存在或没有朋友圈数据库: {account}")
     return db
 
@@ -341,8 +346,11 @@ def _slim_post(feed: dict) -> dict:
     """
     medias = feed.get("medias") or []
     loc = feed.get("location")
+    # tid 字符串化：int64 超出客户端 JSON 数字 2^53 安全范围会丢精度，
+    # 原样传回 get_sns_detail / before_tid 才能命中（服务端 int() 兼容两种写法）。
+    tid = feed.get("tid")
     return {
-        "tid": feed.get("tid"),
+        "tid": str(tid) if tid is not None else None,
         "ts": feed.get("ts"),
         "user_name": feed.get("user_name"),
         "kind": feed.get("content_kind"),
@@ -453,9 +461,9 @@ def tool_get_sns_timeline(args) -> str:
         con.close()
     return _json({
         "account": account, "total": len(rows), "scanned": scanned,
-        "next_before_tid": rows[-1]["tid"] if rows else None,
+        "next_before_tid": str(rows[-1]["tid"]) if rows else None,
         "has_more": len(rows) >= limit,
-        "note": "tid 可作 before_tid 游标加载更早; SQLite 中 tid 为有符号 int64，可能是负数，原样传回即可",
+        "note": "tid 可作 before_tid 游标加载更早; tid 为有符号 int64（可能是负数），已字符串化避免 JSON 精度丢失，原样传回即可",
         "posts": rows,
     })
 
@@ -490,9 +498,10 @@ def tool_get_sns_friends(args) -> str:
     db = _sns_db(account)
     limit = min(int(args.get("limit", 200) or 200), 2000)
     rows = sns.iter_authors(db, limit=limit)
-    # 备注解析失败不影响列表（与 api_sns.friends 一致）
+    # 备注解析失败不影响列表（与 api_sns.friends 一致）；account 已由 _sns_db 校验
     try:
-        names = _contact_names(paths.out_root() / account)
+        acc_dir = validate.account_dir(account, must_exist=False)
+        names = _contact_names(acc_dir)
         for r in rows:
             r["display"] = names.get(r["username"]) or r["username"]
     except Exception as e:  # noqa: BLE001
@@ -582,7 +591,7 @@ TOOLS = [
                      "properties": {
                          "account": {"type": "string", "description": "账号 wxid"},
                          "limit": {"type": "integer", "description": "条数上限，默认 20，最大 100"},
-                         "before_tid": {"type": "integer", "description": "上一页最后一条的 tid，加载更早的动态"},
+                         "before_tid": {"type": ["integer", "string"], "description": "上一页最后一条的 tid（int64 超出 JSON 数字精度，以字符串传回），加载更早的动态"},
                          "keyword": {"type": "string", "description": "关键词（匹配正文/卡片标题/歌手/视频号昵称/位置/媒体描述）"},
                          "username": {"type": "string", "description": "只看某位好友的动态（username 来自 get_sns_friends）"},
                          "start": {"type": "string", "description": "开始时间（unix 秒或 YYYY-MM-DD）"},
@@ -592,7 +601,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["account", "tid"],
                      "properties": {
                          "account": {"type": "string", "description": "账号 wxid"},
-                         "tid": {"type": "integer", "description": "动态 tid，来自 get_sns_timeline"}}}},
+                         "tid": {"type": ["integer", "string"], "description": "动态 tid（int64 超出 JSON 数字精度，以字符串传回），来自 get_sns_timeline"}}}},
     {"name": "get_sns_friends",
      "description": "按发布者聚合朋友圈动态（谁发了多少条，按数量降序，含备注昵称）",
      "inputSchema": {"type": "object", "required": ["account"],
@@ -718,6 +727,10 @@ def run_mcp_server() -> None:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    # 共享的 siwx.logger 默认往 stdout 打日志：任何工具调用只要碰过 logger
+    # （export_chat 每次都碰）就会把非 JSON 字节混进 JSON-RPC 帧，客户端直接报
+    # 解析错误。本该协议通道独占 stdout，日志一律改走 stderr。
+    logger.set_console(sys.stderr)
 
     def _send(obj) -> None:
         sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")

@@ -17,9 +17,10 @@ from siwx import logger as log
 from siwx import paths
 from siwx import sns
 from siwx import sns_cdn
+from siwx import validate
 
 bp = Blueprint("sns_api", __name__, url_prefix="/api/sns")
-_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
+_ACCOUNT_RE = validate.ACCOUNT_RE
 
 # 媒体接口的失败原因要落 logs/siwx.log（「运行日志」页会 tail 该文件）
 _media_log = logging.getLogger("siwx")
@@ -30,17 +31,9 @@ KEYWORD_MAX_SCAN = 5000
 
 
 def _account_dir(account: str) -> Path | None:
-    if not account or not _ACCOUNT_RE.fullmatch(account):
-        return None
-    root = paths.out_root().resolve()
-    p = (root / account).resolve()
-    try:
-        p.relative_to(root)
-    except ValueError:
-        return None
-    if not p.is_dir():
-        return None
-    return p
+    # 规则已抽到 siwx/validate.py：单段名 + resolve()/relative_to 越界兜底。
+    # 此处保留薄封装，兼容既有调用点。
+    return validate.account_dir(account)
 
 
 def _sns_db(account: str) -> Path | None:
@@ -51,6 +44,11 @@ def _sns_db(account: str) -> Path | None:
 
 def _feed_json(feed: dict, include_comments: bool = True) -> dict:
     out = dict(feed)
+    # tid 是 int64（编码毫秒时间戳，近期动态 ~3e18），远超 JS Number 2^53 安全范围；
+    # 以数字输出会被 JSON.parse 丢精度，点详情/翻页游标传回的 tid 已变 → 查不到。
+    # 字符串化后原样传回，后端 int() 解析两种写法都兼容。
+    if out.get("tid") is not None:
+        out["tid"] = str(out["tid"])
     # card 统一走 sns.public_card()（与导出同一份形状），避免前端猜字段名
     out["card"] = sns.public_card(feed.get("card"))
     if not include_comments:
@@ -232,7 +230,7 @@ def timeline():
     # 循环外记三计数（scanned/parsed/skipped），失败明细不逐条打防刷屏
     log.detailed("sns", f"[timeline] account={account} scanned={scanned} "
                         f"parsed={len(rows)} 解析失败={parsed_fail}")
-    next_tid = rows[-1]["tid"] if rows else None
+    next_tid = str(rows[-1]["tid"]) if rows else None
     return jsonify({"timeline": [_feed_json(x) for x in rows], "next_before_tid": next_tid,
                     "has_more": len(rows) >= limit})
 
@@ -282,6 +280,17 @@ def emoji():
         return jsonify({"error": "emoji 参数不是合法 JSON"}), 400
     if not isinstance(spec, dict) or not (spec.get("url") or spec.get("encrypt_url")):
         return jsonify({"error": "emoji 缺少 url"}), 400
+    # url/encrypt_url 来自好友评论的 XML（sns.py 解析后由前端原样回传），是 GET，
+    # 任意联系人就能驱动本机服务去请求任意地址（含 file://、内网探测）。
+    # 与 /media 同一条白名单：非微信 CDN 的字段直接丢弃。
+    spec = dict(spec)
+    for k in ("url", "encrypt_url"):
+        v = spec.get(k) or ""
+        if v and not sns_cdn.is_wechat_cdn(v):
+            _media_log.warning("[sns-emoji] 拒绝非微信 CDN 地址：%s", sns_cdn.safe_url(v))
+            spec[k] = ""
+    if not (spec.get("url") or spec.get("encrypt_url")):
+        return jsonify({"error": "只允许微信 CDN 表情地址", "reason": "not-cdn"}), 400
 
     acc_dir = _account_dir(request.args.get("account", ""))
     cache = (acc_dir / "sns_media" / "emoji") if acc_dir else None
