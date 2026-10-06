@@ -10,7 +10,7 @@
  */
 (function () {
   const PAGES_BUILTIN = ['chat', 'sns', 'stats', 'export', 'mcp', 'logs', 'settings'];
-  const UI_VERSION = '2026100620';
+  const UI_VERSION = '2026100623';
   // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
   const DISCLAIMER_VERSION = '20260925';
 
@@ -92,7 +92,7 @@
         '<div class="acc-foot"><button type="button" data-acc-add>去添加账号</button></div>';
     } else {
       pop.innerHTML = '<div class="acc-pop-head">切换微信号</div>' + accounts.map(a => `
-        <div class="acc-item ${a.wxid === account ? 'on' : ''}" data-acc="${SX.esc(a.wxid)}" role="option" aria-selected="${a.wxid === account}">
+        <div class="acc-item ${a.wxid === account ? 'on' : ''}" data-acc="${SX.esc(a.wxid)}" role="option" tabindex="0" aria-selected="${a.wxid === account}">
           ${accPopAva(a.wxid, (cleanWxid(a.wxid) || '?').slice(0, 1).toUpperCase())}
           <span class="acc-meta"><b>${SX.esc(cleanWxid(a.wxid))}</b><span>${SX.esc(a.wxid)}</span></span>
         </div>`).join('') +
@@ -104,7 +104,12 @@
       img.onerror = () => { img.remove(); };
     });
     pop.querySelectorAll('[data-acc]').forEach(n => {
-      n.addEventListener('click', () => { closeAccPop(); SX.setAccount(n.dataset.acc); });
+      const pick = () => { closeAccPop(); SX.setAccount(n.dataset.acc); };
+      n.addEventListener('click', pick);
+      // 补键盘激活：role=option 但无 tabindex/键盘处理时选项根本不可达
+      n.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); }
+      });
     });
     pop.querySelectorAll('[data-acc-add]').forEach(n => {
       n.addEventListener('click', () => { closeAccPop(); openOnboarding('add'); });
@@ -274,25 +279,15 @@
     }
   }
 
-  /** 不重取模板，直接销毁并重跑当前页 init（账号切换用） */
+  /** 账号切换后重跑当前页。
+   *
+   * 走完整 navigate()：它会 destroy → 重新取模板灌进 view → 重新 import → init。
+   * 旧实现只 destroy 再 init，页面骨架 DOM（#c-msgs、#s-log-level…）和 init 里
+   * 绑的监听器全都留在原地，于是聊天页/设置页监听器双绑——一次点击打两次
+   * POST /api/run、一次确认弹两个框、设置页出现两个下拉。
+   */
   async function reloadPage() {
-    const view = document.getElementById('view');
-    if (!view || !current) { navigate(); return; }
-    const seq = ++navSeq;
-    const name = current.name;
-    const base = pageBase(name);
-    if (current.mod && current.mod.destroy) {
-      try { current.mod.destroy(); } catch (e) { /* 忽略 */ }
-    }
-    current = null;
-    try {
-      const mod = await import(`${base.js}?v=${Date.now()}`);
-      if (seq !== navSeq) return;
-      current = { name, mod };
-      if (mod.init) await mod.init(view);
-    } catch (e) {
-      navigate();                            // 模块坏了就走完整导航兜底
-    }
+    return navigate();
   }
 
   /* ── 插件菜单注入（平级追加在内置之后）──────────────────────── */

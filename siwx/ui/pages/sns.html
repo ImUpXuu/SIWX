@@ -156,6 +156,9 @@
       </div>
       <div class="sns-export-tip">{{ exportScopeText }}</div>
       <span class="sns-export-msg" v-if="exportState === 'running'">导出中… {{ exportProgress }}</span>
+      <span class="sns-export-msg" v-else-if="exportState === 'ok' && exportResult && exportResult.empty">
+        没有符合条件的动态（不生成文件）
+      </span>
       <span class="sns-export-msg" v-else-if="exportState === 'ok' && exportResult">
         ✓ 已导出 {{ exportResult.count }} 条{{ exportExtra }} ·
         <a :href="'/api/sns/export/download?path=' + encodeURIComponent(exportResult.file || '')">下载</a> ·

@@ -478,6 +478,7 @@ const SnsPost = {
 
 let _app = null;
 let _pollTimer = null;
+let _pollFailStreak = 0;      // 导出轮询连续失败计数（后端死亡时退出 running，不再永久"导出中…"）
 let _docClick = null;
 let _keyDown = null;
 let _kwTimer = null;
@@ -758,10 +759,21 @@ const SnsPage = {
     },
     pollExport() {
       if (_pollTimer) clearInterval(_pollTimer);
+      _pollFailStreak = 0;
       _pollTimer = setInterval(async () => {
         let job;
         try { job = await (await fetch('/api/job')).json(); }
-        catch (e) { return; }
+        catch (e) {
+          // 瞬时失败可自愈（跳一拍），但后端持续死亡时必须退出 running：
+          // 否则 exportState 永远停在 'running'，界面永远"导出中…"
+          if (++_pollFailStreak >= 5) {
+            clearInterval(_pollTimer); _pollTimer = null;
+            store.exportState = 'error';
+            store.exportError = '与后端失去联系，请刷新页面后重试';
+          }
+          return;
+        }
+        _pollFailStreak = 0;
         const logs = job.logs || [];
         const last = logs.length ? (logs[logs.length - 1].length >= 4
           ? logs[logs.length - 1][3] : logs[logs.length - 1][1]) : '';

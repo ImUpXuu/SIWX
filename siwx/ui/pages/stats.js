@@ -308,20 +308,23 @@ function startAnimations() {
     if (raw.includes(':')) return;         // 「21:00」这类时间不是数值，滚动会毁成 2,100
     const target = Number(raw.replace(/[^\d.]/g, ''));
     if (!target) return;
-    n.textContent = '0';
+    // 保留单位后缀（如「365 天」的「 天」、百分号）：此前直接置 0 再只写数字，单位被抹掉
+    const unit = (raw.match(/[^\d.,]+/) || [''])[0];
+    n.textContent = '0' + unit;
     animVar(n, 'opacity', '1', '1', 0);
-    countUp(n, target, i * 60, raw.includes('.'));
+    countUp(n, target, i * 60, raw.includes('.'), unit);
   });
 
   flushAnim();
 }
 
-/** 数字滚动动画（带千分位） */
-function countUp(node, target, delay, keepDecimal) {
+/** 数字滚动动画（带千分位；unit 为需要保留的单位后缀） */
+function countUp(node, target, delay, keepDecimal, unit) {
   const dur = 700;
-  const fmt = (v) => keepDecimal
+  const suffix = unit || '';
+  const fmt = (v) => (keepDecimal
     ? v.toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
-    : Math.round(v).toLocaleString('zh-CN');
+    : Math.round(v).toLocaleString('zh-CN')) + suffix;
   setTimeout(() => {
     if (!node.isConnected) return;
     let t0 = null;

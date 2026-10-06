@@ -390,16 +390,24 @@ function renderResult(job) {
   const lines = [];
   if (job.error) {
     lines.push(`<div class="res-row res-err">✗ 导出失败：${esc(job.error)}</div>`);
+    lines.push(`<div class="res-actions"><a class="btn" href="#" data-retry>↻ 重试</a></div>`);
     lines.push(`<details class="res-logs-detail" open><summary>运行日志（${logs.length} 条）</summary>`);
     lines.push(logLines(logs, 'dim'));
     lines.push('</details>');
     box.innerHTML = lines.join('');
+    bindResultActions(box);
     return;
   }
   const r = job.report || {};
   if (!r.sessions) {
+    // 任务完成了却没有 report：多半是后端异常或任务被别的操作打断，重试可直接再来一次
     lines.push(`<div class="res-row res-err">⚠️ 无导出结果</div>`);
+    lines.push(`<div class="res-actions"><a class="btn" href="#" data-retry>↻ 重试</a></div>`);
+    lines.push(`<details class="res-logs-detail" open><summary>运行日志（${logs.length} 条）</summary>`);
+    lines.push(logLines(logs, 'dim'));
+    lines.push('</details>');
     box.innerHTML = lines.join('');
+    bindResultActions(box);
     return;
   }
   const failed = r.sessions.filter(s => s.error);
@@ -436,6 +444,14 @@ function renderResult(job) {
   lines.push(logLines(logs, 'dim'));
   lines.push('</details>');
   box.innerHTML = lines.join('');
+  bindResultActions(box);
+}
+
+/** 结果框里的按钮：重试（失败路径）与打开目录（只读 dataset，避免路径被转义吃掉） */
+function bindResultActions(box) {
+  box.querySelectorAll('[data-retry]').forEach(a => {
+    a.addEventListener('click', (ev) => { ev.preventDefault(); run(); });
+  });
   box.querySelectorAll('[data-open-path]').forEach(a => {
     a.addEventListener('click', (ev) => {
       ev.preventDefault();

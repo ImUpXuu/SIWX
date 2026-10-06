@@ -24,6 +24,14 @@
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
+  function safeUrl(u) {
+    // esc 只防属性越界，不防 scheme：javascript: 是合法 href，点击即执行。
+    // 链接卡 url 来自对端 type-49 appmsg XML → 必须过白名单（与 ui/common.js 同规则）
+    var s = String(u == null ? '' : u).trim();
+    if (!s) return '';
+    if (/^(https?:|\/|\.\/|\.\.\/|#)/i.test(s)) return s;
+    return '';
+  }
   function fmtDate(ts) { var d = new Date(ts*1000); return d.getFullYear()+'年'+(d.getMonth()+1)+'月'+d.getDate()+'日'; }
   function fmtTime(ts) { var d = new Date(ts*1000); var p = function(n){return String(n).padStart(2,'0')}; return p(d.getHours())+':'+p(d.getMinutes()); }
   function fmtFull(ts) { return fmtDate(ts)+' '+fmtTime(ts); }
@@ -220,7 +228,13 @@
       html += '<div class="wx-card-title">'+esc(title)+'</div>';
       var sub2 = (des ? esc(des.substring(0,80)) : '') + (finfo ? (des ? ' · ' : '') + esc(finfo) : '');
       if (sub2) html += '<div class="wx-card-sub">'+sub2+'</div>';
-      if (url) { html += '</div></div>'; return '<a href="'+esc(url)+'" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">'+html+'</a>'; }
+      if (url) {
+        html += '</div></div>';
+        var href = safeUrl(url);
+        // 非白名单 scheme（javascript:/data: 等）退化为纯卡片，不给可点击链接
+        if (href) return '<a href="'+esc(href)+'" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">'+html+'</a>';
+        return html;
+      }
       return html + '</div></div>';
     }
     // 名片：rawContent <nickname>/<province>/<city>/<desc>/<sign>
@@ -409,12 +423,14 @@
     function syncTypeTags() {
       box.querySelectorAll('.type-tag').forEach(function(t) {
         t.classList.toggle('active', t.dataset.type === 'all'
-          ? activeTypes.size === 0 : activeTypes.has(t.dataset.type));
+          ? activeTypes.size === 0 : activeTypes.has(Number(t.dataset.type)));
       });
     }
     box.querySelectorAll('.type-tag').forEach(function(tag) {
       tag.addEventListener('click', function() {
-        var type = this.dataset.type;
+        // activeTypes 存数值，与 m.type（localType 整数）同型；此前存 dataset 字符串
+        // 导致 has(number) 恒假 —— 勾选任一类型后除系统/撤回外全部消息被隐藏。
+        var type = this.dataset.type === 'all' ? 'all' : Number(this.dataset.type);
         if (type === 'all') { activeTypes.clear(); }
         else { activeTypes.has(type) ? activeTypes.delete(type) : activeTypes.add(type); }
         syncTypeTags();

@@ -48,6 +48,7 @@
   /* 任务：POST /api/run + 轮询 /api/job；返回 stop()。 */
   function startJob(body, onLog, onDone) {
     let stop = false;
+    let failStreak = 0;
     (async () => {
       try {
         const r = await fetch('/api/run', {
@@ -61,7 +62,20 @@
         const poll = async () => {
           if (stop) return;
           let job;
-          try { job = await (await fetch('/api/job')).json(); } catch (e) { return; }
+          try {
+            job = await (await fetch('/api/job')).json();
+          } catch (e) {
+            // 后端重启/瞬时网络失败时不能直接 return：续跑的 setTimeout 只在成功
+            // 分支里，一次抖动就会既不再轮询、也永不回调 onDone（按钮永久卡死）。
+            // 抄 export.js 的做法，连续失败到阈值才放弃并明确报错。
+            if (++failStreak >= 5) {
+              onDone && onDone({ error: '与后端失去联系，请刷新页面后重试' });
+              return;
+            }
+            setTimeout(poll, 600);
+            return;
+          }
+          failStreak = 0;
           if (onLog) onLog(job.logs || []);
           if (job.running) {
             setTimeout(poll, 600);

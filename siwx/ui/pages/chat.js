@@ -277,7 +277,8 @@ function sessionRow(s, extra = '') {
   const off = isOfficial(s);
   const selected = currentChat && currentChat.username === s.username;
   return `
-    <div class="sess ${extra} ${selected ? 'sel' : ''}" data-u="${esc(s.username)}">
+    <div class="sess ${extra} ${selected ? 'sel' : ''}" data-u="${esc(s.username)}"
+         tabindex="0" role="button" aria-label="会话 ${esc(s.display)}">
       <div class="ava"><span>${esc(initials)}</span>${avatarImg(s.username)}</div>
       <span class="name">${esc(s.display)}</span>
       <span class="prev">${esc(s.preview || '点击查看详情')}</span>
@@ -297,7 +298,8 @@ function renderSessions(kw) {
     const open = officialOpen || !!kwL;
     const latest = Math.max(...official.map(s => s.last_time || 0));
     lines.push(`
-      <div class="sess sess-group ${open ? 'open' : ''}" data-group="official">
+      <div class="sess sess-group ${open ? 'open' : ''}" data-group="official"
+           tabindex="0" role="button" aria-label="公众号分组，点击${open ? '收起' : '展开'}">
         <div class="ava"><span>公</span></div>
         <span class="name">公众号</span>
         <span class="prev">${official.length} 个公众号会话 · 点击${open ? '收起' : '展开'}</span>
@@ -310,7 +312,7 @@ function renderSessions(kw) {
   el('c-sessions').innerHTML = lines.length ? lines.join('')
     : '<div class="c-empty">没有匹配的会话</div>';
   el('c-sessions').querySelectorAll('.sess').forEach(n => {
-    n.addEventListener('click', () => {
+    const activate = () => {
       if (n.dataset.group === 'official') {
         officialOpen = !officialOpen;
         renderSessions(el('c-search').value);
@@ -318,6 +320,11 @@ function renderSessions(kw) {
       }
       const s = sessions.find(x => x.username === n.dataset.u);
       if (s) openChat(s);
+    };
+    n.addEventListener('click', activate);
+    // 键盘等价：Enter/Space 激活，列表行此前完全不可聚焦、无法用键盘选中
+    n.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
     });
   });
 }
@@ -583,6 +590,22 @@ function messageCopyText(m) {
   return fallback || (m.link && m.link.url) || `[${m.type ?? '消息'}]`;
 }
 
+/** 合并转发（recordinfo）逐条展开的 HTML。子消息时间：服务端形态是
+ *  "YYYY-MM-DD HH:MM" 字符串（item.time），本地形态是 epoch（item.ts）。 */
+function recordHtml(rec) {
+  const items = (rec && rec.items) || [];
+  const rows = items.map(it => {
+    const t = it.time || (it.ts ? fmtTs(it.ts) : '');
+    return `<div class="m-record-item"><span class="rs">${esc(it.sender || '')}</span>` +
+           `<span class="rt-text">${faceText(esc(it.text || ''))}</span>` +
+           (t ? `<span class="rt">${esc(t)}</span>` : '') + `</div>`;
+  }).join('');
+  return `<div class="m-record">` +
+    `<div class="m-record-title">${esc((rec && rec.title) || '聊天记录')}</div>` +
+    `<div class="m-record-items">${rows || '<div class="m-record-item"><span class="rt">子消息详情未包含在数据中</span></div>'}</div>` +
+    `<div class="m-record-count">${(rec && rec.count) || items.length} 条消息</div></div>`;
+}
+
 function bubble(m) {
   if (m.type === 10000 || m.type === 10002) {
     return `<div class="m-row sys" data-key="${esc(msgKey(m))}" data-ts="${m.ts || 0}"><div class="m-bubble">${faceText(esc(m.text))}</div><button class="m-copy">复制</button></div>`;
@@ -616,13 +639,23 @@ function bubble(m) {
     const author = ch.nickname
       ? `<div class="m-finder-author">${ava}视频号 · ${esc(ch.nickname)}${ch.mediaCount > 1 ? ` · ${ch.mediaCount} 个视频` : ''}</div>` : '';
     inner = `<div class="m-finder">${cover}<div class="m-finder-body">${desc}${author}</div></div>`;
+  } else if (m.record) {
+    // 合并转发（appmsg type=19 recordinfo）：与导出 HTML 同口径逐条展开。
+    // 此前只显示单行 [聊天记录] 预览（后端还产了 record 字段没人用）。
+    inner = recordHtml(m.record);
   } else if (m.kind === 'link' && m.link) {
-    const url = m.link.url || '';
-    const full = url.startsWith('http') ? url : 'https://' + url;
+    // 与 common.js/renderer.js 同一白名单：http(s)/相对/锚点原样；裸域名补 https://；
+    // 其余（javascript:、data: 等）丢弃，避免拼接出的伪协议被当可点击链接执行。
+    const raw = (m.link.url || '').trim();
+    const full = /^(https?:|\/|\.\/|\.\.\/|#)/i.test(raw)
+      ? raw
+      : (/^[\w.-]+\.[a-z]{2,}(?::\d+)?(?:[/?#]|$)/i.test(raw) ? 'https://' + raw : '');
     let host = '';
     try { host = new URL(full).hostname; } catch (e) {}
-    inner = `<div class="m-link"><a href="${esc(full)}" target="_blank" rel="noreferrer">${esc(m.link.title)}</a>` +
-            (host ? `<div class="m-link-host">${esc(host)}</div>` : '') + `</div>`;
+    inner = full
+      ? `<div class="m-link"><a href="${esc(full)}" target="_blank" rel="noreferrer">${esc(m.link.title)}</a>` +
+        (host ? `<div class="m-link-host">${esc(host)}</div>` : '') + `</div>`
+      : `<div class="m-link">${esc(m.link.title)}</div>`;
   } else if (m.kind === 'voice') {
     const base = `/api/chat/media/voice?account=${encodeURIComponent(account)}` +
                  `&chat=${encodeURIComponent(currentChat.username)}` +
