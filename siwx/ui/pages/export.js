@@ -105,8 +105,8 @@ async function init() {
   if (!account) {
     el('e-sessions').innerHTML =
       '<div class="e-empty">还没有解密产物<br>' +
-      '<button class="btn btn-primary" id="e-go-guide" type="button">去引导设置</button></div>';
-    el('e-go-guide').addEventListener('click', () => go('#/guide'));
+      '<button class="btn btn-primary" id="e-go-guide" type="button">去添加账号</button></div>';
+    el('e-go-guide').addEventListener('click', () => window.__sxOnboarding?.open('add'));
     return;
   }
 

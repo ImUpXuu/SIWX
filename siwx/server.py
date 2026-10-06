@@ -526,6 +526,12 @@ def widgets_js():
     return send_from_directory(UI_DIR, "widgets.js", mimetype="text/javascript")
 
 
+@app.get("/onboarding.js")
+def onboarding_js():
+    """首启全屏引导向导（壳层组件）：由 app.js 动态 import 调起。"""
+    return send_from_directory(UI_DIR, "onboarding.js", mimetype="text/javascript")
+
+
 @app.get("/pages/<path:filename>")
 def pages(filename: str):
     """模块化页面资源：pages/<name>.html / .js / .css

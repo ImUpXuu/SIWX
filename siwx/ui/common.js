@@ -94,7 +94,6 @@
   function go(hash) { location.hash = hash; }
   function setupDone() { return localStorage.getItem('siwx-setup-done') === '1'; }
   function setSetupDone() { localStorage.setItem('siwx-setup-done', '1'); }
-  function resetSetup() { localStorage.removeItem('siwx-setup-done'); }
 
   /* 图片解密失败占位 → 点击重试（在微信中打开图片下载原图后再点） */
   function imgFallback(img, retrySrc) {
@@ -249,6 +248,6 @@
   function setAccount(wxid, opts) { if (window.__sxAccount) window.__sxAccount.set(wxid, opts); }
 
   window.SX = { esc, timeStr, fmtTs, fmtListTs, fetchJSON, startJob, renderLog, go,
-                setupDone, setSetupDone, resetSetup, imgFallback, openPath,
+                setupDone, setSetupDone, imgFallback, openPath,
                 renderNodes, copyText, toast, getAccount, listAccounts, setAccount };
 })();

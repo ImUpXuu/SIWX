@@ -428,8 +428,8 @@ function syncCustomVisible() {
 async function init() {
   account = getAccount();
   if (!account) {
-    setEmpty(true, '还没有解密产物。<br><br><button class="btn btn-primary" id="st-go-guide" type="button">去引导设置</button>');
-    el('st-go-guide')?.addEventListener('click', () => go('#/guide'));
+    setEmpty(true, '还没有解密产物。<br><br><button class="btn btn-primary" id="st-go-guide" type="button">去添加账号</button>');
+    el('st-go-guide')?.addEventListener('click', () => window.__sxOnboarding?.open('add'));
     return;
   }
 

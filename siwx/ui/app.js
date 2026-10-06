@@ -9,8 +9,8 @@
  * 选中值经 SX.getAccount() 对所有页面可见；切换后当前页面自动重载。
  */
 (function () {
-  const PAGES_BUILTIN = ['guide', 'chat', 'sns', 'stats', 'export', 'mcp', 'logs', 'settings'];
-  const UI_VERSION = '2026100602';
+  const PAGES_BUILTIN = ['chat', 'sns', 'stats', 'export', 'mcp', 'logs', 'settings'];
+  const UI_VERSION = '2026100610';
   // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
   const DISCLAIMER_VERSION = '20260925';
 
@@ -28,7 +28,8 @@
   }
 
   function defaultRoute() {
-    return window.SX.setupDone() ? 'chat' : 'guide';
+    // 首启引导由全屏向导（onboarding.js）承担，不再有引导路由页
+    return 'chat';
   }
 
   function ensureCss(href) {
@@ -75,25 +76,38 @@
               `&username=${encodeURIComponent(account)}`;
   }
 
+  /** 下拉项头像：复用聊天页的头像接口；加载失败时退回首字母占位 */
+  function accPopAva(wxid, initial) {
+    const src = `/api/chat/avatar?account=${encodeURIComponent(wxid)}` +
+                `&username=${encodeURIComponent(wxid)}`;
+    return `<span class="acc-ava"><span>${SX.esc(initial)}</span>` +
+           `<img data-acc-ava src="${src}" alt="" hidden></span>`;
+  }
+
   function renderAccPop() {
     const pop = document.getElementById('acc-pop');
     if (!pop) return;
     if (!accounts.length) {
       pop.innerHTML = '<div class="acc-pop-head">还没有已解密的微信号</div>' +
-        '<div class="acc-foot"><button type="button" data-acc-go="guide">去引导设置</button></div>';
+        '<div class="acc-foot"><button type="button" data-acc-add>去添加账号</button></div>';
     } else {
       pop.innerHTML = '<div class="acc-pop-head">切换微信号</div>' + accounts.map(a => `
         <div class="acc-item ${a.wxid === account ? 'on' : ''}" data-acc="${SX.esc(a.wxid)}" role="option" aria-selected="${a.wxid === account}">
-          <span class="acc-ava"><span>${SX.esc((cleanWxid(a.wxid) || '?').slice(0, 1).toUpperCase())}</span></span>
+          ${accPopAva(a.wxid, (cleanWxid(a.wxid) || '?').slice(0, 1).toUpperCase())}
           <span class="acc-meta"><b>${SX.esc(cleanWxid(a.wxid))}</b><span>${SX.esc(a.wxid)}</span></span>
         </div>`).join('') +
-        '<div class="acc-foot"><button type="button" data-acc-go="guide">＋ 添加账号</button></div>';
+        '<div class="acc-foot"><button type="button" data-acc-add>＋ 添加账号</button></div>';
     }
+    // 头像加载成功才显示（否则保留首字母占位）；编程式监听，兼容 CSP no-unsafe-inline
+    pop.querySelectorAll('img[data-acc-ava]').forEach(img => {
+      img.onload = () => { img.hidden = false; };
+      img.onerror = () => { img.remove(); };
+    });
     pop.querySelectorAll('[data-acc]').forEach(n => {
       n.addEventListener('click', () => { closeAccPop(); SX.setAccount(n.dataset.acc); });
     });
-    pop.querySelectorAll('[data-acc-go]').forEach(n => {
-      n.addEventListener('click', () => { closeAccPop(); SX.resetSetup(); location.hash = '#/guide'; });
+    pop.querySelectorAll('[data-acc-add]').forEach(n => {
+      n.addEventListener('click', () => { closeAccPop(); openOnboarding('add'); });
     });
   }
 
@@ -341,9 +355,53 @@
     }
   }
 
-  /* ── 免责声明门 ───────────────────────────────────────────
-   * 首次启动 / 条款版本更新后先展示全文并要求确认；未确认前冻结全部页面。
-   * 确认状态存 localStorage（siwx-disclaimer-ack = 条款版本号），侧栏可随时重看。 */
+  /* ── 首启引导向导（onboarding.js）────────────────────────
+   * 未完成配置时全屏接管；已配置用户从账号下拉 / 各页空态进入 add 模式。
+   * overlayOpen 与免责声明弹层共用：任一打开期间 navigate() 冻结。 */
+  let onboardingMod = null;
+
+  function openOnboarding(mode) {
+    if (overlayOpen) return;
+    if (mode === 'add' && !SX.setupDone()) mode = 'first';   // 未配置完不允许跳过完整向导
+    overlayOpen = true;
+    (async () => {
+      try {
+        if (!onboardingMod) onboardingMod = await import(`/onboarding.js?v=${UI_VERSION}`);
+        onboardingMod.open({
+          mode,
+          disclaimerVersion: DISCLAIMER_VERSION,
+          closable: SX.setupDone(),
+          onClose: async (res) => {
+            overlayOpen = false;
+            if (res && res.finished) {
+              await loadAccounts();
+              if (res.account && accounts.some(a => a.wxid === res.account)) {
+                setAccount(res.account, { reload: false });
+              }
+              if (currentPageName() !== 'chat') location.hash = '#/chat';
+              else navigate();
+            } else {
+              navigate();          // 关闭向导后刷新当前页（账号列表可能已变化）
+            }
+          },
+        });
+      } catch (e) {
+        overlayOpen = false;
+        const view = document.getElementById('view');
+        if (view) {
+          view.innerHTML = `<div class="card"><h2>引导向导加载失败</h2><p class="dim">${SX.esc(String(e))}</p></div>`;
+        }
+      }
+    })();
+  }
+
+  window.__sxOnboarding = { open: openOnboarding };
+  window.__sxDisclaimer = { open: () => openDisclaimer('review') };
+
+  /* ── 免责声明弹层 ─────────────────────────────────────────
+   * 常驻全文入口在「设置 → 隐私与免责声明」（window.__sxDisclaimer）。
+   * 首启由全屏向导的第 1 步承担；仅当条款版本更新（siwx-disclaimer-ack
+   * 落后于 DISCLAIMER_VERSION）时，对已配置用户再弹一次本声明要求确认。 */
   let overlayOpen = false;
 
   function disclaimerAcked() {
@@ -441,10 +499,7 @@
     localStorage.setItem('siwx-theme', el.dataset.theme);
     syncThemeIcon();
   });
-  document.getElementById('side-disclaimer').addEventListener('click',
-    () => openDisclaimer('review'));
-  const accCardBtn = document.getElementById('acc-card');
-  accCardBtn.addEventListener('click', () => {
+  const accCardBtn = document.getElementById('acc-card');  accCardBtn.addEventListener('click', () => {
     const pop = document.getElementById('acc-pop');
     if (pop && !pop.hidden && pop._close) closeAccPop();
     else openAccPop();
@@ -453,14 +508,16 @@
   sideStatus();
   setInterval(sideStatus, 5000);
 
-  /* 启动顺序：账号 → 插件菜单 → 路由/免责声明门。
-   * 先等账号就绪再导航，页面 init 里才能直接读到 SX.getAccount()。 */
+  /* 启动顺序：账号 → 插件菜单 → 首启向导 / 条款更新确认 / 路由。
+   * 首启（未完成配置）由全屏向导接管；条款版本更新时对老用户补一次声明确认。 */
   loadAccounts().finally(() => {
     loadPluginMenu();
-    if (disclaimerAcked()) {
-      navigate();
-    } else {
+    if (!SX.setupDone()) {
+      openOnboarding('first');
+    } else if (!disclaimerAcked()) {
       openDisclaimer('gate');
+    } else {
+      navigate();
     }
   });
 })();

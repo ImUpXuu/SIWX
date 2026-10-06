@@ -1854,12 +1854,16 @@ class TestDisclaimerSync(unittest.TestCase):
             self.assertIn(phrase, ui, f"应用内免责声明缺少关键条款：{phrase}")
 
     def test_consent_gate_wired_into_shell(self):
+        """免责声明接线：向导第 1 步承担首启确认（含 ack 状态），设置页承担常驻全文入口。"""
         app_js = (ROOT / "siwx" / "ui" / "app.js").read_text(encoding="utf-8")
         self.assertIn("DISCLAIMER_VERSION", app_js, "app.js 缺少免责条款版本常量")
         self.assertIn("siwx-disclaimer-ack", app_js, "app.js 未接入确认状态（localStorage）")
         self.assertIn("/pages/disclaimer.html", app_js, "app.js 未加载免责声明全文")
-        index_html = (ROOT / "siwx" / "ui" / "index.html").read_text(encoding="utf-8")
-        self.assertIn('id="side-disclaimer"', index_html, "侧栏缺少免责声明查看入口")
+        onboarding_js = (ROOT / "siwx" / "ui" / "onboarding.js").read_text(encoding="utf-8")
+        self.assertIn("/pages/disclaimer.html", onboarding_js, "首启向导缺少免责声明步骤")
+        self.assertIn("siwx-disclaimer-ack", onboarding_js, "首启向导未写入声明确认状态")
+        settings_html = (ROOT / "siwx" / "ui" / "pages" / "settings.html").read_text(encoding="utf-8")
+        self.assertIn('id="s-view-disclaimer"', settings_html, "设置页缺少免责声明查看入口")
 
 
 # ── 12. 同秒消息分页游标（create_time + local_id 组合游标）──────────

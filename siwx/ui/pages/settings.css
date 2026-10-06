@@ -44,6 +44,14 @@
 .plg-block textarea.f-input { width: 100%; resize: vertical; font-family: inherit; }
 .plg-block [data-plg-status] { font-size: 12px; }
 
+/* 数据源管理：账号卡与手动路径需要整行空间，压成单列 */
+.s-item.s-item-block { grid-template-columns: 1fr; }
+.s-item.s-item-block > b { margin-bottom: 2px; }
+.s-item.s-item-block .s-inline { justify-content: flex-start; }
+/* 账号行：带「重新提取」按钮，整行排布比 270px 小卡更透气 */
+#s-ds-accounts { grid-template-columns: 1fr; }
+#s-ds-accounts .btn { white-space: nowrap; }
+
 @media (max-width: 760px) {
   .s-item { grid-template-columns: 1fr; }
   .s-item .btn { width: 100%; }

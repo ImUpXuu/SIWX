@@ -35,10 +35,10 @@ function el(id) { return document.getElementById(id); }
 function gone() { return !document.getElementById('chat-wrap'); }
 
 const EMPTY_CTA = '<div class="c-empty">还没有解密产物<br>' +
-  '<button class="btn btn-primary" id="c-go-guide" type="button">去引导设置</button></div>';
+  '<button class="btn btn-primary" id="c-go-guide" type="button">去添加账号</button></div>';
 
 function bindGuideCta() {
-  el('c-go-guide')?.addEventListener('click', () => go('#/guide'));
+  el('c-go-guide')?.addEventListener('click', () => window.__sxOnboarding?.open('add'));
 }
 
 async function init() {

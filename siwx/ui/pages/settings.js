@@ -1,7 +1,7 @@
-/* 设置页 —— 版本与更新 / 缓存总览 / 清除 / 重新运行引导 */
+/* 设置页 —— 版本与更新 / 数据源管理 / 缓存总览 / 清除 / 隐私与免责声明 */
 import { createDropdown } from '/widgets.js?v=2026100601';
 
-const { esc, fetchJSON, go, resetSetup, copyText, toast } = window.SX;
+const { esc, fetchJSON, copyText, toast, startJob, renderLog } = window.SX;
 
 function el(id) { return id ? document.getElementById(id) : null; }
 
@@ -292,6 +292,130 @@ async function loadPluginSettings() {
   });
 }
 
+/* ── 数据源管理：账号列表 / 手动目录 / 重新提取（原引导页的维护能力）── */
+
+let dsRunning = false;
+
+function dsBadge(cached, total) {
+  if (!total) return '<span class="badge badge-none">无数据</span>';
+  if (cached >= total) return `<span class="badge badge-full">缓存 ✓ ${cached}/${total}</span>`;
+  if (cached > 0) return `<span class="badge badge-part">缓存 ${cached}/${total}</span>`;
+  return '<span class="badge badge-none">未提取</span>';
+}
+
+async function loadDatasources() {
+  const box = el('s-ds-accounts');
+  if (!box) return;
+  try {
+    const s = await fetchJSON('/api/status');
+    const accs = s.accounts || [];
+    if (!accs.length) {
+      box.innerHTML = '<div class="empty">未发现数据目录 —— 可用下方「手动添加数据目录」指定</div>';
+      return;
+    }
+    box.innerHTML = accs.map((a, i) => `
+      <div class="acc" data-i="${i}">
+        <div class="avatar">${esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
+        <div class="acc-main"><b>${esc(a.wxid)}</b><span>${a.db_count || '?'} 个数据库</span></div>
+        ${dsBadge(a.keys_cached, a.total_salts)}
+        <button class="btn btn-sm" data-ds-run="${i}">重新提取</button>
+      </div>`).join('');
+    box.querySelectorAll('[data-ds-run]').forEach(btn => {
+      btn.addEventListener('click', () => runExtract(accs[Number(btn.dataset.dsRun)], btn));
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
+  }
+}
+
+async function runExtract(acc, btn) {
+  if (dsRunning || !acc) return;
+  dsRunning = true;
+  const runBox = el('s-ds-run'), bar = el('s-ds-bar'), logBox = el('s-ds-log'), resBox = el('s-ds-result');
+  runBox.hidden = false;
+  bar.style.width = '100%';
+  logBox.innerHTML = '';
+  resBox.innerHTML = '';
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = '提取中…';
+  try {
+    await new Promise(resolve => {
+      startJob({ mode: 'auto', db_dir: acc.db_dir },
+        logs => { if (el('s-ds-log')) renderLog(logBox, logs); },
+        job => {
+          if (job.error) {
+            resBox.innerHTML = `<span class="badge badge-none">提取失败：${esc(job.error)}</span>`;
+            toast('提取失败：' + job.error, true);
+          } else {
+            const accs = (job.report && job.report.accounts) || [];
+            const mine = accs.find(a => a.db_dir === acc.db_dir) || accs[0];
+            if (mine) {
+              const full = mine.verified >= mine.total_salts;
+              const dec = mine.decrypt;
+              resBox.innerHTML =
+                `<span class="badge ${full ? 'badge-full' : 'badge-part'}">密钥 ${mine.verified}/${mine.total_salts}</span>` +
+                (dec ? ` <span class="badge badge-full">解密 ${dec.ok} 库（缓存 ${dec.cached || 0}）</span>` : '');
+            } else {
+              resBox.innerHTML = '<span class="badge badge-full">完成</span>';
+            }
+            toast('提取并解密完成');
+          }
+          resolve();
+        });
+    });
+  } finally {
+    dsRunning = false;
+    bar.style.width = '0';
+    runBox.hidden = true;
+    btn.disabled = false;
+    btn.textContent = oldText;
+    loadDatasources();                     // 刷新缓存徽标
+  }
+}
+
+function bindDsManual() {
+  el('s-ds-manual-toggle').addEventListener('click', () => {
+    el('s-ds-manual-box').classList.toggle('hidden');
+  });
+  el('s-ds-refresh').addEventListener('click', loadDatasources);
+  el('s-ds-manual-add').addEventListener('click', async () => {
+    const input = el('s-ds-manual-path'), msg = el('s-ds-manual-msg'), add = el('s-ds-manual-add');
+    const path = input.value.trim();
+    if (!path) {
+      msg.textContent = '请输入路径';
+      msg.className = 'g-manual-msg err';
+      return;
+    }
+    add.disabled = true;
+    add.textContent = '验证中…';
+    msg.textContent = '';
+    try {
+      const r = await fetch('/api/discover/validate', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        const names = (d.accounts?.length ? d.accounts.map(a => a.wxid) : [d.wxid]).join('、');
+        msg.textContent = `已保存 ${d.accounts?.length || 1} 个账号：${names}`;
+        msg.className = 'g-manual-msg ok';
+        input.value = '';
+        loadDatasources();
+      } else {
+        msg.textContent = d.error;
+        msg.className = 'g-manual-msg err';
+      }
+    } catch (e) {
+      msg.textContent = `验证失败: ${e.message}`;
+      msg.className = 'g-manual-msg err';
+    } finally {
+      add.disabled = false;
+      add.textContent = '验证并保存';
+    }
+  });
+}
+
 function confirmThen(msg, fn) {
   if (window.confirm(msg)) fn();
 }
@@ -331,10 +455,16 @@ export async function init() {
       loadOverview();
     }));
 
-  el('s-rerun-guide').addEventListener('click', () => {
-    resetSetup();
-    go('#/guide');
+  el('s-rerun-wizard').addEventListener('click', () => {
+    window.__sxOnboarding?.open('first');
   });
+
+  el('s-view-disclaimer').addEventListener('click', () => {
+    window.__sxDisclaimer?.open();
+  });
+
+  bindDsManual();
+  loadDatasources();
 
   // ── 日志模式 ──────────────────────────────────────────
   logLevelDrop = createDropdown({

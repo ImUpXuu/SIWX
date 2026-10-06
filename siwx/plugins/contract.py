@@ -598,4 +598,4 @@ def _is_duplicate(target, item) -> bool:
 
 #: 内置 UI 页面名 —— 插件不得占用（前端也应保持内置优先）
 BUILTIN_PAGE_NAMES = frozenset(
-    {"guide", "chat", "export", "mcp", "logs", "settings"})
+    {"chat", "export", "mcp", "logs", "settings"})
