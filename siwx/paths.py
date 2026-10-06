@@ -124,3 +124,11 @@ def out_root() -> Path:
 
 def exports_root() -> Path:
     return _writable_fallback("exports", app_root() / "exports")
+
+
+def templates_root() -> Path:
+    """用户自定义 HTML 导出模板根目录（<SIWX_ROOT>/templates/）。
+
+    跟 exports_root 同思路：跟随 SIWX_ROOT/程序根，用户放这里同名目录
+    即覆盖内置模板；内置包在 siwx/templates/，由 html_template 解析。"""
+    return _writable_fallback("templates", app_root() / "templates")

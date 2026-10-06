@@ -15,8 +15,8 @@ from pathlib import Path
 from siwx import logger
 from siwx.api_chat import (
     SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
-    _sender_map, _fmt, enrich_message_row, message_kind, owner_base,
-    parse_quote_or_link, shards_for,
+    _sender_map, _fmt, enrich_message_row, message_kind,
+    parse_quote_or_link, self_ids_for, shards_for,
 )
 
 # 精简消息字段（去掉 rawContent 重复、去掉前端专用字段）
@@ -28,7 +28,7 @@ _KEEP_FIELDS = ("localId", "createTime", "localType", "typeName",
 BATCH_SIZE = 500
 
 
-def _enrich_row(row, names, my_base, is_group, chat, account):
+def _enrich_row(row, names, my_base, self_ids, is_group, chat, account):
     """把一行原始数据精简为导出用 dict。"""
     local_id, server_id, ltype, ts, origin, rsid, content, packed, smap = row
     text = _decode_content(content)
@@ -50,15 +50,19 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
             sender_wxid = chat
     if is_group and not sender_wxid and origin == 1:
         sender_wxid = my_base
-    is_me = (sender_wxid == my_base or sender_wxid == account
-             or (not is_group and sender_wxid == my_base))
+    is_me = sender_wxid in self_ids
+    # 本人发送者归一到展示用 wxid：设备后缀变体不在联系人表，
+    # 不归一的话导出里的 senderDisplayName/头像落不到本人身上
+    if is_me and sender_wxid != my_base and sender_wxid not in names \
+            and my_base in names:
+        sender_wxid = my_base
     if is_group and not is_me and sender_wxid == chat:
         sender_wxid = ""
 
     t = ltype & 0xFFFF
-    # md5/气泡 md5/语音元数据采集与 49/57 引用分流统一走 api_chat 公共函数
+    # md5/气泡 md5/语音元数据/表情包元数据采集与 49/57 引用分流统一走 api_chat 公共函数
     # （原与 build_messages / messages 两处逐字重复，改判定需三处同步）
-    md5, bubble_md5, voice_meta = enrich_message_row(t, text, packed)
+    md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
 
     if t in (3, 47) and not md5 and not bubble_md5:
         # 审计 §4.2：三级来源全靠 local_id+ts，成功率骤降但此前无日志
@@ -66,7 +70,7 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
                         f"图片无md5可定位 local_id={local_id} ts={ts} localType={t}",
                         ring=False)
 
-    quote, link, record = parse_quote_or_link(t, text)
+    quote, link, record, channels = parse_quote_or_link(t, text)
 
     # 审计 §4.2：只埋"无异常但返回 None"的兜底——引用解析**异常**路径已有
     # api_chat.py:_safe_parse_refer 的日志，勿重复埋点
@@ -99,6 +103,8 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
         "md5": md5,
         "bubbleMd5": bubble_md5,
         "voice": voice_meta,
+        "sticker": sticker,
+        "channels": channels,
         "quote": quote,
         "link": link,
         "record": record,
@@ -137,7 +143,7 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     if names is None:
         names = _contact_names(acc)
-    my_base = owner_base(account)
+    my_base, self_ids = self_ids_for(acc, account)
     is_group = chat.endswith("@chatroom")
 
     # 分片索引：只打开真正含该会话的分片。原先每次调用都要把 message/ 下全部
@@ -183,7 +189,8 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
             continue
         row = (local_id, server_id, ltype, ts, origin, rsid, content, packed,
                smap)
-        yield _enrich_row(row, names, my_base, is_group, chat, account)
+        yield _enrich_row(row, names, my_base, self_ids, is_group, chat,
+                          account)
 
 
 def _shard_iter(cursor, conn, smap):

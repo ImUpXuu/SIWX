@@ -1,0 +1,21 @@
+<div class="card">
+  <h2>📊 统计面板 <span class="dim" style="font-size:13px;font-weight:400">demo_stats 插件</span></h2>
+  <p class="dim">这是一个插件页面示例。它与内置页面一样由宿主加载 HTML / CSS / JS 三个资源。</p>
+
+  <div class="row" style="display:flex;gap:10px;flex-wrap:wrap;margin:16px 0">
+    <button class="btn" id="ds-refresh">刷新</button>
+    <span class="dim" id="ds-when"></span>
+  </div>
+
+  <table class="tbl" id="ds-accounts">
+    <thead>
+      <tr><th>wxid</th><th>数据库数</th><th>已缓存密钥</th></tr>
+    </thead>
+    <tbody><tr><td colspan="3" class="dim">加载中…</td></tr></tbody>
+  </table>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3>插件配置（由宿主设置页写入）</h3>
+  <pre class="dim" id="ds-config" style="margin:0;font-size:12px">读取中…</pre>
+</div>

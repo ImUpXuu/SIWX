@@ -134,6 +134,12 @@ async function init() {
       window.open(img.src + '&hq=1');
       return;
     }
+    const finderImg = ev.target.closest('.m-finder-cover img');
+    if (finderImg) {
+      // 视频号卡片不承诺播放；点击封面看大图是唯一合理的后备操作
+      window.open(finderImg.src, '_blank', 'noopener');
+      return;
+    }
     const row = ev.target.closest('.m-row[data-key]');
     if (!row || !selectionMode) return;
     toggleMessageSelection(row.dataset.key, ev.shiftKey);
@@ -146,6 +152,15 @@ async function init() {
     if (img.dataset.ava !== undefined) {
       avaFailed.add(img.dataset.ava);
       img.remove();
+    } else if (img.dataset.finder !== undefined) {
+      // 视频号封面/头像加载失败（CDN 过期）：隐藏图片保留文字信息
+      img.remove();
+    } else if (img.dataset.sticker !== undefined) {
+      // 动画表情加载失败（CDN 过期/离线）：回退为文字，不显示重试占位
+      const span = document.createElement('span');
+      span.className = 'm-sticker-text';
+      span.textContent = '[动画表情]';
+      img.replaceWith(span);
     } else if (img.dataset.retry) {
       SX.imgFallback(img, img.dataset.retry);
     }
@@ -503,6 +518,21 @@ function bubble(m) {
   } else if (m.kind === 'quote' && m.quote) {
     inner = `<div class="m-quote"><div class="m-quote-n">${esc(m.quote.displayname)}</div>` +
             `<div class="m-quote-t">${esc(m.quote.content)}</div></div>` + esc(m.text);
+  } else if (m.kind === 'channels' && m.channels) {
+    // 视频号卡片：还原客户端可见信息（作者/描述/封面），播放不强求
+    const ch = m.channels;
+    const dur = ch.duration
+      ? `<span class="m-finder-dur">${Math.floor(ch.duration / 60)}:${String(ch.duration % 60).padStart(2, '0')}</span>`
+      : '';
+    const cover = ch.cover
+      ? `<div class="m-finder-cover"><img loading="lazy" src="${esc(ch.cover)}" alt="" data-finder="1"><span class="m-finder-play">▶</span>${dur}</div>`
+      : '';
+    const desc = ch.desc ? `<div class="m-finder-desc">${esc(ch.desc)}</div>` : '';
+    const ava = ch.avatar
+      ? `<img class="m-finder-ava" loading="lazy" src="${esc(ch.avatar)}" alt="" data-finder="1">` : '';
+    const author = ch.nickname
+      ? `<div class="m-finder-author">${ava}视频号 · ${esc(ch.nickname)}${ch.mediaCount > 1 ? ` · ${ch.mediaCount} 个视频` : ''}</div>` : '';
+    inner = `<div class="m-finder">${cover}<div class="m-finder-body">${desc}${author}</div></div>`;
   } else if (m.kind === 'link' && m.link) {
     const url = m.link.url || '';
     const full = url.startsWith('http') ? url : 'https://' + url;
@@ -529,7 +559,17 @@ function bubble(m) {
     // imgFallback 会自行拼缓存穿透参数）；点击查看大图由 click 委托处理
     inner = `<img class="m-img" loading="lazy" src="${src}" alt="图片" data-retry="${esc(src)}">`;
   } else if (m.kind === 'sticker') {
-    inner = '[动画表情]';
+    if (m.sticker && m.sticker.url) {
+      // 动画表情：本地 Emoticon 缓存是微信私有封装解不开，走 CDN 直链
+      // （/media/sticker 内置腾讯域名白名单；加载失败回退 [动画表情] 文案）
+      const ssrc = `/api/chat/media/sticker?account=${encodeURIComponent(account)}` +
+                   `&md5=${encodeURIComponent(m.md5 || '')}` +
+                   `&url=${encodeURIComponent(m.sticker.url)}`;
+      inner = `<img class="m-img m-sticker" loading="lazy" src="${ssrc}"` +
+              ` alt="动画表情" data-sticker="1">`;
+    } else {
+      inner = '[动画表情]';
+    }
   } else {
     inner = esc(m.text);
   }

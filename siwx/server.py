@@ -414,6 +414,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 want_avatars=data.get("avatars", False),
                 export_root=_paths.exports_root(),
                 pack=data.get("pack", "folder"),
+                template=data.get("template"),
                 progress=lambda pct, msg: _log(f"[export] {pct}% {msg}"))
             _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
                  f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"

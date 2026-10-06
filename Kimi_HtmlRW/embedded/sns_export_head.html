@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>朋友圈导出</title>
+<style>
+body{max-width:760px;margin:0 auto;padding:24px 16px;background:#f5f5f5;
+ font:14px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:#111}
+.post{background:#fff;border:1px solid #e5e5e5;border-radius:10px;
+ padding:16px;margin:0 0 14px}
+.head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+.who{font-weight:700}.time{color:#888;font-size:12px}
+.text{white-space:pre-wrap;word-break:break-word}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px}
+.grid img,.grid video{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;background:#eee}
+.act{margin-top:10px;color:#888;font-size:12px}
+.loc{margin-top:6px;color:#576b95;font-size:12px}
+.card{display:flex;gap:10px;margin-top:10px;padding:10px;border:1px solid #e5e5e5;
+ border-radius:8px;background:#fafafa}
+.card-cover{width:96px;height:96px;object-fit:cover;border-radius:6px;background:#eee;flex:none}
+.card-body{min-width:0}
+.card-tag{color:#888;font-size:12px}
+.card-title{font-weight:600;margin-top:2px;word-break:break-word}
+.card-title a{color:#576b95;text-decoration:none}
+.card-sub{color:#888;font-size:12px;margin-top:2px}
+.card-desc{color:#444;font-size:13px;margin-top:4px;white-space:pre-wrap;word-break:break-word}
+.cm-img{max-width:120px;max-height:120px;border-radius:4px;vertical-align:middle;margin-left:4px}
+.cm{margin-top:8px;border-top:1px dashed #e5e5e5;padding-top:8px;font-size:13px}
+.cm b{color:#576b95}
+.cm .e{width:20px;height:20px;vertical-align:-4px;margin-left:2px}
+</style></head><body>

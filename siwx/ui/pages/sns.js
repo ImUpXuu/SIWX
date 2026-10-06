@@ -346,8 +346,11 @@ const SnsPost = {
       };
       lbSync();
     },
-    openCoverVideo(url) {
-      if (url) store.lightbox = { visible: true, src: url, video: true, items: [], index: 0 };
+    /** 视频号封面点击：只看大图。不做播放——实测 CDN 拉回的视频流是加密
+     *  mp4（finderFeed 不带媒体密钥），且落库链接数小时后签名过期（400），
+     *  "点击播放"是兑现不了的承诺（2026-10-06 排查）。 */
+    openCoverImage(url) {
+      if (url) store.lightbox = { visible: true, src: url, video: false, items: [], index: 0 };
     },
     openDetail() {
       store.activeMenuTid = null;
@@ -387,8 +390,8 @@ const SnsPost = {
           <div v-else-if="card.kind === 'finder'" class="sns-card sns-card--finder">
             <img v-if="coverUrl" class="sns-card-cover" loading="lazy" :src="coverUrl"
                  alt="视频号封面"
-                 :title="finderVideoUrl ? '点击播放' : ''"
-                 @click="openCoverVideo(finderVideoUrl)"
+                 title="点击查看封面大图"
+                 @click="openCoverImage(coverUrl)"
                  @error="$event.target.remove()">
             <div class="sns-card-body">
               <div class="sns-card-tag">视频号</div>
@@ -554,6 +557,7 @@ const SnsPage = {
   },
   methods: {
     avaUrl,
+    lbStep,
     preloadMeAvatar() {
       store.meAvaOk = false;
       if (!store.account) return;

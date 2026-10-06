@@ -126,11 +126,48 @@ def _image_sig(data: bytes):
 
 
 # ── wxgf → 图片：调用微信自带的 VoipEngine.dll（wxam_dec_wxam2pic_5） ──
-# DLL 全局单例 + 串行锁：浏览器并发请求下重复 LoadLibrary 会互相踩崩
+# 实测该 DLL 在长驻进程内会随机 access violation（crash.log 2026-10-05 21:51：
+# 两线程同入 DLL，整个服务进程被带走；同一输入在干净进程里必成功）。
+# 因此转码固定在一次性子进程进行：崩溃只死子进程，主服务无感，且可安全重试。
 
-_VOIP_FN = None
-_VOIP_TRIED = False        # 审计 §4.4：失败告警每进程只发一次，否则每张 wxgf 刷一条
-_VOIP_LOCK = threading.Lock()
+_VOIP_DLL_MISSING = False   # 审计 §4.4：DLL 缺失告警每进程只发一次
+
+_WXGF_WORKER = r'''
+import base64, ctypes, os, sys
+
+dll_path = sys.argv[1]
+data = sys.stdin.buffer.read()
+os.add_dll_directory(os.path.dirname(dll_path))
+voip = ctypes.WinDLL(dll_path)
+fn = voip.wxam_dec_wxam2pic_5
+fn.argtypes = [ctypes.c_int64, ctypes.c_int, ctypes.c_int64,
+               ctypes.POINTER(ctypes.c_int), ctypes.c_int64]
+fn.restype = ctypes.c_int64
+
+class _Cfg(ctypes.Structure):
+    _fields_ = [("mode", ctypes.c_int), ("reserved", ctypes.c_int)]
+
+# 只接受转码产物；wxgf→wxgf 无意义（透传正是要消灭的行为）
+_SIGS = (b"\xff\xd8\xff", b"\x89PNG", b"GIF8", b"RIFF")
+max_out = 52 * 1024 * 1024
+for mode in (0, 3):
+    cfg = _Cfg(mode, 0)
+    in_buf = ctypes.create_string_buffer(data, len(data))
+    out_buf = ctypes.create_string_buffer(max_out)
+    out_sz = ctypes.c_int(max_out)
+    try:
+        ret = fn(ctypes.addressof(in_buf), len(data),
+                 ctypes.addressof(out_buf), ctypes.byref(out_sz),
+                 ctypes.addressof(cfg))
+    except Exception:
+        continue
+    if ret == 0 and out_sz.value > 0:
+        cand = out_buf.raw[:out_sz.value]
+        if cand.startswith(_SIGS):
+            sys.stdout.buffer.write(base64.b64encode(cand))
+            sys.exit(0)
+sys.exit(1)
+'''
 
 
 def _find_voip_dll():
@@ -147,79 +184,50 @@ def _find_voip_dll():
     return None
 
 
-def _get_voip_fn():
-    global _VOIP_FN, _VOIP_TRIED
-    if _VOIP_FN is not None:
-        return _VOIP_FN
-    import ctypes
+def convert_wxgf(data: bytes):
+    """wxgf → JPEG/PNG（微信官方解码器，子进程隔离）。失败返回 None。
 
-    dll_path = _find_voip_dll()
-    if not dll_path:
-        if not _VOIP_TRIED:
-            _VOIP_TRIED = True
+    子进程内失败/崩溃自动重试一次（每次都是干净 DLL 状态，重试有意义）。
+    """
+    import base64
+    import subprocess
+    import sys as _sys
+
+    dll = _find_voip_dll()
+    if dll is None:
+        global _VOIP_DLL_MISSING
+        if not _VOIP_DLL_MISSING:
+            _VOIP_DLL_MISSING = True
             try:
                 _media_logger.warn("media", "VoipEngine.dll 未找到，wxgf 将无法转码")
             except Exception:
                 pass
         return None
-    try:
-        if hasattr(os, "add_dll_directory"):
-            os.add_dll_directory(os.path.dirname(dll_path))
-        voip = ctypes.WinDLL(dll_path)
-        fn = voip.wxam_dec_wxam2pic_5
-        fn.argtypes = [ctypes.c_int64, ctypes.c_int, ctypes.c_int64,
-                       ctypes.POINTER(ctypes.c_int), ctypes.c_int64]
-        fn.restype = ctypes.c_int64
-        _VOIP_FN = fn
-    except Exception as e:
-        if not _VOIP_TRIED:
-            _VOIP_TRIED = True
+    for attempt in (1, 2):
+        try:
+            proc = subprocess.run(
+                [_sys.executable, "-c", _WXGF_WORKER, str(dll)],
+                input=data, capture_output=True, timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.TimeoutExpired) as e:
             try:
-                _media_logger.warn("media",
-                                   f"VoipEngine.dll 加载失败，wxgf 将无法转码: {e}")
+                _media_logger.detailed("media",
+                                       f"wxgf 转码子进程异常: {type(e).__name__}")
             except Exception:
                 pass
-        return None
-    return _VOIP_FN
-
-
-def convert_wxgf(data: bytes):
-    """wxgf → JPEG/PNG（微信官方解码器）。失败返回 None。"""
-    import ctypes
-
-    fn = _get_voip_fn()
-    if fn is None:
-        return None
-
-    class _WxAMConfig(ctypes.Structure):
-        _fields_ = [("mode", ctypes.c_int), ("reserved", ctypes.c_int)]
-
-    max_out = 52 * 1024 * 1024
-    with _VOIP_LOCK:
-        for mode in (0, 3):
-            cfg = _WxAMConfig(mode, 0)
-            in_buf = ctypes.create_string_buffer(data, len(data))
-            out_buf = ctypes.create_string_buffer(max_out)
-            out_sz = ctypes.c_int(max_out)
+            continue
+        if proc.returncode == 0 and proc.stdout:
             try:
-                ret = fn(ctypes.addressof(in_buf), len(data),
-                         ctypes.addressof(out_buf), ctypes.byref(out_sz),
-                         ctypes.addressof(cfg))
-            except Exception as e:
-                try:
-                    _media_logger.detailed("media",
-                                           f"wxgf转码调用异常: {type(e).__name__}: {e}")
-                except Exception:
-                    pass
-                return None
-            if ret == 0 and out_sz.value > 0:
-                out = out_buf.raw[: out_sz.value]
-                if _image_sig(out)[0]:
-                    return out
-    try:
-        _media_logger.detailed("media", f"wxgf转码失败（全部 mode 无有效输出）{len(data)}B")
-    except Exception:
-        pass
+                return base64.b64decode(proc.stdout) or None
+            except Exception:
+                pass
+        try:
+            _media_logger.detailed(
+                "media",
+                f"wxgf 转码失败(第{attempt}次) rc={proc.returncode} "
+                f"{len(data)}B stderr={proc.stderr[:120]!r}", ring=False)
+        except Exception:
+            pass
     return None
 
 
@@ -416,13 +424,38 @@ def attach_paths(wxid_full: str, chat: str, xml_md5: str):
 # ── 主入口 ──────────────────────────────────────────────────────────
 
 def _finalize(body: bytes, ext: str, ctype: str):
-    """wxgf 统一转码为浏览器可显示格式。"""
+    """wxgf 统一转码为浏览器可显示格式；转不出来返回 None。
+
+    旧实现把转码失败的原始 wxgf 字节透传（200 + image/wxgf），浏览器解码
+    失败被前端误判为"原图未下载"，且坏结果进了缓存导致重试永远失败 ——
+    现在失败统一返回 None，由调用方落到下一级候选或按失败处理。
+    """
     if ext == "wxgf":
         converted = convert_wxgf(body)
-        if converted:
-            ext, ctype = _image_sig(converted) or ("gif", "image/gif")
-            body = converted
+        if not converted:
+            return None
+        ext, ctype = _image_sig(converted) or (None, None)
+        if ext is None:
+            return None
+        body = converted
     return body, ext, ctype
+
+
+def _plausible_image(body: bytes) -> bool:
+    """解密产物完整性快检：头部签名已验，补尾部特征。
+
+    拦掉半截下载或解密错尾的坏文件（实测例：白熊图 _h.dat 头部 JPEG 完好、
+    尾部缺失，浏览器无法解码）。尾部窗口放宽到 64B：VoipEngine 转码产物
+    会在 FFD9 后附一小段填充（实测 26B），不能按"绝对末尾"判。wxgf 不做
+    强校验，由转码环节把关。
+    """
+    if body.startswith(b"\xff\xd8\xff"):
+        return body.rfind(b"\xff\xd9") >= len(body) - 64
+    if body.startswith(b"\x89PNG"):
+        return b"IEND" in body[-64:]
+    if body.startswith(b"GIF8"):
+        return b"\x3b" in body[-8:]
+    return True
 
 
 def _decrypt_any(data: bytes, wxid: str):
@@ -466,7 +499,12 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
     label = f"{(chat or '')[:12]}… local_id={local_id} md5={(md5 or '')[:8]}… bm={(bubble_md5 or '')[:8]}…"
 
     def _emit(body: bytes, ext: str):
-        body, ext, ctype = _finalize(body, ext, f"image/{ext}")
+        """转码 + 缓存。转码失败返回 (None, None)，调用方落到下一级候选；
+        失败结果绝不进缓存（旧实现缓存坏 wxgf 导致重试永远失败）。"""
+        fin = _finalize(body, ext, f"image/{ext}")
+        if fin is None:
+            return None, None
+        body, _ext, ctype = fin
         with _IMG_CACHE_LOCK:
             _IMG_CACHE[cache_key] = (body, ctype)
             if len(_IMG_CACHE) > _IMG_CACHE_MAX:
@@ -486,9 +524,17 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                 continue
             data = path.read_bytes()
             body, ctype = _decrypt_any(data, wxid)
+            if body and not _plausible_image(body):
+                event(f"attach 产物不完整，跳过({path.name[:24]}): {label} ({len(body)}B)")
+                last_err = "解密产物不完整"
+                continue
             if body:
                 event(f"图片attach命中({path.name[:24]}): {label} ({len(body)}B)")
-                return _emit(body, ctype.split("/")[1])
+                r = _emit(body, ctype.split("/")[1])
+                if r[0] is not None:
+                    return r
+                last_err = "wxgf 转码失败"
+                continue
             last_err = "attach 解密失败"
 
     # ① hardlink 原图
@@ -502,15 +548,25 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
             if head == V2_MAGIC:
                 for aes_key, xor_key in candidate_keys(wxid):
                     body, ctype = decrypt_v2_body(data, aes_key, xor_key)
+                    if body and not _plausible_image(body):
+                        event(f"hardlink 产物不完整，跳过: {label} ({len(body)}B)")
+                        last_err = "解密产物不完整"
+                        continue
                     if body:
                         _remember_key(wxid, aes_key, xor_key)
                         event(f"图片原图命中 hardlink: {label} ({len(body)}B, {ctype})")
-                        return _emit(body, ctype.split("/")[1])
+                        r = _emit(body, ctype.split("/")[1])
+                        if r[0] is not None:
+                            return r
+                        last_err = "wxgf 转码失败"
+                        continue
                 last_err = "V2 密钥未命中（请确认微信已登录过该账号）"
             elif head == V1_MAGIC:
                 body, ctype = decrypt_v2_body(data, V1_FIXED_KEY, DEFAULT_XOR)
-                if body:
-                    return _emit(body, ctype.split("/")[1])
+                if body and _plausible_image(body):
+                    r = _emit(body, ctype.split("/")[1])
+                    if r[0] is not None:
+                        return r
                 last_err = "V1 解密失败"
             else:
                 # V0：单字节 XOR 自动检测（按已知图像首字节推导）
@@ -518,8 +574,10 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                     xk = data[0] ^ known[0]
                     body = data.translate(_xor_table(xk))
                     ext2, _ct = _image_sig(body)
-                    if ext2:
-                        return _emit(body, ext2)
+                    if ext2 and _plausible_image(body):
+                        r = _emit(body, ext2)
+                        if r[0] is not None:
+                            return r
                 last_err = "未知格式"
 
     # ② Bubble 气泡缓存（packed_info 的 md5 精确映射 + local_id 定位）
@@ -534,16 +592,26 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
             if head == V2_MAGIC:
                 for aes_key, xor_key in candidate_keys(wxid):
                     body, ctype = decrypt_v2_body(data, aes_key, xor_key)
+                    if body and not _plausible_image(body):
+                        event(f"气泡产物不完整，跳过: {label} ({len(body)}B)")
+                        last_err = "解密产物不完整"
+                        continue
                     if body:
                         _remember_key(wxid, aes_key, xor_key)
                         event(f"图片气泡命中: {label} ← {f.name[:20]}… ({len(body)}B)")
-                        return _emit(body, ctype.split("/")[1])
+                        r = _emit(body, ctype.split("/")[1])
+                        if r[0] is not None:
+                            return r
+                        last_err = "wxgf 转码失败"
+                        continue
                 last_err = "Bubble V2 密钥未命中"
             else:
                 ext, ctype = _image_sig(data)
-                if ext:
+                if ext and _plausible_image(data):
                     event(f"图片气泡命中(明文): {label} ← {f.name[:20]}…")
-                    return _emit(data, ext)
+                    r = _emit(data, ext)
+                    if r[0] is not None:
+                        return r
                 last_err = "Bubble 未知格式"
 
     # ③ Thumb 明文缩略图
@@ -554,9 +622,11 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
         for f in thumbs:
             data = f.read_bytes()
             ext, ctype = _image_sig(data)
-            if ext:
+            if ext and _plausible_image(data):
                 event(f"缩略图命中: {label} ← {f.name[:20]}…")
-                return _emit(data, ext)
+                r = _emit(data, ext)
+                if r[0] is not None:
+                    return r
         last_err = "本地无原图/气泡/缩略图"
     return None, last_err
 

@@ -443,6 +443,23 @@ def media():
     acc_dir = _account_dir(account)
     if acc_dir:
         cache = acc_dir / "sns_media"
+    # 磁盘缓存命中的**视频**直接 send_file：conditional=True 走 Flask/Werkzeug
+    # 的 Range/206，实况照片/小视频在灯箱里拖动进度条不必整段重拉。
+    # 旧实现一律整文件读进内存 + 200 全量返回，<video> 只能全量缓冲——
+    # 用户实测"实况照片有概率卡"（首次打开等 CDN 全量下载，拖动重下）。
+    # 图片不走这条：缓存的是未 strip 微信尾部的原始字节，需按结果处理。
+    if cache is not None and cache.is_dir():
+        stem = sns_cdn.cache_key(url)
+        for p in cache.glob(f"{stem}.*"):
+            if p.suffix == ".part":
+                continue
+            if p.suffix.lower() in (".mp4", ".mov", ".webm"):
+                from flask import send_file
+                resp = send_file(p, mimetype="video/mp4", conditional=True)
+                resp.headers["X-SIWX-SNS-Cached"] = "1"
+                resp.headers["Cache-Control"] = "private, max-age=86400"
+                return resp
+            break
     result = sns_cdn.fetch_media(url, key=key, token=token, cache_dir=cache)
     if not result["ok"]:
         # 失败原因由 sns_cdn 落 logs/siwx.log（含 reason / 试了几个域名 / HTTP 码）

@@ -1,0 +1,55 @@
+<div class="chat-wrap" id="chat-wrap">
+  <aside class="c-list">
+    <div class="c-top">
+      <div class="c-toolbar">
+        <input id="c-search" placeholder="搜索会话…" aria-label="搜索会话">
+        <button id="c-refresh" title="增量同步" aria-label="增量同步">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="c-sessions"></div>
+  </aside>
+
+  <section class="c-main">
+    <div class="c-head">
+      <button id="c-back" aria-label="返回会话列表">←</button>
+      <div class="c-titlebox">
+        <b id="c-title">微信</b>
+        <span id="c-sub">选择一个会话查看聊天记录</span>
+      </div>
+      <div class="c-actions">
+        <button id="c-select" class="c-action" disabled>选择</button>
+        <button id="c-copy-selected" class="c-action hidden">复制所选</button>
+        <button id="c-cancel-select" class="c-action hidden">取消</button>
+        <button id="c-stats" class="c-action" disabled>统计</button>
+        <button id="c-export" class="c-action c-action-primary">导出</button>
+      </div>
+    </div>
+
+    <div class="c-body">
+      <div id="c-msgs">
+        <div class="c-tip">选择一个会话查看聊天记录</div>
+      </div>
+      <aside class="c-timeline" id="c-timeline">
+        <button class="tl-trigger" id="c-timeline-trigger" type="button" title="按时间跳转" aria-label="打开时间轴">时间</button>
+        <div class="tl-panel">
+          <div class="tl-head"><b>聊天时间轴</b><span>悬停或点击月份展开</span></div>
+          <div id="c-timeline-list" class="tl-list">
+            <div class="tl-empty">打开会话后可按月份跳转</div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </section>
+</div>
+
+<div class="c-modal hidden" id="c-stats-modal" role="dialog" aria-modal="true" aria-labelledby="c-stats-title">
+  <div class="c-modal-card">
+    <div class="c-modal-head">
+      <b id="c-stats-title">会话统计</b>
+      <button id="c-stats-close" class="c-icon-btn" aria-label="关闭">×</button>
+    </div>
+    <div id="c-stats-body" class="c-stats-body"></div>
+  </div>
+</div>

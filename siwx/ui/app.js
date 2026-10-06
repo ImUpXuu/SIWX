@@ -10,7 +10,7 @@
  */
 (function () {
   const PAGES_BUILTIN = ['guide', 'chat', 'sns', 'stats', 'export', 'mcp', 'logs', 'settings'];
-  const UI_VERSION = '2026100601';
+  const UI_VERSION = '2026100602';
   // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
   const DISCLAIMER_VERSION = '20260925';
 
@@ -427,8 +427,12 @@
 
   initTheme();
   const themeBtn = document.getElementById('side-theme');
+  const svg = (inner) =>
+    `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+  const ICON_MOON = svg('<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>');
+  const ICON_SUN = svg('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/>');
   const syncThemeIcon = () => {
-    themeBtn.textContent = document.documentElement.dataset.theme === 'dark' ? '☀' : '☾';
+    themeBtn.innerHTML = document.documentElement.dataset.theme === 'dark' ? ICON_SUN : ICON_MOON;
   };
   syncThemeIcon();
   themeBtn.addEventListener('click', () => {

@@ -358,6 +358,13 @@ def _parse_card(co, to) -> dict | None:
             card["description"] = texts[0]
         return card
 
+    # ── 小视频（Sight，type 15）：内容就是 mediaList 里那条视频，
+    # 卡片只是「微信小视频 + 升级页」占位（实测 61/61，title 有两种写法）。
+    # 渲染成外链卡只会把用户引到"请升级微信"死胡同，还会把视频流 URL
+    # 误当 cover_url；视频本身已在媒体网格里播放（密钥在 <enc key>）。
+    if title in ("微信小视频", "Weixin Sight") and "common_page__upgrade" in curl:
+        return None
+
     # ── 普通外链（type 3 链接 / type 5 外部直播等）─────────────────
     if title or desc or curl:
         card["kind"] = "link"

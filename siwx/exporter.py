@@ -402,11 +402,12 @@ class _ExportStats:
 
 
 def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
-               fmt: str, start_ts=None, end_ts=None,
+               fmt: "str | list[str]", start_ts=None, end_ts=None,
                want_messages=True, want_media=True, want_voice=False,
                want_avatars=True,
                export_root: Path = None, pack: str = "zip",
                folder_name: str = None,
+               template: str | None = None,
                progress=lambda pct, msg: None) -> dict:
     t0 = time.time()
     progress(1, f"开始导出: 账号={account}, 会话={chat}, 格式={fmt}")
@@ -486,59 +487,73 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             f"媒体完成 img={stats_media}/{img_total} "
             f"voice={stats_voice}/{voice_total}")
 
-    # ── 第二遍：流式写出 ─────────────────────────────────
-    progress(75, "写入文件…")
+    # ── 第二遍：流式写出（fmt 可传列表，一次写出多种格式）──
+    # 扫描/头像/媒体只做一次；每种格式各自重放 message_stream（DB 重查
+    # 毫秒级）并各自计数，避免 manifest 的解析统计被乘以格式数。
+    fmts = [str(f).lower() for f in fmt] if isinstance(fmt, (list, tuple)) \
+        else [str(fmt).lower()]
     fname = f"{safe}_{stamp}"
-    fmt = fmt.lower()
-    plugin_writer = _plugin_export_format(fmt)
-    ext = {"json": "json", "html": "html", "txt": "txt", "csv": "csv",
-           "markdown": "md", "toml": "toml", "sqlite": "db",
-           "xlsx": "xlsx"}.get(fmt)
-    if ext is None:
-        # 插件格式：用插件声明的 ext，兜底回退 fmt 本身
-        ext = (plugin_writer.ext if plugin_writer is not None else None) or fmt
-    out_file = export_dir / f"{fname}.{ext}"
-    stats = _ExportStats()
+    files: list[str] = []
+    written_total = 0
+    stats_manifest = None
+    for fi, one_fmt in enumerate(fmts):
+        progress(75 + int(fi * 12 / len(fmts)),
+                 f"写入文件（{one_fmt}，{fi + 1}/{len(fmts)}）…")
+        plugin_writer = _plugin_export_format(one_fmt)
+        ext = {"json": "json", "html": "html", "txt": "txt", "csv": "csv",
+               "markdown": "md", "toml": "toml", "sqlite": "db",
+               "xlsx": "xlsx"}.get(one_fmt)
+        if ext is None:
+            # 插件格式：用插件声明的 ext，兜底回退 fmt 本身
+            ext = (plugin_writer.ext if plugin_writer is not None else None) or one_fmt
+        out_file = export_dir / f"{fname}.{ext}"
+        stats = _ExportStats()
+        if stats_manifest is None:
+            stats_manifest = stats
 
-    def export_stream_with_media():
-        for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
-            _attach_media(msg, media_map)
-            stats.observe(msg)
-            yield msg
+        def export_stream_with_media(_stats=stats):
+            for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
+                _attach_media(msg, media_map)
+                _stats.observe(msg)
+                yield msg
 
-    # ── 传入缓存的 names，避免重复加载 ───────────────────
-    if plugin_writer is not None:
-        written = _run_plugin_writer(plugin_writer, out_file, session,
-                                     export_stream_with_media(), media_map, progress,
-                                     acc_out_dir, chat, start_ts, end_ts, account, names)
-    elif fmt == "json":
-        written = stream_export_json(out_file, session, export_stream_with_media(), progress)
-    elif fmt == "html":
-        written = _write_html_streaming(out_file, acc_out_dir, chat, start_ts,
-                                        end_ts, account, names, media_map,
-                                        avatar_map, progress, display, stats,
-                                        session=session, senders=senders)
-    elif fmt == "txt":
-        written = stream_export_txt(out_file, session, export_stream_with_media(), progress)
-    elif fmt == "csv":
-        written = stream_export_csv(out_file, export_stream_with_media(), progress)
-    elif fmt == "markdown":
-        written = stream_export_md(out_file, session, export_stream_with_media(), progress)
-    elif fmt in ("toml", "sqlite", "xlsx"):
-        # 这些格式需要全量数据 → 降级为流式分批（每批 500 条）
-        written = _write_batch(out_file, fmt, session,
-                               acc_out_dir, chat, start_ts, end_ts, account, names, media_map, progress,
-                               stats=stats)
-    else:
-        raise ValueError(f"未知格式: {fmt}")
-
-    progress(88, f"写入完成: {written} 条")
-    logger.detailed("export",
-                    f"{logger.job_prefix()}写出完成 written={written} collected={count}")
-    if count and written != count:
-        logger.warn("export",
-                    f"[export] 条数对账不一致: 采集 {count} 条 vs 实际写出 "
-                    f"{written} 条（可能有分片读取失败、消息缺失，详见上方日志）")
+        # ── 传入缓存的 names，避免重复加载 ───────────────────
+        if plugin_writer is not None:
+            written = _run_plugin_writer(plugin_writer, out_file, session,
+                                         export_stream_with_media(), media_map, progress,
+                                         acc_out_dir, chat, start_ts, end_ts, account, names)
+        elif one_fmt == "json":
+            written = stream_export_json(out_file, session, export_stream_with_media(), progress)
+        elif one_fmt == "html":
+            written = _write_html_streaming(out_file, acc_out_dir, chat, start_ts,
+                                            end_ts, account, names, media_map,
+                                            avatar_map, progress, display, stats,
+                                            session=session, senders=senders,
+                                            template=template)
+        elif one_fmt == "txt":
+            written = stream_export_txt(out_file, session, export_stream_with_media(), progress)
+        elif one_fmt == "csv":
+            written = stream_export_csv(out_file, export_stream_with_media(), progress)
+        elif one_fmt == "markdown":
+            written = stream_export_md(out_file, session, export_stream_with_media(), progress)
+        elif one_fmt in ("toml", "sqlite", "xlsx"):
+            # 这些格式需要全量数据 → 降级为流式分批（每批 500 条）
+            written = _write_batch(out_file, one_fmt, session,
+                                   acc_out_dir, chat, start_ts, end_ts, account, names, media_map, progress,
+                                   stats=stats)
+        else:
+            raise ValueError(f"未知格式: {one_fmt}")
+        files.append(str(out_file))
+        written_total += written
+        progress(87, f"写入完成（{one_fmt}）: {written} 条")
+        logger.detailed("export",
+                        f"{logger.job_prefix()}写出完成 fmt={one_fmt} "
+                        f"written={written} collected={count}")
+        if count and written != count:
+            logger.warn("export",
+                        f"[export] 条数对账不一致 (fmt={one_fmt}): 采集 {count} 条 vs 实际写出 "
+                        f"{written} 条（可能有分片读取失败、消息缺失，详见上方日志）")
+    written = written_total
 
     # ── 导出完整性清单（审计 G2）──────────────────────────
     # 各类型解析成功/兜底计数、媒体失败分布随导出落盘，用户能直接看到
@@ -548,7 +563,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "chat": chat, "display": display,
         "collected_count": count, "written_count": written,
-        "parse": stats.to_dict(),
+        "files": files,
+        "parse": stats_manifest.to_dict(),
         "media": {
             # 口径修正（P3）：未请求图片时 requested 应为 0，而非实际采集数
             "images_requested": len(images) if want_media else 0,
@@ -563,11 +579,11 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             json.dumps(export_manifest, ensure_ascii=False, indent=1),
             encoding="utf-8")
         logger.info("export",
-                    f"[export] manifest.json 已生成: 引用解析 {stats.quote_ok}"
-                    f"{'/失败 ' + str(stats.quote_fail) if stats.quote_fail else ''}, "
-                    f"链接 {stats.link_ok}, 合并转发 {stats.record_count}"
-                    f"（{stats.record_items} 条子消息）, 兜底文案 {stats.fallback_labels}")
-        logger.detailed("export", f"type_counts={stats.type_counts}")
+                    f"[export] manifest.json 已生成: 引用解析 {stats_manifest.quote_ok}"
+                    f"{'/失败 ' + str(stats_manifest.quote_fail) if stats_manifest.quote_fail else ''}, "
+                    f"链接 {stats_manifest.link_ok}, 合并转发 {stats_manifest.record_count}"
+                    f"（{stats_manifest.record_items} 条子消息）, 兜底文案 {stats_manifest.fallback_labels}")
+        logger.detailed("export", f"type_counts={stats_manifest.type_counts}")
     except OSError as e:
         logger.warn("export", f"[export] manifest.json 写入失败: {e}")
 
@@ -576,7 +592,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     # after_zip 阶段只剩 zip 文件本身可操作。
     export_result = {
         "export_dir": str(export_dir),
-        "file": str(out_file),
+        "file": files[0] if files else None,
+        "files": list(files),
         "format": fmt, "pack": pack,
         "message_count": written,
     }
@@ -588,17 +605,20 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
     # ── 打包 ─────────────────────────────────────────────
     zip_path = None
-    file_path = str(out_file)
+    file_path = files[0] if files else None
+    files_out = list(files)
     if pack == "zip":
         progress(92, "打包 zip…")
-        zip_path = shutil.make_archive(str(root / f"{fname}_{fmt}"), "zip",
+        zip_path = shutil.make_archive(str(root / f"{fname}_{'_'.join(fmts)}"), "zip",
                                        root_dir=export_dir)
         shutil.rmtree(export_dir, ignore_errors=True)
         # 目录已删，file 若仍指向目录内路径就是死链：「每会话一个 ZIP」
         # （pack="each" → 每会话 run_export(pack="zip")）模式下前端拿它
         # 渲染"下载文件"链接，点击必然 404。置空，前端对空值不渲染链接。
         file_path = None
+        files_out = []
         export_result["file"] = None
+        export_result["files"] = []
         # ── 插件：导出后处理（after_zip）───────────────────
         # 此时 export_dir 已被删除，只提供 zip 路径。
         _run_after_export("after_zip", {
@@ -612,6 +632,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "export_dir": str(root) if pack == "zip" else str(export_dir),
         "zip": zip_path,
         "file": file_path,
+        "files": files_out,
         "format": fmt, "pack": pack,
         "message_count": written, "media_count": stats_media + stats_voice,
         "image_count": stats_media, "voice_count": stats_voice,
@@ -693,7 +714,8 @@ def _run_after_export(when: str, ctx: dict) -> None:
 
 def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                           names, media_map, avatar_map, progress=None,
-                          display=None, stats=None, session=None, senders=None):
+                          display=None, stats=None, session=None, senders=None,
+                          template=None):
     """HTML 真流式导出（P1 修复）：消息边读边写文件句柄，内存 O(1)。
 
     旧实现把全部消息 accumulate 进 lines 再一次性 render_html——3 万条
@@ -705,6 +727,7 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
     from siwx.html_template import (
         stream_html_head, stream_html_msg, stream_html_tail,
     )
+    from siwx import wx_faces, wx_maps
     if session is None:
         session = {"wxid": chat,
                    "displayName": display or names.get(chat, chat) or chat,
@@ -717,13 +740,17 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
 
     count = 0
     truncated = 0      # P3：html_template._msg_entry 对 rawContent 截 8000 字
+    faces_used: set = set()
+    map_keys: set = set()
     with open(path, "w", encoding="utf-8") as f:
-        stream_html_head(f, session, members, avatar_map)
+        stream_html_head(f, session, members, avatar_map, template=template)
         for msg in message_stream(acc_dir, chat, start_ts, end_ts, account,
                                   names):
             _attach_media(msg, media_map)
             if stats:
                 stats.observe(msg)
+            faces_used |= wx_faces.used_from_message(msg)
+            map_keys |= wx_maps.used_from_message(msg)
             if len(msg.get("rawContent") or "") > 8000:
                 truncated += 1
             stream_html_msg(f, msg, first=(count == 0))
@@ -732,7 +759,10 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                 f.flush()
                 if progress:
                     progress(0, f"已写出 {count} 条…")
-        stream_html_tail(f, count, session["displayName"])
+        stream_html_tail(f, count, session["displayName"],
+                         faces=wx_faces.datauris(faces_used),
+                         maps=wx_maps.datauris(map_keys),
+                         template=template)
     if truncated:
         logger.detailed("html",
                         f"HTML rawContent截断(>8000字) {truncated}/{count} 条",
@@ -871,11 +901,13 @@ def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, med
     return count
 
 
-def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "json",
+def run_export_multi(acc_out_dir: Path, account: str, chats: list,
+                     fmt: "str | list[str]" = "json",
                      start_ts=None, end_ts=None,
                      want_messages=True, want_media=False, want_voice=False,
                      want_avatars=False,
                      export_root: Path = None, pack: str = "folder",
+                     template: str | None = None,
                      progress=lambda pct, msg: None) -> dict:
     """多会话批量导出。"""
     t0 = time.time()
@@ -906,6 +938,7 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
                              export_root=total_dir,
                              folder_name=f"{i + 1:02d}_{display or chat}",
                              pack=("zip" if pack == "each" else "none"),
+                             template=template,
                              progress=sub)
             ok_n += 1
             results.append({"chat": chat, "display": display or chat,
@@ -914,7 +947,8 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list, fmt: str = "j
                             "image_count": res.get("image_count", 0),
                             "voice_count": res.get("voice_count", 0),
                             "avatar_count": res.get("avatar_count", 0),
-                            "file": res.get("file")})
+                            "file": res.get("file"),
+                            "files": res.get("files", [])})
             progress(endp, f"[{i + 1}/{n}] ✔ {display or chat} ({res.get('message_count', 0)} 条)")
         except Exception as e:
             logger.error("export",

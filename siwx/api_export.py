@@ -46,6 +46,13 @@ def formats():
     return jsonify({"formats": out})
 
 
+@bp.get("/templates")
+def templates():
+    """可用 HTML 导出模板（用户自定义优先于内置同名）。"""
+    from siwx.html_template import list_templates
+    return jsonify({"templates": list_templates()})
+
+
 @bp.get("/download")
 def download():
     """下载导出文件/zip。安全限制：仅允许 cwd/exports 目录内。"""

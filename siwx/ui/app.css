@@ -245,13 +245,14 @@ a:hover { color: var(--accent-fg); }
   border-top: 1px solid var(--line-soft); padding-top: 12px;
 }
 .mini { font-size: 12px; color: var(--muted); flex: 1; min-width: 0; }
+/* 幽灵图标按钮：与侧栏扁平风格一致，不描边不加底 */
 .mini-btn {
-  border: 1px solid var(--line); background: var(--card); color: var(--muted);
-  border-radius: var(--radius-sm); cursor: pointer; padding: 5px 9px; font-size: 12px;
+  border: 0; background: transparent; color: var(--faint);
+  border-radius: var(--radius-sm); cursor: pointer; padding: 6px 8px;
   display: inline-flex; align-items: center; justify-content: center;
-  transition: background .12s ease, color .12s ease, border-color .12s ease;
+  transition: background .12s ease, color .12s ease;
 }
-.mini-btn:hover { background: var(--accent-soft); color: var(--accent-fg); border-color: var(--accent-line); }
+.mini-btn:hover { background: var(--card-alt); color: var(--text); }
 .view { flex: 1; padding: 28px; min-width: 0; max-width: 1480px; margin: 0 auto; width: 100%; }
 @media (max-width: 900px) {
   .shell { flex-direction: column; }

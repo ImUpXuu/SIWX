@@ -1,0 +1,66 @@
+/* 引导页 —— 3 个独立分步屏；第 3 步一键提取+解密（合并） */
+.guide { max-width: 920px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.g-steps { display: flex; gap: 8px; margin-bottom: 2px; flex-wrap: wrap; }
+.g-chip {
+  font-size: 12px; font-weight: 700; padding: 5px 12px;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: var(--card); color: var(--muted);
+}
+.g-chip.on { background: var(--accent-soft); color: var(--accent-fg); border-color: var(--accent-line); }
+.g-chip.done { background: var(--card); color: var(--text); border-style: dashed; }
+.g-macos-hint {
+  background: var(--warn-soft); border: 1px solid var(--warn-line); border-radius: var(--radius);
+  padding: 10px 12px; margin-bottom: 12px; font-size: 13px; color: var(--warn);
+}
+.g-desc { margin-bottom: 18px; max-width: 720px; line-height: 1.75; }
+.g-title { font-size: 22px; line-height: 1.35; font-weight: 700; margin: 4px 0 8px; }
+.g-check {
+  border: 1px dashed var(--line); border-radius: var(--radius); padding: 14px 16px;
+  font-size: 13px; background: var(--card); color: var(--text);
+}
+.g-check div { padding: 3px 0; display: flex; align-items: center; gap: 8px; }
+.g-nav { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
+.accounts { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 12px; }
+.acc {
+  display: flex; align-items: center; gap: 12px; cursor: pointer;
+  padding: 14px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: var(--card);
+  box-shadow: var(--shadow-sm);
+  transition: border-color .12s ease, background .12s ease;
+}
+.acc:hover { border-color: var(--line-strong); background: var(--card-alt); }
+.acc.sel { background: var(--accent-soft); border-color: var(--accent-line); }
+.acc.sel .acc-main b { color: var(--accent-fg); }
+.avatar {
+  width: 38px; height: 38px; border-radius: var(--radius-sm); flex: none;
+  background: var(--card-alt); color: var(--muted); border: 1px solid var(--line);
+  font-weight: 700; font-size: 13px;
+  display: flex; align-items: center; justify-content: center;
+}
+.acc.sel .avatar { background: var(--accent); color: #fff; border-color: var(--accent); }
+.acc-main { min-width: 0; flex: 1; margin-right: 6px; line-height: 1.45; }
+.acc-main b { font-size: 13px; font-weight: 700; display: block; overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; max-width: 100%; }
+.acc-main span { font-size: 12px; color: var(--muted); }
+.g-manual {
+  margin-top: 14px; padding: 12px; border: 1px dashed var(--line);
+  border-radius: var(--radius); background: var(--card-alt);
+}
+.g-manual-first { margin-top: 14px; }
+.g-manual-title { font-size: 13px; font-weight: 700; color: var(--text); }
+.g-manual-hint { font-size: 12px; margin: 6px 0 8px; }
+.g-manual-row { display: flex; gap: 8px; align-items: center; }
+.g-input { flex: 1; font-size: 12.5px; padding: 7px 10px; }
+.g-manual-msg { font-size: 12px; margin-top: 4px; min-height: 18px; color: var(--muted); }
+.g-manual-msg.ok { color: var(--accent-fg); }
+.g-manual-msg.err { color: var(--danger); }
+.g3-res { margin-top: 14px; }
+/* 第 3 步：操作按钮与进度条/日志区之间的呼吸空间 */
+#g3-progress { margin-top: 16px; }
+#g3-log { margin-top: 12px; }
+@media (max-width: 520px) {
+  .guide { gap: 14px; }
+  .accounts { grid-template-columns: 1fr; }
+  .g-title { font-size: 20px; }
+  .g-nav .btn { width: 100%; }
+}
