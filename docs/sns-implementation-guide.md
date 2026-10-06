@@ -13,30 +13,13 @@
 
 ---
 
-## 1. 参考项目（重要）
+## 1. 核心思路
 
-**WeFlow** —— 同类产品，朋友圈部分已成熟，本方案大量借鉴其做法。
-
-| 项 | 值 |
-|---|---|
-| 本地路径 | `G:/project/_ref/WeFlow`（已 clone，164 MB） |
-| 仓库 | `https://github.com/lurve1314/WeFlow` |
-| 技术栈 | Electron + TypeScript + React |
-| clone 方式 | `curl -x socks5h://127.0.0.1:10808 -k -L -o WeFlow.zip https://codeload.github.com/lurve1314/WeFlow/zip/refs/heads/main` |
-
-### 必读文件（按重要性）
-
-| 文件 | 行数 | 内容 |
-|---|---|---|
-| `electron/services/snsService.ts` | 2651 | **核心**：URL 构造、下载、解密、缓存、导出 |
-| `electron/services/wasmService.ts` | 180 | 微信官方 WASM 的加载与密钥流获取 |
-| `electron/services/isaac64.ts` | 127 | ISAAC64 的 TS 参考实现（**注意：常量有误，见 §5.3**） |
-| `electron/assets/wasm/wasm_video_decode.wasm` | 3.8 MB | 微信官方解密模块（v1.2.46） |
-| `resources/wedecrypt/win32/x64/weflow-image-native-win32-x64.node` | — | 原生图片解密模块 |
-
-**WeFlow 的核心思路一句话**：
 > **不碰微信本地缓存**（因为动态↔文件名的映射只在客户端内存里），
 > **直接用 XML 里的 URL 从 CDN 下载**，再用 ISAAC64 流解密。
+
+本仓库为**纯 Python 独立实现**：ISAAC64 用官方测试向量自检（见 §5.3），
+不依赖任何外部二进制或 WASM。
 
 ---
 
@@ -219,18 +202,18 @@ sns.export_image_pool(cache, dest_dir)   # 图片池降级导出
 - [ ] **接入现有导出引擎**（`exporter.py` 的 8 种格式）
   - 新增数据源：朋友圈动态（而非聊天消息）
   - JSON / HTML / Markdown 优先
-- [ ] **媒体导出**：`media/<postId>_<index>.<ext>`（照抄 WeFlow 的命名）
+- [ ] **媒体导出**：`media/<postId>_<index>.<ext>`
 - [ ] **导出选项**：图片 / 视频 / 实况照片 / 表情 分开勾选
 - [ ] **进度上报**：复用 `_run_job` + 环形日志（日志格式 `[sns] N%`）
 
 ### P3 — 增强
 
-- [ ] **评论表情**：`decrypt_emoji_aes` 需要真实样本验证（目前是照搬 WeFlow）
+- [ ] **评论表情**：`decrypt_emoji_aes` 需要真实样本验证
 - [ ] **实况照片（LivePhoto）**：XML 里 `<LivePhoto><liveMedia>`，含独立 url/key
 - [ ] **笔记（noteinfo）**：带 `cdndatakey` / `fullmd5`
 - [ ] **视频号（finderFeed）**：`ContentObject/type=28`
 - [ ] **公众号文章 / 音乐分享**的卡片渲染
-- [ ] **年度报告**（WeFlow 有 `annualReportService.ts`，可参考）
+- [ ] **年度报告**（可选增强，非阻塞）
 
 ### P4 — 测试与文档
 
@@ -314,8 +297,8 @@ createTime_ms = snsId >> 23
 
 **另**：每 256 个字必须重新 refill，否则 >2048 字节的文件密钥流会重复（这会导致"头对但尾部校验失败"）。
 
-> WeFlow 的 `electron/services/isaac64.ts` 用的是 `...c15`，所以它必须靠 WASM 兜底；
-> **我们的纯 Python 版已修正，不需要 WASM**。
+> 注：常见的错误实现会误用 `...c15`，结果必须依赖外部 WASM 兜底；
+> **本仓库的纯 Python 版已修正，不需要 WASM**。
 
 **自检**：`isaac.self_test()` 必须返回 `True`。
 
@@ -355,7 +338,7 @@ Accept-Language: zh-CN,zh;q=0.9
 
 `cdn.strip_wechat_tail()` 已实现。
 
-### 5.6 缓存设计（WeFlow 踩坑后的做法）
+### 5.6 缓存设计
 
 ```python
 cache_key = md5(normalize_cache_url(url))
@@ -363,8 +346,8 @@ cache_key = md5(normalize_cache_url(url))
 ```
 
 **为什么必须去掉 token**：token 每次请求都变，但指向同一份资源。
-WeFlow 旧版用完整 URL 的 md5，**token 一变缓存全失效**，后来改成规范化 URL 命名，
-并写了一次性迁移逻辑（`migrateLegacyCacheFile`）。
+若用完整 URL 的 md5，**token 一变缓存就全失效**；因此改为规范化 URL 命名，
+并对旧缓存做一次性迁移。
 
 **缓存目录建议**：`output/<wxid>/sns_media/<cache_key>.<ext>`
 （`ext`：视频 `mp4`，图片按 `detect_mime` 结果）
@@ -479,7 +462,7 @@ SnsDataItem
 ```
 
 **⚠️ 最大的坑：实况视频的解密 key 在 `<enc key="...">`，不是 `url@key`！**
-（这正是 WeFlow `extractVideoKey()` 用正则 `<enc\s+key="(\d+)"` 提取的东西）
+（即用正则 `<enc\s+key="(\d+)"` 从 XML 里提取的那个值）
 
 - 尺寸取 `<size>`（316×420 / 288×288），**不是** `<videoSize>`（实测恒为 0×0）
 - `liveStillImageTimeMs` = 定格帧时间点（毫秒）
@@ -487,7 +470,7 @@ SnsDataItem
 
 **实测**：2.2 MB MP4，`ftyp` 头正确，`ok=True ext=mp4 encrypted=True`。本机共 **201 个**。
 
-**导出命名**：主图 `<tid>_<index>.jpg`，实况视频 `<tid>_<index>_live.mp4`（照搬 WeFlow 的 `_live` 后缀）。
+**导出命名**：主图 `<tid>_<index>.jpg`，实况视频 `<tid>_<index>_live.mp4`（实况加 `_live` 后缀）。
 
 **评论内嵌图片：与主图结构完全一致，可复用同一条下载链路**
 
@@ -533,9 +516,9 @@ SnsDataItem
 |---|---|---|
 | **CDN token 过期** | 实测 6 个样本中 1 个 404。旧动态大概率失效 | 降级到本地缓存（19%）；UI 提示"该图片需在微信中打开过一次" |
 | **WAL 未 checkpoint** | 最新朋友圈读不到 | 优先处理 WAL（见 `docs/wal-support-plan.md`） |
-| **CDN 反爬** | 大量并发下载可能被限流 | 并发 ≤5（WeFlow 用 5），加退避重试 |
+| **CDN 反爬** | 大量并发下载可能被限流 | 并发 ≤5，加退避重试 |
 | **域名失效** | `shmmsns.qpic.cn` 已见 404 | 多域名回退：原样 → `mmsns` → `szmmsns` |
-| **表情 AES 未验证** | `decrypt_emoji_aes` 是照搬 WeFlow，**没有真实样本验证过** | 实现时先找样本验证 |
+| **表情 AES 未验证** | `decrypt_emoji_aes` **没有真实样本验证过** | 实现时先找样本验证 |
 | **`private=1` 的私密动态** | 本机 9 条 | 默认隐藏或标记 |
 | **未下载过的原图** | 微信只自动下载缩略图，原图要点开才拉 | 已下载的才能拿到；UI 如实说明 |
 
@@ -615,7 +598,6 @@ for feed in sns.iter_timeline(DB, limit=20):
 | `docs/plugin-development.md` | 插件系统（如果想让朋友圈支持插件扩展） |
 
 **外部参考**：
-- WeFlow：`G:/project/_ref/WeFlow` / https://github.com/lurve1314/WeFlow
 - ISAAC64 官方：http://www.burtleburtle.net/bob/rand/isaac.html
 - ISAAC64 参考实现（本方案所用常量来源）：https://sources.debian.org/src/coreutils/8.26-3/lib/rand-isaac.c/
 - 微信视频号 WASM 解密分析：https://github.com/29583855/WeChat-Channels-Video-File-Decryption
