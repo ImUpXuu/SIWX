@@ -88,8 +88,8 @@ ISAAC64_TEST_VECTOR                  # 官方零种子向量
 **另**：每 256 个字必须重新 refill，否则 >2048 字节的文件密钥流会重复
 （表现为「头对但尾部自校验失败」）。
 
-> WeFlow 的 `electron/services/isaac64.ts` 用的是 `...c15`，所以它必须靠微信官方
-> WASM 兜底；**本实现已修正，不需要 WASM**。
+> 注：常见的错误实现会误用 `...c15`，结果必须依赖外部 WASM 兜底；
+> **本实现已修正，纯 Python 即可，不需要 WASM**。
 
 **验证**：官方零种子向量 8/8；真实 CDN 样本 5/5 解密成功且微信尾部自校验通过。
 
@@ -129,7 +129,7 @@ cache_key(url) = md5(normalize_cache_url(url))
 ```
 
 **为什么必须去掉 token**：token 每次请求都变，但指向同一份资源。
-WeFlow 旧版用完整 URL 的 md5，**token 一变缓存全失效**，后来改成规范化命名。
+若用完整 URL 的 md5，**token 一变缓存就全失效**，因此改为规范化命名。
 
 ### 2.3 主入口
 
@@ -362,7 +362,7 @@ sns.search_text(feed) -> str   # 小写 blob
 | 解密 key | `url@key` | `url@key` | **`<enc key>`** ⚠️ |
 
 **⚠️ 实况照片的 key 在 `<enc key="...">`，不是 `url@key`！**
-（这正是 WeFlow `extractVideoKey()` 用 `<enc\s+key="(\d+)"` 提取的东西）
+（即用 `<enc\s+key="(\d+)"` 正则从 XML 里提取的那个值）
 
 **⚠️ `liveMedia` 的 `<videoSize>` 恒为 0×0**，尺寸必须取 `<size>`。
 
@@ -427,7 +427,7 @@ run_sns_export(db_path, account, fmt="json", export_root=None,
 
 另外：位置（📍）进 md/txt/html，评论表情与**评论图**进四种格式（此前只进 JSON）。
 
-**媒体命名**（照搬 WeFlow）：
+**媒体命名**：
 
 ```
 media/<tid>_<index>.jpg
@@ -559,4 +559,3 @@ python diag_sns_cdn.py <账号目录名> 300 60
 - `scripts/sns_card_probe.py` — **卡片 XML 探针**（改卡片相关代码前先跑它 dump 真实结构）
 - `docs/media-decryption-principles.md` — 聊天媒体的 V2 解密（**另一套体系**）
 - `docs/module-media.md` — 媒体模块（本地缓存解密）
-- 参考项目 WeFlow：`G:/project/_ref/WeFlow` / https://github.com/lurve1314/WeFlow
