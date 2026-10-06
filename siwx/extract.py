@@ -7,6 +7,7 @@
 全局收割：微信内存只扫一次，用全部账号 salt 联合集验证，再分发给各账号。
 日志脱敏：只输出 salt 与打码密钥，永不出明文。
 """
+import platform
 import time
 from pathlib import Path
 
@@ -71,11 +72,26 @@ def _keystore_preset(entries_by_dir, log) -> dict:
     return None
 
 
+def _use_memory_per_account() -> bool:
+    """逐账号提取时是否允许依赖微信进程的策略。
+
+    Windows：内存已由 global_harvest 一次扫完，逐账号不再重复扫 (False)。
+    非 Windows：没有全局收割，macOS 的 LLDB 策略只能在逐账号阶段运行 (True)；
+    密钥已被缓存全覆盖时 run_strategies 会提前退出，不会白白附加进程。
+    """
+    return platform.system() != "Windows"
+
+
 def global_harvest(dirs, entries_by_dir, log=print, only_missing=None):
     """一次内存扫描，用 salt 联合集验证 → (global_key_map, global_attrib)。
 
     only_missing: None=验证全部；set=只针对缺失的 salt（收割补漏）。
+
+    config_cipher 依赖 winproc (ctypes.windll)，仅 Windows 可用；非 Windows 直接
+    返回空，由 extract_keys_for_dir 中的平台策略（macOS 为 LLDB）负责提取。
     """
+    if platform.system() != "Windows":
+        return {}, {}
     from siwx.strategies import config_cipher
 
     page1_by_salt = {}
@@ -376,7 +392,8 @@ def extract_all(log=print, use_cache=True):
     else:
         attrib = {s: "keystore" for s in preset}
     return [extract_keys_for_dir(db, log, preset=preset,
-                                 entries=entries_by_dir.get(db), use_memory=False)
+                                 entries=entries_by_dir.get(db),
+                                 use_memory=_use_memory_per_account())
             for _w, db in dirs]
 
 
@@ -415,7 +432,7 @@ def auto_all(out_dir: str, log=print, use_cache=True, workers=None):
     for wxid, db in dirs:
         rep = extract_keys_for_dir(db, log, preset=preset,
                                    entries=entries_by_dir.get(db),
-                                   use_memory=False)
+                                   use_memory=_use_memory_per_account())
         log(f"账号 {wxid}: 密钥 {rep['verified']}/{rep['total_salts']}")
         dec = None
         if rep["verified"] > 0:
