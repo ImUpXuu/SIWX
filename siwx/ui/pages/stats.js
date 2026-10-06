@@ -104,13 +104,13 @@ function monthBars(items) {
   const bw = Math.max(3, Math.min(38, iw / items.length * 0.62));
   const step = iw / items.length;
   const bars = items.map((d, i) => {
-    const h = (d.count / max) * ih;
+    const h = Math.max(1, (d.count / max) * ih);
     const x = padL + step * i + (step - bw) / 2;
     const isTop = d.count === max;
     return `<rect class="bar-grow ${isTop ? 'bar' : 'bar-dim'}"
-      x="${x.toFixed(1)}" y="${padT.toFixed(1)}" width="${bw.toFixed(1)}"
-      height="${Math.max(1, ih).toFixed(1)}"
-      rx="2" style="--grow:${(h / Math.max(1, ih)).toFixed(4)};--i:${i}">
+      x="${x.toFixed(1)}" y="${(padT + ih - h).toFixed(1)}" width="${bw.toFixed(1)}"
+      height="${h.toFixed(1)}"
+      rx="2" style="--grow:${(h / ih).toFixed(4)};--i:${i}">
       <title>${esc(d.month)}：${nf(d.count)} 条</title></rect>`;
   }).join('');
 
@@ -148,12 +148,12 @@ function hourBars(hours) {
   const step = iw / 24;
   const bw = Math.max(4, step * 0.66);
   const bars = hours.map((v, i) => {
-    const h = (v / max) * ih;
+    const h = Math.max(1, (v / max) * ih);
     const x = padL + step * i + (step - bw) / 2;
     const cls = i === peak ? 'bar' : 'bar-dim';
-    return `<rect class="bar-grow ${cls}" x="${x.toFixed(1)}" y="${padT.toFixed(1)}"
-      width="${bw.toFixed(1)}" height="${Math.max(1, ih).toFixed(1)}" rx="2"
-      style="--grow:${(h / Math.max(1, ih)).toFixed(4)};--i:${i}">
+    return `<rect class="bar-grow ${cls}" x="${x.toFixed(1)}" y="${(padT + ih - h).toFixed(1)}"
+      width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2"
+      style="--grow:${(h / ih).toFixed(4)};--i:${i}">
       <title>${String(i).padStart(2, '0')}:00 — ${nf(v)} 条</title></rect>`;
   }).join('');
 
@@ -299,6 +299,7 @@ function startAnimations() {
   });
   body.querySelectorAll('.st-card .v, .st-donut-val').forEach((n, i) => {
     const raw = n.textContent || '';
+    if (raw.includes(':')) return;         // 「21:00」这类时间不是数值，滚动会毁成 2,100
     const target = Number(raw.replace(/[^\d.]/g, ''));
     if (!target) return;
     n.textContent = '0';

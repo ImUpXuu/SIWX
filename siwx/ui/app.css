@@ -456,7 +456,7 @@ input[type="checkbox"] { accent-color: var(--accent); min-height: auto; }
 .disc-overlay {
   position: fixed; inset: 0; z-index: 90; overflow-y: auto;
   background: var(--bg);
-  display: flex; justify-content: center;
+  display: flex; justify-content: center; align-items: flex-start;
   padding: 28px 16px;
 }
 .disc-card {
@@ -495,7 +495,7 @@ input[type="checkbox"] { accent-color: var(--accent); min-height: auto; }
 .ob-overlay {
   position: fixed; inset: 0; z-index: 90; overflow-y: auto;
   background: var(--bg);
-  display: flex; justify-content: center;
+  display: flex; justify-content: center; align-items: flex-start;
   padding: 28px 16px;
 }
 .ob-card {
@@ -510,6 +510,8 @@ input[type="checkbox"] { accent-color: var(--accent); min-height: auto; }
 .ob-close { margin-left: auto; }
 .ob-body { flex: 1; overflow-y: auto; min-height: 0; padding-top: 10px; }
 .ob-actions { display: flex; gap: 10px; margin-top: 18px; flex-wrap: wrap; align-items: center; }
+/* 进度条/日志区在按钮行下方出现时留出呼吸间距（否则顶死按钮，像被裁掉一块） */
+#ob-progress, #ob-log { margin-top: 12px; }
 .ob-disc {
   border: 1px solid var(--line); border-radius: var(--radius);
   max-height: 46vh; overflow-y: auto; padding: 4px 16px;
@@ -575,6 +577,7 @@ input[type="checkbox"] { accent-color: var(--accent); min-height: auto; }
 .g-manual-msg.ok { color: var(--accent-fg); }
 .g-manual-msg.err { color: var(--danger); }
 .g3-res { margin-top: 14px; }
+.g3-res:empty { display: none; }
 @media (max-width: 520px) {
   .accounts { grid-template-columns: 1fr; }
   .g-title { font-size: 20px; }

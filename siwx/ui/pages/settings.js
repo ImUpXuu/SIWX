@@ -46,7 +46,9 @@ async function loadAutoSync() {
     el('s-auto-sync-enabled').checked = !!cfg.enabled;
     el('s-auto-sync-interval').value = cfg.interval_minutes || 30;
     const ok = cfg.last_ok === null || cfg.last_ok === undefined ? '' : (cfg.last_ok ? ' · 上次成功' : ' · 上次失败');
-    status.textContent = `状态：${cfg.enabled ? '已开启' : '未开启'} · 间隔 ${cfg.interval_minutes || 30} 分钟 · 上次：${fmtLastRun(cfg.last_run)}${ok} · ${cfg.last_message || ''}`;
+    // 从未运行时 last_message 只是重复「未运行」，不再拼接
+    const lm = cfg.last_run && cfg.last_message ? ` · ${cfg.last_message}` : '';
+    status.textContent = `状态：${cfg.enabled ? '已开启' : '未开启'} · 间隔 ${cfg.interval_minutes || 30} 分钟 · 上次：${fmtLastRun(cfg.last_run)}${ok}${lm}`;
   } catch (e) {
     status.textContent = e.message;
   }
@@ -89,7 +91,7 @@ async function loadVersion() {
       lines.push(`<div class="ov-row"><span>状态</span><span class="pill pill-green">已是最新</span></div>`);
     }
     box.innerHTML = lines.join('');
-    meta.textContent = `打包产物: ${cur.frozen} · 平台: ${cur.platform}`;
+    meta.textContent = '';               // 运行模式/平台已在下方逐行展示，不再重复开发者术语
 
     const btn = el('s-do-update');
     if (btn) {

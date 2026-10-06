@@ -8,7 +8,18 @@ let pollTimer = null;
 
 function el(id) { return document.getElementById(id); }
 
-function levelClass(m) {
+/* /api/logs 返回混合形状：[ts, msg]（文件轨）与 [ts, level, module, msg]（结构化轨） */
+function entryMsg(entry) {
+  return String(entry.length >= 4 ? entry[3] : entry[1]);
+}
+
+function levelClass(entry) {
+  const lv = entry.length >= 4 ? String(entry[1]).toUpperCase() : "";
+  if (lv === "ERROR") return "log-line err";
+  if (lv === "WARN") return "log-line warn";
+  if (lv === "INFO") return "log-line ok";
+  if (lv === "DEBUG") return "log-line dim";
+  const m = entryMsg(entry);
   if (m.includes("[错误]") || m.includes("✗") || m.includes("失败")) return "log-line err";
   if (m.includes("✔") || m.includes("成功") || m.includes("已验证")) return "log-line ok";
   if (m.includes("⚠") || m.includes("跳过") || m.includes("缺失")) return "log-line warn";
@@ -20,13 +31,14 @@ function renderLogs(logs) {
   const box = el("log-box");
   if (!box) return;
   const shown = logs.slice(-1000);
-  const sig = shown.length ? `${shown.length}:${shown[shown.length - 1][0]}:${shown[shown.length - 1][1]}` : "0";
+  const last = shown[shown.length - 1];
+  const sig = shown.length ? `${shown.length}:${last[0]}:${entryMsg(last)}` : "0";
   if (sig === lastSig) return;
   lastSig = sig;
-  box.innerHTML = shown.map(([, m]) =>
-    `<div class="${levelClass(m)}">${esc(m)}</div>`).join("")
+  box.innerHTML = shown.map((entry) =>
+    `<div class="${levelClass(entry)}">${esc(entryMsg(entry))}</div>`).join("")
     || '<div class="log-line dim">暂无日志…</div>';
-  el("log-count").textContent = `${logs.length} 条`;
+  el("log-count").textContent = `${shown.length} 条`;
   if (autoScroll) box.scrollTop = box.scrollHeight;
 }
 
