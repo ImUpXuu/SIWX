@@ -8,8 +8,9 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-5.0.7-success.svg)](./version.json)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](#平台支持)
+[![Docs](https://img.shields.io/badge/docs-siwx--docs.vercel.app-175fe0.svg)](https://siwx-docs.vercel.app)
 
-[快速开始](#快速开始) · [核心功能](#核心功能) · [朋友圈](#朋友圈) · [MCP 接入](#让-ai-读取你的聊天记录mcp) · [免责声明](#免责声明--法律声明)
+[快速开始](#快速开始) · [在线文档](https://siwx-docs.vercel.app) · [核心功能](#核心功能) · [朋友圈](#朋友圈) · [MCP 接入](#让-ai-读取你的聊天记录mcp) · [免责声明](#免责声明--法律声明)
 
 </div>
 
@@ -24,7 +25,7 @@
 - **聊天统计** — 总消息量、类型分布、月度趋势、活跃度与私聊发送者排行，跨分片聚合，秒级出结果。
 - **流式处理，不炸内存** — SQLCipher 4 逐页 4KB 流式解密；导出链路 K 路归并 + 增量写入，万级消息导出内存占用保持低位。
 - **两级缓存，重跑秒回** — 密钥按 salt 索引缓存（DPAPI 加密），解密产物按 `mtime + size + key` 命中缓存；源库未变时直接复用。
-- **AI 可直接接管** — 内置 MCP Server（stdio + JSON-RPC 2.0），6 个工具供任意 MCP 客户端检索与导出聊天记录。
+- **AI 可直接接管** — 内置 MCP Server（stdio + JSON-RPC 2.0），11 个工具供任意 MCP 客户端检索与导出聊天记录。
 - **自动增量刷新** — 可选开启，微信在线时按设定间隔自动重新解密变更的数据库。
 - **完全本地运行** — Web 控制台仅监听 `127.0.0.1`，核心流程不上传任何数据到第三方服务器。
 

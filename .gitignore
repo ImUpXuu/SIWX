@@ -28,3 +28,8 @@ exports/
 .asar-extract.mjs
 .asar-header.json
 .workbuddy-ai/
+
+# 文档站（VitePress）本地产物
+node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
