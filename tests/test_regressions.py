@@ -1056,6 +1056,23 @@ class TestDecryptAtomic(unittest.TestCase):
         residue = list(dst.parent.glob("*.part")) + list(dst.parent.glob("*.tmp"))
         self.assertEqual(residue, [], f"残留临时文件: {residue}")
 
+    def test_decrypted_body_equals_plaintext(self):
+        """整库解密的正文必须与原始明文**逐字节一致**（CBC 链式 XOR 回归）。
+
+        覆盖 page1（salt 特例，4000 字节密文）与后续页（4016 字节密文）两种长度。
+        现有用例只断言了大小与头部，此处补齐内容校验 —— 这是 strxor 改写
+        （由大整数 XOR 换成 C 实现）最直接的回归防线。
+        """
+        from siwx.sqlcipher import decrypt_database, PAGE_SZ, RESERVE_SZ, SALT_SZ
+        dst = self.tmp / "out" / "body.db"
+        decrypt_database(self.src, dst, self.enc_key)
+        body_len = PAGE_SZ - RESERVE_SZ
+        plain1 = bytes((i * 3) & 0xFF for i in range(body_len - SALT_SZ))
+        plain2 = bytes((i * 5) & 0xFF for i in range(body_len))
+        zeros = b"\x00" * RESERVE_SZ
+        expect = b"SQLite format 3\x00" + plain1 + zeros + plain2 + zeros
+        self.assertEqual(dst.read_bytes(), expect)
+
     def test_failure_does_not_clobber_existing_file(self):
         """源库密钥错误时，已存在的明文库必须保持原样。"""
         from siwx.sqlcipher import decrypt_database
@@ -1176,6 +1193,25 @@ class TestVersionSource(unittest.TestCase):
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
         self.assertEqual(__version__, "5.0.7")
+
+    def test_release_metadata_matches_package_version(self):
+        """version.json 与 README 徽章的版本号必须跟 __version__ 一致。
+
+        发版清单只钉了 `siwx/__init__.py` 与测试里的字面量，version.json
+        （对外公布的更新清单）与 README 徽章不在其中——曾出现 __version__
+        已升到 5.0.7、README 徽章也写 5.0.7，而 version.json 仍停在 5.0.6
+        的三处不一致（以 version.json 为准的更新链会读到旧版本）。
+        """
+        from siwx import __version__
+        import re as _re
+        meta = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["version"], __version__,
+                         "version.json 的 version 与 siwx.__version__ 不一致")
+        badge = _re.search(r"badge/version-([0-9]+\.[0-9]+\.[0-9]+)-",
+                           (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIsNotNone(badge, "README 未找到版本徽章")
+        self.assertEqual(badge.group(1), __version__,
+                         "README 徽章版本与 siwx.__version__ 不一致")
 
     def test_remote_version_uses_newest_source_and_bypasses_cache(self):
         from siwx import auto_update
@@ -1507,7 +1543,9 @@ class TestCryptoIntact(unittest.TestCase):
         self.assertEqual(sc.PAGE_SZ - sc.RESERVE_SZ + sc.IV_SZ - sc.SALT_SZ, 4016)
 
     def test_handwritten_cbc_matches_stdlib(self):
+        """手写 CBC 链式 XOR（现用 pycryptodome 的 C 实现 strxor）对齐标准库。"""
         from Crypto.Cipher import AES
+        from Crypto.Util import strxor
         from siwx.sqlcipher import PAGE_SZ, RESERVE_SZ, IV_SZ
         key, iv = bytes(range(32)), bytes(range(16, 32))
         for ct_len in (PAGE_SZ - RESERVE_SZ - IV_SZ, PAGE_SZ - RESERVE_SZ):
@@ -1515,9 +1553,31 @@ class TestCryptoIntact(unittest.TestCase):
             ct = AES.new(key, AES.MODE_CBC, iv).encrypt(pt)
             std = AES.new(key, AES.MODE_CBC, iv).decrypt(ct)
             raw = AES.new(key, AES.MODE_ECB).decrypt(ct)
-            prev = int.from_bytes(iv + ct[:len(ct) - 16], "little")
-            mine = (int.from_bytes(raw, "little") ^ prev).to_bytes(len(ct), "little")
+            mine = strxor.strxor(iv + ct[:len(ct) - 16], raw)
             self.assertEqual(mine, std, f"ct_len={ct_len}")
+
+    def test_decrypt_uses_c_strxor_not_bigint(self):
+        """源码层面确认页 CBC 的链式 XOR 走 C 实现 ``strxor``，而非大整数转换。
+
+        大整数 ``from_bytes``/``to_bytes`` 曾占单库解密耗时约 39%（改动前）。
+        docstring 里会提到旧写法做说明，因此先用 ``ast`` 剥掉 docstring，
+        只在**真正的代码**里断言。
+        """
+        import ast
+        src = Path(__file__).resolve().parent.parent / "siwx" / "sqlcipher.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if (isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef))
+                    and body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body.pop(0)          # 丢弃 docstring
+        code = ast.unparse(tree)
+        self.assertIn("strxor", code, "页 CBC 未使用 strxor")
+        self.assertNotIn("from_bytes", code, "仍在用大整数 from_bytes")
+        self.assertNotIn("to_bytes", code, "仍在用大整数 to_bytes")
 
 
 # ── 数据安全修复：临时文件唯一性（D-2）─────────────────────────
@@ -3461,6 +3521,34 @@ class TestAuditFixes20261006(TempRootCase):
         from siwx import exporter
         src = (ROOT / "siwx" / "exporter.py").read_text(encoding="utf-8")
         self.assertIn("Workbook(write_only=True)", src)
+
+
+# ── 21. None 解引用加固（手改配置/异常库值）─────────────────────
+
+class TestNullConfigHardening(TempRootCase):
+    """手改 mcp_config.json 把 "tools" 写成 null 时，`.get("tools", {})`
+    拿到的是 None（键存在值为 null，默认值不生效）→ 每一次 MCP 工具调用
+    与 /api/mcp/info 都会 AttributeError。加固后必须正常降级。"""
+
+    def _write_null_tools_config(self):
+        import json as _json
+        from siwx import mcp_server
+        p = mcp_server.config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps({"tools": None}), encoding="utf-8")
+
+    def test_tool_enabled_with_null_tools(self):
+        from siwx import mcp_server
+        self._write_null_tools_config()
+        self.assertTrue(mcp_server.tool_enabled("get_status"))
+
+    def test_mcp_info_endpoint_with_null_tools(self):
+        from siwx.server import app
+        self._write_null_tools_config()
+        c = app.test_client()
+        r = c.get("/api/mcp/info")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("tools", r.get_json())
 
 
 if __name__ == "__main__":
