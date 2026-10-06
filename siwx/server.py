@@ -13,6 +13,7 @@ from werkzeug.exceptions import HTTPException
 
 from siwx import extract, keystore, logger as log
 from siwx import paths as _paths
+from siwx import validate
 from siwx.discover import (add_manual_data_dir, find_account_conflicts,
                            find_wechat_data_dirs, find_wechat_pids,
                            load_manual_data_dirs, wxid_of)
@@ -155,7 +156,7 @@ _register_plugin_blueprints(app)
 # ── 全局状态（必须在路由和错误处理之前定义）──────────────────────
 _lock = threading.Lock()
 _job = {"running": False, "mode": None, "done": False, "ok": False,
-        "logs": [], "report": None}
+        "logs": [], "report": None, "error": None}
 _LOG_RING: list = []          # 环形日志缓冲（供日志页展示）
 _LOG_RING_MAX = 2000
 
@@ -199,7 +200,12 @@ def _handle_exception(e):
         _LOG_RING.append([ts, msg])
         if len(_LOG_RING) > _LOG_RING_MAX:
             del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
-    return jsonify({"error": f"{type(e).__name__}: {e}", "traceback": tb}), 500
+    body = {"error": f"{type(e).__name__}: {e}"}
+    # traceback 只在本机 debug 模式回显：默认状态下它是一份完整的源码路径/行号
+    # 清单，直接吐给任何触发 500 的调用方（含 --trust-lan 下的局域网 peer）。
+    if app.debug:
+        body["traceback"] = tb
+    return jsonify(body), 500
 
 
 def _log(msg: str) -> None:
@@ -239,9 +245,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             from siwx import sns_export
             data = export_opts or {}
             account = data.get("account") or ""
-            acc_dir = _paths.out_root() / account
-            db = acc_dir / "sns" / "sns.db"
-            if not db.is_file():
+            acc_dir = validate.account_dir(account)
+            db = acc_dir / "sns" / "sns.db" if acc_dir else None
+            if not db or not db.is_file():
                 raise RuntimeError("该账号还没有朋友圈数据库，请先完成引导")
             fmt = data.get("format", "json")
             if fmt not in sns_export.FORMATS:
@@ -385,8 +391,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         elif mode == "export":
             from siwx import exporter
             data = export_opts or {}
-            acc_dir = _paths.out_root() / (data.get("account") or "")
-            if not (acc_dir / "message").is_dir():
+            # account 是请求值，必须过账号名校验 + 越界检查（此前直接拼 out_root）
+            acc_dir = validate.account_dir(data.get("account"))
+            if acc_dir is None or not (acc_dir / "message").is_dir():
                 raise RuntimeError("该账号还没有解密产物，请先完成引导")
             chats = data.get("chats") or []
             if not chats and data.get("chat"):
@@ -436,6 +443,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             ts = _now_ms()
             msg = f"[错误] {e}"
             _job["ok"] = False
+            # 失败原因单独成字段：前端四处（export/settings/onboarding）此前只能
+            # 从 logs 末尾猜，误判成「完成/无导出结果」。
+            _job["error"] = f"{type(e).__name__}: {e}"
             _job["logs"].append([ts, msg])
             _LOG_RING.append([ts, msg])
             if len(_LOG_RING) > _LOG_RING_MAX:
@@ -636,6 +646,21 @@ def run():
     if data is None:
         log.warn("server", "/api/run 请求体不是合法 JSON，已按空参数处理")
     data = data or {}
+    # 输入校验：db_dir 是「密钥提取/解密要读哪个目录」，out_dir 是「明文写到哪」。
+    # 二者都来自请求体，不校验就等于把任意目录读/写原语暴露给本机任意进程
+    # 与 --trust-lan 下的局域网peer。UI 只传发现列表里的 db_dir、从不传 out_dir。
+    db_dir = data.get("db_dir")
+    if db_dir:
+        from siwx import discover
+        v = discover.validate_db_path(str(db_dir))
+        if not v.get("ok"):
+            log.warn("server", f"/api/run 拒绝非法 db_dir: {v.get('error')}")
+            return jsonify({"error": f"db_dir 无效：{v.get('error') or '未识别到微信数据目录'}"}), 400
+    out_dir = data.get("out_dir")
+    if out_dir:
+        if not validate.within(out_dir, _paths.out_root()):
+            log.warn("server", "/api/run 拒绝越界 out_dir（必须位于输出根目录内）")
+            return jsonify({"error": "out_dir 必须位于输出根目录内"}), 400
     log.detailed("server", f"/api/run mode={data.get('mode', '')} "
                            f"db_dir={data.get('db_dir') or ''} "
                            f"out_dir={data.get('out_dir') or ''} "
@@ -646,7 +671,7 @@ def run():
             log.warn("server", "任务被拒绝: 已有任务在运行")
             return jsonify({"error": "已有任务在运行"}), 409
         _job.update({"running": True, "mode": data.get("mode", ""), "done": False,
-                     "ok": False, "logs": [], "report": None})
+                     "ok": False, "logs": [], "report": None, "error": None})
     jid = _next_job_id()
     log.detailed("server", f"[{jid}] job 状态: running=True "
                            f"mode={data.get('mode', '')} done=False")
@@ -757,13 +782,18 @@ def _desensitize_item(item):
     return [item[0], log.desensitize_msg(str(item[1]))]
 
 
-@app.get("/api/logs")
-def api_logs():
-    """返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）。"""
-    limit = min(int(request.args.get("limit", "2000") or 2000), 5000)
+def _merged_logs(limit: int, *, desensitize: bool = True,
+                 start_ts=None, end_ts=None) -> list:
+    """合并四源日志并按时间排序（日志页与日志导出共用同一份数据）。
+
+    四源：siwx.log 文件轨 + _LOG_RING 任务轨 + mcp.log + 进程内结构化轨。
+    旧实现里「查看」走这四源、「导出」只走 logger._FILE_LOG（进程内列表，
+    重启即空）——用户看着的任务轨和 MCP 行永远不在导出文件里，而 bug 报告
+    模板恰恰要求粘贴日志。
+    """
     with _lock:
         ring_logs = list(_LOG_RING)
-    app_logs = _tail_app_log(800)
+    app_logs = _tail_app_log(max(800, limit))
     mcp_logs = _tail_mcp_log(500)
     structured_logs = log.get_logs(limit=limit)
 
@@ -773,20 +803,49 @@ def api_logs():
     rough = log.get_level() == log.LogLevel.ROUGH
     seen = set()
     merged = []
-    for item in sorted(app_logs + ring_logs + mcp_logs + structured_logs, key=lambda x: x[0]):
+    for item in sorted(app_logs + ring_logs + mcp_logs + structured_logs,
+                       key=lambda x: x[0] or 0):
         text = _log_item_text(item)
         if "404 Not Found" in text:
             continue
         if rough and "] [DEBUG]" in text:
+            continue
+        if start_ts and (item[0] or 0) < start_ts:
+            continue
+        if end_ts and (item[0] or 0) > end_ts:
             continue
         key = (item[0], text)
         if key in seen:
             continue
         seen.add(key)
         merged.append(item)
-    # 日志页统一脱敏：账号标识（含 wxalias_xxx 类自定义微信号）、密钥、路径
-    # 不随截图/粘贴外泄。导出日志另有 desensitize=0 通道可拿原文。
-    merged = [_desensitize_item(item) for item in merged]
+    if desensitize:
+        merged = [_desensitize_item(item) for item in merged]
+    return merged
+
+
+def _log_line_text(item) -> str:
+    """合并条目 → 纯文本行（导出用）。条目形状是混合的：[ts,msg] 或 [ts,level,module,msg]。"""
+    ts = (item[0] if item else 0) or 0
+    body = item[3] if len(item) >= 4 else (item[1] if len(item) > 1 else "")
+    if len(item) >= 4:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts / 1000)) if ts else "-"
+        return f"{stamp}.{ts % 1000 if ts else 0:03d} [{str(item[1]):7}] [{item[2]}] {body}"
+    # 文件轨 / MCP 轨条目只带 [ts, 原文]，原文已含自己的时间与级别，不再套一层
+    if not ts:
+        return str(body)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts / 1000))
+    return f"{stamp}.{ts % 1000:03d} {body}"
+
+
+@app.get("/api/logs")
+def api_logs():
+    """返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）。"""
+    try:
+        limit = max(1, min(int(request.args.get("limit", "2000") or 2000), 5000))
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit 参数无效（必须是整数）"}), 400
+    merged = _merged_logs(limit)
     return jsonify({"logs": merged[-limit:], "level": log.get_level().value})
 
 
@@ -809,13 +868,17 @@ def api_log_settings_save():
 
 @app.get("/api/logs/export")
 def api_log_export():
-    """导出脱敏日志。"""
+    """导出日志（与日志页同源：文件轨 + 任务轨 + MCP 轨 + 结构化轨）。"""
     start_ts = request.args.get("start")
     end_ts = request.args.get("end")
     desensitize = request.args.get("desensitize", "1") == "1"
-    start = int(start_ts) if start_ts else None
-    end = int(end_ts) if end_ts else None
-    text = log.export_logs(start_ts=start, end_ts=end, desensitize=desensitize)
+    try:
+        start = int(start_ts) if start_ts else None
+        end = int(end_ts) if end_ts else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "start/end 参数无效（必须是整数毫秒时间戳）"}), 400
+    items = _merged_logs(20000, desensitize=desensitize, start_ts=start, end_ts=end)
+    text = "\n".join(_log_line_text(it) for it in items)
     return Response(text, mimetype="text/plain",
                     headers={"Content-Disposition": "attachment; filename=siwx_log.txt"})
 
@@ -831,6 +894,7 @@ def api_job():
             "mode": _job["mode"],
             "logs": _job["logs"],
             "report": _job["report"],
+            "error": _job["error"],
         })
 
 

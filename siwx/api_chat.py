@@ -12,13 +12,14 @@ import re
 import sqlite3
 import threading
 from collections import OrderedDict
+from contextlib import closing
 from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, current_app as _current_app, \
     send_from_directory
 
 from siwx import logger as _logger
-from siwx import media, sns_cdn, voice
+from siwx import media, sns_cdn, validate, voice
 from siwx.plugins import chat_bridge as _plugins
 
 # ── 分片索引（表名 → 分片路径）──────────────────────────────────
@@ -196,6 +197,33 @@ def _accounts() -> list:
             if (d / "message").is_dir():
                 out.append(d.name)
     return out
+
+
+def _acc_dir_or_none(account: str) -> Path | None:
+    """请求里的 account → out_root 下的目录；非法/越界/未解密返回 None。
+
+    各处此前直接 `_out_root() / account`，没有账号名校验；`..` 或绝对路径
+    能上跳/顶掉 out_root（读向任意目录）。统一走 siwx.validate。
+    """
+    p = validate.account_dir(account, must_exist=False)
+    if p is None or not (p / "message").is_dir():
+        return None
+    return p
+
+
+def _int_arg(name: str, default=None):
+    """query 参数 → int；缺省返回 default，非法返回 None（调用方据此 400）。
+
+    裸 int(request.args.get(...)) 会让 ?before=abc 抛 ValueError → 全局 handler
+    回 500 + 把完整 traceback 回显给客户端；而这是典型的客户端参数错误。
+    """
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _file_signature(p: Path):
@@ -407,7 +435,12 @@ def _contact_names_for(acc_dir: Path, usernames) -> dict:
 
 
 def _decode_content(content) -> str:
-    """zstd 魔数解压 + UTF-8 解码；失败返回空串。"""
+    """zstd 魔数解压 + UTF-8 解码。
+
+    失败时不再静默返回空串：空串在模板里渲染成「无内容」（renderer.js:237），
+    用户无法区分「解码失败」与「这条消息本来就是空的」，也没有任何计数/日志
+    （只有 detailed 埋点，默认不可见）。
+    """
     if content is None:
         return ""
     if isinstance(content, str):
@@ -420,13 +453,14 @@ def _decode_content(content) -> str:
             # 只记 hex 头 + 长度，绝不透传正文（_FILE_LOG 存未脱敏原文）
             _logger.detailed("parse", f"[content] zstd 解压失败 len={len(raw)} "
                                       f"head={raw[:16].hex()}: {type(e).__name__}")
-            return ""
+            return "[内容解压失败]"
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
         _logger.detailed("parse", f"[content] UTF-8 解码失败 len={len(raw)} "
                                   f"head={raw[:16].hex()}")
-        return ""
+        # 容错解码：丢掉个别坏字节，回收整条消息（而不是整条置空）
+        return raw.decode("utf-8", "replace")
 
 
 def _fmt(ltype: int, text: str) -> str:
@@ -568,8 +602,8 @@ def accounts():
 def sessions():
     """轻量会话列表：只读 session.db（最新预览+排序时间），带进程内缓存。"""
     account = request.args.get("account", "")
-    acc = _out_root() / account
-    if not (acc / "message").is_dir():
+    acc = _acc_dir_or_none(account)
+    if acc is None:
         return jsonify({"error": "账号不存在或未解密"}), 404
 
     sdb = acc / "session" / "session.db"
@@ -610,7 +644,7 @@ def sessions():
     if not items:
         _logger.warn("api", f"[sessions] session.db 无会话，降级扫描 message 分片 "
                             f"account={account}")
-        for db in sorted((acc / "message").glob("message_*.db")):
+        for db in sorted((acc / "message").glob("*.db")):
             conn = sqlite3.connect(db)
             try:
                 for (un,) in conn.execute("SELECT user_name FROM Name2Id"):
@@ -685,6 +719,17 @@ def _parse_appmsg(text: str):
     def g(tag):
         return _xml_text(_tag_text(text, tag)) if _tag_text(text, tag) else None
     return g("title"), g("url"), g("des")
+
+
+# 链接卡 url 由对端消息 XML 提供（type-49 appmsg），导出页 renderer.js 会直接当
+# href 用。esc 只防属性越界、不防 scheme，javascript: 是合法 href → 点击即执行。
+# 与 ui/common.js 的白名单保持同一条规则，源头过滤后插件/MCP 消费者一并受益。
+_LINK_URL_RE = re.compile(r"^(?:https?:|/|\./|\.\./|#)", re.I)
+
+
+def _safe_link_url(url):
+    u = (url or "").strip()
+    return u if u and _LINK_URL_RE.match(u) else None
 
 
 def _parse_refer(text: str):
@@ -890,8 +935,13 @@ def parse_quote_or_link(t: int, text: str, local_id=None, ts=None):
             channels = _parse_finder_feed(text)
         else:
             title, url, des = _parse_appmsg(text)
-            if title or url:
-                link = {"title": title or "链接", "url": url, "desc": des}
+            safe_url = _safe_link_url(url)
+            if safe_url and safe_url != url:
+                _logger.detailed("parse", f"[link] t=49 url 非白名单协议已丢弃 "
+                                          f"local_id={local_id} ts={ts}",
+                                 ring=False)
+            if title or safe_url:
+                link = {"title": title or "链接", "url": safe_url, "desc": des}
             else:
                 _logger.detailed("parse", f"[link] t=49 无 title/url（将显示 [链接]）"
                                           f"local_id={local_id} ts={ts} "
@@ -1059,24 +1109,31 @@ def messages():
     """分页加载聊天消息：SQL LIMIT/OFFSET，不载入全部消息。"""
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
-    before = int(request.args.get("before", "0") or 0)
+    # 全是 query 参数：裸 int() 遇到 ?before=abc 会 500（并回显 traceback）。
+    # 非法一律 400，且报出具体哪个参数。
+    before = _int_arg("before", 0)
+    before_id = _int_arg("before_id", 0)
+    after = _int_arg("after", 0)
+    after_id = _int_arg("after_id", 0)
+    limit_raw = _int_arg("limit", 100)
+    for _n, _v in (("before", before), ("before_id", before_id),
+                   ("after", after), ("after_id", after_id), ("limit", limit_raw)):
+        if _v is None:
+            return jsonify({"error": f"{_n} 参数无效（必须是整数）"}), 400
     # 游标升级为 (create_time, local_id) 组合：只用时间戳做 `<` 条件时，
     # 翻页边界落在同一秒的一批消息中间（连发消息、消息与系统提示同秒很
     # 常见），剩余同秒消息会被永久跳过。before_id 与 before 配套使用；
     # 只传 before 时保持旧语义（向后兼容旧前端）。
-    before_id = int(request.args.get("before_id", "0") or 0)
     # 正向游标（after/after_id）：时间轴跳转加载的是"某日之前的窗口"，
     # 窗口之后（更新）的消息此前没有任何入口可载入。语义与 before/
     # before_id 对称：create_time > after 或（同秒时）local_id > after_id，
     # 取最早的 limit 条。
-    after = int(request.args.get("after", "0") or 0)
-    after_id = int(request.args.get("after_id", "0") or 0)
     forward = bool(after)
     # 修复：limit 只做了上限、没做下限。负数会被直接拼进 SQL，而 SQLite 的
     # LIMIT -2 等同「无限制」，一次请求就能把整个会话读进内存。
-    limit = max(1, min(int(request.args.get("limit", "100") or 100), 300))
-    acc = _out_root() / account
-    if not (acc / "message").is_dir():
+    limit = max(1, min(limit_raw, 300))
+    acc = _acc_dir_or_none(account)
+    if acc is None:
         return jsonify({"error": "账号不存在或未解密"}), 404
 
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
@@ -1234,8 +1291,8 @@ def timeline():
     _logger.detailed("api", f"[timeline] account={account} chat={chat} month={month or '全部'}")
     if month and not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
         return jsonify({"error": "month 参数格式应为 YYYY-MM"}), 400
-    acc = _out_root() / account
-    if not (acc / "message").is_dir():
+    acc = _acc_dir_or_none(account)
+    if acc is None:
         return jsonify({"error": "账号不存在或未解密"}), 404
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     key_name = "day" if month else "month"
@@ -1287,8 +1344,8 @@ def conversation_stats():
     """单个会话统计：供聊天页右上角弹窗使用。"""
     account = request.args.get("account", "")
     chat = request.args.get("chat", "")
-    acc = _out_root() / account
-    if not (acc / "message").is_dir():
+    acc = _acc_dir_or_none(account)
+    if acc is None:
         return jsonify({"error": "账号不存在或未解密"}), 404
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     names = _contact_names(acc)
@@ -1362,36 +1419,37 @@ def avatar():
         return _plugins.resolve_avatar(username, account,
                                        {"out_root": str(_out_root())})
 
-    db = _out_root() / account / "head_image" / "head_image.db"
+    base = validate.account_dir(account, must_exist=False)
+    db = (base / "head_image" / "head_image.db") if base else None
     if not username:
         return jsonify({"error": "无头像"}), 404
-    if not db.is_file():
+    if not db or not db.is_file():
         data = _plugin_avatar()
         if data:
             return Response(data, mimetype="image/jpeg",
                             headers={"Cache-Control": "private, max-age=86400"})
         return jsonify({"error": "无头像"}), 404
     try:
-        conn = sqlite3.connect(db)
-        candidates = [username]
-        # 输出目录名通常是 wxid_xxx_6409 这类带后缀的账号目录，而头像库里的
-        # 本人 username 是原始 wxid_xxx。给“自己的头像”做一次兼容回退。
-        if username == account:
-            clean = media.clean_wxid(account)
-            if clean not in candidates:
-                candidates.append(clean)
-            if "_" in account:
-                short = account.rsplit("_", 1)[0]
-                if short not in candidates:
-                    candidates.append(short)
-        row = None
-        for u in candidates:
-            row = conn.execute(
-                "SELECT image_buffer FROM head_image WHERE username=?",
-                (u,)).fetchone()
-            if row and row[0]:
-                break
-        conn.close()
+        # closing：close() 此前写在 try 里，读取异常时连接不关（句柄/文件锁滞留）
+        with closing(sqlite3.connect(db)) as conn:
+            candidates = [username]
+            # 输出目录名通常是 wxid_xxx_6409 这类带后缀的账号目录，而头像库里的
+            # 本人 username 是原始 wxid_xxx。给“自己的头像”做一次兼容回退。
+            if username == account:
+                clean = media.clean_wxid(account)
+                if clean not in candidates:
+                    candidates.append(clean)
+                if "_" in account:
+                    short = account.rsplit("_", 1)[0]
+                    if short not in candidates:
+                        candidates.append(short)
+            row = None
+            for u in candidates:
+                row = conn.execute(
+                    "SELECT image_buffer FROM head_image WHERE username=?",
+                    (u,)).fetchone()
+                if row and row[0]:
+                    break
     except sqlite3.Error as e:
         # 非 pass：降级到插件头像解析器再 404，缺的是日志而非处理
         _logger.detailed("api", f"[avatar] head_image.db 读取失败，降级插件解析器 "
@@ -1453,9 +1511,12 @@ def media_voice():
                                 f"account={account} chat={chat}")
     if not account:
         return jsonify({"error": "参数缺失"}), 400
+    acc_dir = validate.account_dir(account, must_exist=False)
+    if acc_dir is None:
+        return jsonify({"error": "账号不存在或未解密"}), 404
     _logger.detailed("api", f"[voice] account={account} chat={chat} "
                             f"local_id={local_id} ts={ts} fmt={fmt}")
-    body, info = voice.get_voice(_out_root() / account, chat=chat,
+    body, info = voice.get_voice(acc_dir, chat=chat,
                                  local_id=local_id, svr_id=svr_id, ts=ts)
     if body is None:
         return jsonify({"error": info}), 404
@@ -1502,10 +1563,13 @@ def media_image():
                                 f"account={account} chat={chat} md5={(md5 or '')[:8]}")
     if not account:
         return jsonify({"error": "参数缺失"}), 400
+    acc_dir = validate.account_dir(account, must_exist=False)
+    if acc_dir is None:
+        return jsonify({"error": "账号不存在或未解密"}), 404
     # 高频端点：detailed 天然节流（仅详细模式可见）
     _logger.detailed("api", f"[image] account={account} chat={chat} "
                             f"local_id={local_id} ts={ts} md5={(md5 or '')[:8]} hq={hq}")
-    body, info = media.get_image(account, md5, _out_root() / account,
+    body, info = media.get_image(account, md5, acc_dir,
                                  chat=chat or None, local_id=local_id or None,
                                  ts=ts or None, bubble_md5=bubble_md5 or None,
                                  hq=hq)

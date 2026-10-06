@@ -556,7 +556,11 @@ def run_sns_export(db_path: Path, account: str, fmt: str = "json",
     if limit:
         feeds = feeds[:limit]
     if not feeds:
-        return {"ok": False, "error": "没有符合条件的动态"}
+        # "筛选后没有动态"不是失败：旧实现返回 ok=False，server 把它当 RuntimeError
+        # 抛出（job.ok=False），前端显示成红色的"导出失败"，用户以为程序坏了。
+        # 现在作为空结果成功返回，由 UI 明确呈现空态。
+        return {"ok": True, "empty": True, "count": 0, "file": None,
+                "error": None, "message": "没有符合条件的动态"}
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     folder = _safe_name(f"{account}_朋友圈_{stamp}")

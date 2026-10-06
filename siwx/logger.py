@@ -113,13 +113,29 @@ def _bridge(level_name: str, module: str, msg: str):
         pass
 
 
+_CONSOLE = None
+
+
 def _cprint(line: str) -> None:
     """控制台输出。打包成无控制台（--noconsole）运行时 stdout 可能为 None，
     print 会抛 AttributeError——控制台输出只是附加通道，失败必须静默。"""
     try:
-        print(line)
+        if _CONSOLE is not None:
+            print(line, file=_CONSOLE)
+        else:
+            print(line)
     except Exception:
         pass
+
+
+def set_console(stream) -> None:
+    """把 rough/info/warn/error 的控制台输出切到指定流。
+
+    MCP 走 stdio 的 JSON-RPC：stdout 里混进任何非 JSON 字节都会破坏协议帧，
+    而共享的 siwx.logger 一直往 stdout 打日志（export_chat 每次必脏）。
+    """
+    global _CONSOLE
+    _CONSOLE = stream
 
 
 def rough(module: str, msg: str):
