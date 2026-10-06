@@ -1,12 +1,12 @@
 {
-  "version": "5.0.6",
-  "date": "2026-10-02 04:33:56",
-  "notes": "v5.0.6\n\n**自动更新全面重做：修复跨盘更新失败（WinError 17），macOS 打包版首次支持应用内更新。**\n\n- **Windows 跨盘修复**：更新包先下载到系统临时目录，替换改用 shutil.copyfile 跨盘复制——os.replace 不能跨卷导致的「系统无法将文件移到不同的磁盘驱动器」不再出现。安装完成后复核 SHA-256/文件大小，失败自动回滚，不再出现「旧 exe 已改名、新文件没落位」的变砖现场。\n- **带版本号文件名**：安装目标改为「当前运行的 exe 换上新版本号」（运行 stories-in-wx-v5.0.4-windows-x64.exe → 落位 stories-in-wx-v5.0.5-windows-x64.exe），不再硬编码 stories-in-wx.exe——用户目录里往往根本不存在这个文件名；文件名不含版本号时原地替换并保留 backup。\n- **移除 taskkill 自杀雷**：旧逻辑 `taskkill /im stories-in-wx*.exe` 的通配符会匹配到正在更新的进程自己，一旦生效整个更新静默死亡（连错误提示都没有）。运行中的 exe 在 Windows 上本就允许改名，改为「改名旧文件 → 落新文件」平滑换血，全程无需杀进程。\n- **macOS 应用内更新**：挂载 DMG → 旧 .app 改名 → 新包原子落位（失败回滚）→ `open -n` 重启；裸二进制运行同样支持。不再依赖未打包进产物的 update_mac.sh（旧脚本依赖系统 python3，打包版点更新只会报「未找到更新脚本」）。\n- **下载加固**：多候选地址（version.json 提供的链接 + GitHub Release 直链兜底）逐个尝试，单地址失败自动重试。\n- **重启竞态**：新进程启动时先等旧进程释放 8787 端口（最多 30 秒），避免新版 Flask EADDRINUSE 静默退出。\n\n**注意**：v5.0.5 及更早版本内含旧更新代码，程序装在非 C 盘的用户本次更新到 v5.0.6 仍会失败，请到 Release 页手动下载对应产物覆盖一次；自 v5.0.6 起，应用内自动更新在所有盘符位置均可正常工作。\n\n全量测试 283 通过 / 1 跳过。",
+  "version": "5.0.7",
+  "date": "2026-10-02 12:49:23",
+  "notes": "## 主要修复：导出渲染 + 日志系统\n\n> 本版为问题修复版，全部改动由 v5.0.6 的问题报告驱动（静态分析 + 全量导出产物复核：31437 条引用消息、885 条错挂媒体、45 条 CDATA 泄漏）。无破坏性变更，无需迁移。\n\n### 导出渲染\n\n- **引用消息修复**：微信 5.0 数据库中引用消息外层为 `local_type=49`、引用信息在内层 `<refermsg>`，原实现只解析外层 57 导致 `quote` 字段恒为空（0/31437）。导出与 Web 端三处富化逻辑统一按 `<refermsg>` 探测，\"谁引用了什么\"完整恢复；真链接消息不受影响\n- **媒体错挂修复**：多分片会话的 `local_id` 独立编号会撞号，文本/链接/系统消息被错挂上属于其它消息的图片（实测 885 条，含\"邀请你加入群聊\"卡片被整张顶掉）。5 处回填点全部收敛到类型门禁：仅图片(3/47)与语音(34)可获 `mediaFile`，图片/语音槽位互斥\n- **CDATA 泄漏修复**：链接/引用消息的 `content` 不再出现 `<![CDATA[...]]>` 原文（实测 45 条）；HTML 渲染器 type 49 分支复用预解析 link 字段，引用消息正文走纯文本\n\n### 日志系统\n\n- **终结导出失败静默**：图片/语音处理失败按原因分布聚合告警、分片打开失败告警、采集与写出条数对账告警——不再只能从进度数字缺口猜测\"哪一张、为什么\"\n- **日志级别切换生效**：UI 粗略/详细切换此前只影响环形缓冲、`siwx.log` 恒 DEBUG；现在同步作用于文件日志\n- **日志页统一脱敏**：新增键值对账号标识规则（`account=`/`chat=`/`ownerId=` 等，覆盖 `wxalias_xxx` 类自定义微信号），wxid/群号/密钥/路径不随截图外泄；无控制台打包运行时 `print` 不再可能抛异常\n\n### 测试\n\n- 回归测试 290 → 304：引用消息（4）、媒体门禁（2）、CDATA（3）、日志脱敏（4）、级别切换（1）\n\n**升级说明**：升级后建议重新导出一次以验证引用消息与媒体挂载；导出产物格式无变化。",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.6/stories-in-wx-v5.0.6-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.6/stories-in-wx-v5.0.6-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.7/stories-in-wx-v5.0.7-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.7/stories-in-wx-v5.0.7-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.6/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.7/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
