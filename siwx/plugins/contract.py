@@ -590,7 +590,7 @@ def _is_duplicate(target, item) -> bool:
     for existing in target.items:
         if _dup_key(existing) == key:
             return True
-    # 页面额外与内置 6 项比对（前端也会挡一层，这里是服务端保证）
+    # 页面额外与内置页名比对（前端也会挡一层，这里是服务端保证）
     if isinstance(item, object) and getattr(item, "name", None) in BUILTIN_PAGE_NAMES:
         return True
     return False

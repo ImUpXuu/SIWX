@@ -547,7 +547,7 @@ python -m unittest tests.test_sns -v
 **改 CDN 相关代码前先跑真库体检**（不写任何文件，只读 sns.db + 真网络）：
 
 ```bash
-python diag_sns_cdn.py <账号目录名> 300 60
+python scripts/diag_sns_cdn.py <账号目录名> 300 60
 ```
 
 ---

@@ -26,7 +26,7 @@ import time
 import urllib.error
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 仓库根（迁入 scripts/ 后多一层）
 
 from siwx import paths, sns, sns_cdn  # noqa: E402
 

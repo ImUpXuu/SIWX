@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlencode
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 仓库根（迁入 scripts/ 后多一层）
 
 ACC = sys.argv[1] if len(sys.argv) > 1 else "wxid_redacted_a_6409"
 

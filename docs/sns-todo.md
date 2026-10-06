@@ -259,8 +259,8 @@ PARSE_FAIL      17 条
 **复现与体检**：
 
 ```bash
-python diag_sns_cdn.py <账号目录名> 300 60   # 真库 + 真网络，逐条给原因（只读）
-python diag_sns_api.py <账号目录名>          # 打真实 API，验证成功/失败/日志三态
+python scripts/diag_sns_cdn.py <账号目录名> 300 60   # 真库 + 真网络，逐条给原因（只读）
+python scripts/diag_sns_api.py <账号目录名>          # 打真实 API，验证成功/失败/日志三态
 python -m pytest tests/test_sns.py -q        # TestSnsCdnDiagnosis 固化以上结论
 ```
 
