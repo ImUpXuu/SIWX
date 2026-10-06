@@ -7,7 +7,7 @@
 支持格式：``json`` / ``markdown`` / ``txt`` / ``html``
 
 媒体（可选）：按需从 CDN 下载并 ISAAC64 解密，落盘为
-``media/<postId>_<index>.<ext>``（命名照搬 WeFlow）。
+``media/<postId>_<index>.<ext>``。
 """
 from __future__ import annotations
 
@@ -246,7 +246,7 @@ def download_media(feeds, media_dir: Path, cache_dir=None,
                    progress=None, concurrency: int = DEFAULT_CONCURRENCY) -> dict:
     """并发下载动态里的媒体，返回 ``{(tid, index): 相对路径}`` 与统计。
 
-    照搬 WeFlow 的命名：``<postId>_<index>.<ext>``，实况照片加 ``_live`` 后缀。
+    媒体文件命名：``<postId>_<index>.<ext>``，实况照片加 ``_live`` 后缀。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 

@@ -1,7 +1,7 @@
 """微信朋友圈 CDN 媒体获取与解密。
 
-方案来源：WeFlow（lurve1314/WeFlow）的成熟做法 —— **不依赖微信本地缓存，
-直接从 CDN 下载**。本模块是其纯 Python 复刻，零第三方依赖。
+实现思路：**不依赖微信本地缓存，直接从 CDN 下载**。
+本模块为纯 Python 实现，零第三方依赖。
 
 ## 为什么不用微信本地缓存
 
@@ -13,7 +13,7 @@
 
 因此正确解法是：**用 XML 里的 URL 直接下载**。
 
-## 关键实现要点（照搬 WeFlow）
+## 关键实现要点
 
 1. **URL 重构**（``build_media_url``）::
 
@@ -30,8 +30,8 @@
    作为 ISAAC64 种子生成密钥流，逐字节 XOR。见 ``sns_isaac64``。
 
 4. **缓存键**：``md5(normalize_cache_url(url))`` —— **去掉 token/idx**，
-   因为 token 每次都变但资源是同一个。这是 WeFlow 踩过坑后改成的做法
-   （旧版用完整 URL 的 md5，token 一变缓存全失效）。
+   因为 token 每次都变但资源是同一个。（若直接用完整 URL 的 md5，
+   token 一变缓存就会全部失效。）
 
 5. **表情评论**走另一条路：``encrypt_url`` + ``aes_key`` → **AES-GCM**
    （nonce 在尾部 12 字节的格式优先）。
@@ -145,7 +145,7 @@ def safe_url(url: str) -> str:
 
 def build_media_url(url: str, token: str | None = None,
                     is_video: bool | None = None) -> str:
-    """按 WeFlow 的规则重构 CDN URL。
+    """按微信 CDN 的规则重构媒体 URL。
 
     :param url:      XML 里的 ``<url>`` 文本
     :param token:    XML 里 ``<url token="...">`` 属性值（**必须**，否则 400）
@@ -190,7 +190,7 @@ def normalize_cache_url(url: str) -> str:
         q = [(k, v) for k, v in parse_qsl(u.query, keep_blank_values=True)
              if k not in ("token", "idx")]
         query = urlencode(q)
-        # 与 WeFlow 一致：host + path + 其余 query（不带 scheme）
+        # 规范化结果：host + path + 其余 query（不带 scheme）
         return f"{u.netloc}{u.path}{'?' + query if query else ''}"
     except ValueError:
         return re.sub(r"([?&])(?:token|idx)=[^&]*", r"\1", url).rstrip("?&")
@@ -245,7 +245,7 @@ def decrypt_isaac(data: bytes, key: str | int) -> bytes:
 
 
 def _aes_gcm_key_tries(aes_key: str):
-    """表情 AES 密钥的候选解释（照搬 WeFlow 的 5 种变体）。"""
+    """表情 AES 密钥的候选解释（5 种常见变体，逐个尝试）。"""
     from Crypto.Cipher import AES  # noqa: F401  (延迟导入，仅在需要时用)
     tries = []
     hexs = re.sub(r"\s", "", aes_key or "")
