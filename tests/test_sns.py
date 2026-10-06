@@ -220,10 +220,14 @@ class TestSnsExport(unittest.TestCase):
         self.assertFalse(r["ok"])
 
     def test_export_empty_result(self):
+        """筛选后没有动态 = 空结果成功（旧契约 ok=False 会被 UI 渲染成红色"导出失败"）。"""
         from siwx import sns_export as E
         r = E.run_sns_export(self.db, "wxid_test", fmt="json",
                              export_root=self.tmp / "out", keyword="不存在的内容")
-        self.assertFalse(r["ok"])
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["empty"])
+        self.assertEqual(r["count"], 0)
+        self.assertIsNone(r["file"])
 
 
 _EMOJI_XML = (

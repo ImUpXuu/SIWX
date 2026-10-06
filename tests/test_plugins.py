@@ -232,9 +232,13 @@ class TestContract(PluginTestCase):
         self.assertEqual(len(self.reg.pages), 0)
 
     def test_builtin_page_names_protected(self):
-        """插件不得占用内置页面名（服务端也要挡一层）。"""
+        """插件不得占用内置页面名（服务端也要挡一层）。
+
+        guide 已在 7e8f9b7 从保留名单移除（该内置页同时被删除），
+        插件现在可以合法使用这个名字。
+        """
         from siwx.plugins import contract
-        for name in ("guide", "chat", "export", "mcp", "logs", "settings"):
+        for name in ("chat", "export", "mcp", "logs", "settings"):
             self.reg.pages.items = []
             counts = contract.register_plugin(FakeModule(), self.reg, {
                 "name": "p1", "pages": [{"name": name, "title": "x"}],

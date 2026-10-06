@@ -3212,5 +3212,256 @@ class TestWxgfSubprocessAndIntegrity(unittest.TestCase):
         self.assertNotIn("wxgf", sigs_line)
 
 
+class TestAuditFixes20261006(TempRootCase):
+    """2026-10-06 审计复核结论的回归：信任边界、失败契约、导出页渲染、媒体定位。"""
+
+    @staticmethod
+    def _client():
+        from siwx.server import app
+        return app.test_client()
+
+    # ── 信任边界 ──────────────────────────────────────────────
+
+    def test_validate_account_rejects_traversal(self):
+        from siwx import validate
+        # 正则本身允许 "."（账号名里有它），穿越必须靠 resolve()+relative_to 兜住
+        self.assertTrue(validate.valid_account(".."))
+        self.assertIsNone(validate.account_dir(".."))
+        self.assertIsNone(validate.account_dir("../x"))
+        for bad in ("a/b", "a\\b", "", None, 123, "C:/Windows"):
+            self.assertFalse(validate.valid_account(bad), bad)
+            self.assertIsNone(validate.account_dir(bad), bad)
+        self.assertTrue(validate.valid_account("wxid_abc_1234"))
+        self.assertTrue(validate.valid_account("wxalias_example_01"))
+
+    def test_settings_clear_rejects_path_wxid(self):
+        """POST /api/settings/clear 的 wxid 此前裸拼路径，可 rmtree 任意目录。"""
+        from siwx.server import app
+        r = app.test_client().post("/api/settings/clear",
+                                   json={"kind": "output", "wxid": "C:/Windows"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_run_rejects_out_dir_outside_output_root(self):
+        from siwx.server import app
+        r = app.test_client().post("/api/run", json={
+            "mode": "export", "out_dir": str(self.tmp / "elsewhere")})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("out_dir", r.get_json()["error"])
+
+    def test_run_rejects_unrecognized_db_dir(self):
+        from siwx.server import app
+        r = app.test_client().post("/api/run", json={
+            "mode": "auto", "db_dir": str(self.tmp / "not-a-wechat-dir")})
+        self.assertEqual(r.status_code, 400)
+
+    def test_sns_emoji_rejects_non_cdn_url(self):
+        """表情 url 来自好友评论 XML，属于 GET 参数，必须过 CDN 白名单。"""
+        import json as _json
+        from siwx.server import app
+        spec = _json.dumps({"url": "http://169.254.169.254/latest/meta-data/"})
+        r = app.test_client().get("/api/sns/emoji", query_string={"emoji": spec})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.get_json().get("reason"), "not-cdn")
+
+    def test_artifact_origin_pinned_to_repo_path(self):
+        from siwx import auto_update
+        self.assertTrue(auto_update._manifest_url_allowed(
+            "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.6/x.exe"))
+        # 只校验 host 时 github.com/attacker/... 也会放行 —— 必须拒绝
+        self.assertFalse(auto_update._manifest_url_allowed(
+            "https://github.com/attacker/SIWX/releases/download/v1/evil.exe"))
+        self.assertFalse(auto_update._manifest_url_allowed("https://evil.com/x.exe"))
+        self.assertFalse(auto_update._manifest_url_allowed(""))
+
+    def test_version_field_must_be_semver(self):
+        """version 会拼进文件名/安装目标/正则替换模板，必须严格校验。"""
+        from siwx import auto_update
+        self.assertTrue(auto_update.valid_version("5.0.7"))
+        self.assertTrue(auto_update.valid_version("5.0.7-rc1"))
+        for bad in ("9.9.9/../../../../Startup/evil", "5.0", "", None, "v5.0.7", ".."):
+            self.assertFalse(auto_update.valid_version(bad), bad)
+
+    def test_cdn_fetch_verifies_tls(self):
+        """生产媒体链路默认必须校验证书（此前 check_hostname=False + CERT_NONE）。"""
+        src = (ROOT / "siwx" / "sns_cdn.py").read_text(encoding="utf-8")
+        self.assertNotIn("verify_mode = ssl.CERT_NONE", src)
+        self.assertNotIn("ctx.check_hostname = False", src)
+        self.assertIn("ctx = ssl.create_default_context()", src)
+
+    # ── 失败契约 ──────────────────────────────────────────────
+
+    def test_job_exposes_error_field(self):
+        """前端四处（export/settings/onboarding）判 job.error，此前该字段从不返回。"""
+        from siwx import server
+        with server._lock:
+            server._job.update({"error": "RuntimeError: boom", "ok": False,
+                                "done": True, "running": False, "logs": [], "report": None})
+        try:
+            body = server.app.test_client().get("/api/job").get_json()
+            self.assertEqual(body["error"], "RuntimeError: boom")
+        finally:
+            with server._lock:
+                server._job.update({"error": None, "ok": False, "done": False,
+                                    "running": False, "logs": [], "report": None})
+
+    def test_start_job_poll_survives_transient_failure(self):
+        """common.js 的 startJob：单次 fetch 失败不得终止轮询（旧实现 return 掉）。"""
+        src = (ROOT / "siwx" / "ui" / "common.js").read_text(encoding="utf-8")
+        self.assertIn("failStreak", src)
+        self.assertIn("与后端失去联系", src)
+
+    def test_messages_rejects_non_numeric_cursor(self):
+        """裸 int() 会把客户端参数错误变成 500 + 完整 traceback 回显。"""
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        c = self._client()
+        for qs in ("before=abc", "before_id=abc", "after=abc", "after_id=abc", "limit=abc"):
+            r = c.get(f"/api/chat/messages?account={account}&chat={chat}&{qs}")
+            self.assertEqual(r.status_code, 400, qs)
+            self.assertIn("参数无效", r.get_json()["error"])
+        # 合法参数仍然 200
+        self.assertEqual(c.get(
+            f"/api/chat/messages?account={account}&chat={chat}&limit=10").status_code, 200)
+
+    def test_logs_limit_non_numeric_400(self):
+        self.assertEqual(self._client().get("/api/logs?limit=abc").status_code, 400)
+
+    def test_logs_export_shares_log_page_sources(self):
+        """日志导出与日志页同源（此前导出只有进程内 _FILE_LOG，重启即空）。"""
+        from siwx import server, logger as _logger
+        _logger.rough("test", "导出同源校验标记 XYZ")
+        text = self._client().get("/api/logs/export").get_data(as_text=True)
+        self.assertIn("XYZ", text)
+        self.assertIn("] [", text)
+
+    def test_sns_export_empty_is_not_a_failure(self):
+        """"没有符合条件的动态"是空结果，不是失败（旧实现 ok=False → 红错态）。"""
+        from siwx import sns_export
+        old = sns_export._iter_feeds
+        try:
+            sns_export._iter_feeds = lambda *a, **k: iter(())
+            res = sns_export.run_sns_export(self.tmp / "sns.db", "wxalias_example_01", fmt="json")
+        finally:
+            sns_export._iter_feeds = old
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["empty"])
+        self.assertEqual(res["count"], 0)
+
+    # ── 数据正确性 ────────────────────────────────────────────
+
+    def test_chat_count_dedupes_shards(self):
+        """一个会话的表散在多个分片时，会话数只能算 1（旧实现 2.39× 虚高）。"""
+        acc, account, chat = make_account(self.tmp, n_texts=3)
+        make_shard(acc / "message" / "message_1.db", chat, ["另一个分片的同会话消息"],
+                   start_ts=1_700_000_100)
+        from siwx import stats
+        raw = stats.compute_stats(account, force=True)
+        self.assertEqual(raw["chat_count"], 1)
+        self.assertEqual(stats.summarize(raw)["chat_count"], 1)
+
+    def test_stats_range_filter_scopes_chat_count(self):
+        """会话数必须跟随日期筛选（旧实现取全量值，无视区间）。"""
+        from siwx import stats
+        acc, account, chat = make_account(self.tmp, n_texts=3)
+        # 另一个会话，时间戳落在 2020 年（默认夹具在 2023-11）
+        make_shard(acc / "message" / "message_1.db", "wxid_other", ["别的时间段"],
+                   start_ts=1_600_000_000)
+        raw = stats.compute_stats(account, force=True)
+        self.assertEqual(raw["chat_count"], 2)
+        only_2023 = stats.summarize(raw, start="2023-01-01", end="2023-12-31")
+        self.assertEqual(only_2023["chat_count"], 1)
+        only_2020 = stats.summarize(raw, start="2020-01-01", end="2020-12-31")
+        self.assertEqual(only_2020["chat_count"], 1)
+
+    def test_voice_does_not_leak_across_sessions(self):
+        """不同会话共享同一 local_id 时，裸 local_id=? 会捞到别的会话的语音。
+
+        构造：目标语音在 media_0.db，media_1.db 里有一条 chat_name_id 属于别的
+        会话、但 local_id 相同的记录。旧实现先在 media_1.db 用裸 local_id 命中
+        并直接返回 → 跨会话音频泄漏；修复后必须继续走到 media_0.db。
+        """
+        from siwx import voice
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        msg_dir = acc / "message"
+
+        decoy = msg_dir / "media_1.db"
+        conn = sqlite3.connect(decoy)
+        conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+        conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (chat,))
+        conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
+                     "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
+        conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
+                     (2, 1_700_000_000, 9, 0, b"\x02#!SILK_V3WRONG", "0"))
+        conn.commit(); conn.close()
+
+        conn = sqlite3.connect(msg_dir / "media_0.db")
+        conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
+                     "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
+        conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
+                     (1, 1_700_000_000, 9, 0, b"\x02#!SILK_V3RIGHT", "0"))
+        conn.commit(); conn.close()
+
+        data, _info = voice.get_voice(acc, chat=chat, local_id=9, svr_id=0, ts=0)
+        self.assertEqual(data, b"#!SILK_V3RIGHT")
+
+    def test_extract_md5_ignores_longer_attributes(self):
+        """originsourcemd5 等属性名里含 md5=，必须有左边界。"""
+        from siwx import media
+        real, decoy = "b" * 32, "a" * 32
+        self.assertEqual(
+            media.extract_md5_from_xml(f'<msg originsourcemd5="{decoy}" md5="{real}"/>'),
+            real)
+        self.assertIsNone(media.extract_md5_from_xml(
+            f'<msg originsourcemd5="{decoy}"/>'))
+        self.assertIsNone(media.extract_md5_from_xml(f'<msg androidmd5="{decoy}"/>'))
+
+    def test_bubble_paths_match_exact_local_id_and_ts(self):
+        """<id>*.dat 会命中 91_… 等同目录兄弟文件，必须带下划线边界与 ts。"""
+        from siwx import media
+        root = self.tmp / "cache"
+        target = hashlib.md5(b"wxid_friend").hexdigest()
+        d = root / "2025-01" / "Message" / target / "Bubble"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "9_1700000000_b.dat").write_bytes(b"x")
+        (d / "91_1700000000_b.dat").write_bytes(b"y")
+        old_find = media._wechat_cache_roots
+        media._CACHE_ROOTS_MEMO.clear()
+        try:
+            media._wechat_cache_roots = lambda _wxid: [root]
+            got = media.bubble_paths("wxid_friend", "wxid_friend", 9, 1_700_000_000)
+        finally:
+            media._wechat_cache_roots = old_find
+            media._CACHE_ROOTS_MEMO.clear()
+        self.assertEqual([p.name for p in got], ["9_1700000000_b.dat"])
+
+    def test_save_key_cache_uses_unique_temp_name(self):
+        """固定 media_key.tmp 在多进程导出下会互相踩（写坏即丢全部派生密钥）。"""
+        from siwx import media
+        src = (ROOT / "siwx" / "media.py").read_text(encoding="utf-8")
+        self.assertIn("mkstemp", src)
+        self.assertNotIn('p.with_suffix(".tmp")', src)
+
+    def test_index_and_type_filter_regressions(self):
+        """导出页类型的类型筛选与 href scheme 白名单（A-7 / A-4）。"""
+        src = (ROOT / "siwx" / "templates" / "default" / "renderer.js").read_text(encoding="utf-8")
+        # activeTypes 必须与 m.type（数值）同型，否则 Set.has 恒假、列表被清空
+        self.assertIn("activeTypes.has(Number(t.dataset.type))", src)
+        self.assertIn("Number(this.dataset.type)", src)
+        # 链接卡 href 必须过 scheme 白名单
+        self.assertIn("function safeUrl(", src)
+        self.assertIn("var href = safeUrl(url);", src)
+
+    def test_decode_content_degrades_visibly(self):
+        from siwx import api_chat
+        out = api_chat._decode_content(b"\xff\xfeabc")
+        self.assertTrue(out)                      # 不再整条置空
+        self.assertIn("abc", out)
+        self.assertNotEqual(api_chat._decode_content(b"\x28\xb5\x2f\xfdbroken"), "")
+
+    def test_xlsx_writer_is_streaming(self):
+        from siwx import exporter
+        src = (ROOT / "siwx" / "exporter.py").read_text(encoding="utf-8")
+        self.assertIn("Workbook(write_only=True)", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

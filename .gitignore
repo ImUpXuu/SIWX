@@ -6,6 +6,8 @@ media_research/
 dist/
 build/
 *.log
+# 轮转件是 siwx.log.1，*.log 匹配不到；logs/ 里还含明文微信路径与账号目录名
+logs/
 blobs.txt
 *.spec.bak
 .DS_Store
