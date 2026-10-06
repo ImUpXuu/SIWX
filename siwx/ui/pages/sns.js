@@ -725,7 +725,7 @@ const SnsPage = {
     closePops() { store.pops.range = store.pops.user = store.pops.export = false; },
 
     /* ── 导出 ── */
-    doExport() {
+    async doExport() {
       if (store.exportMedia && !window.confirm('下载媒体会逐张访问 CDN，可能耗时较久，确定继续？')) return;
       // 手输并发不受 min/max 属性拦截，这里统一钳制
       store.exportConc = Math.min(16, Math.max(1, Number(store.exportConc) || 5));
