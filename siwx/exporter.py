@@ -855,7 +855,7 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
         if stats:
             stats.observe(msg)
         count += 1
-        raw = msg.get("rawContent", "")
+        raw = msg.get("rawContent") or ""
         if len(raw) > 8000:
             truncated += 1
         conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?)",

@@ -31,7 +31,7 @@ def info():
     builtin = _builtin_names()
     tools = [{"name": t["name"], "description": t["description"],
               "owner": "" if t["name"] in builtin else "plugin",
-              "enabled": bool(cfg.get("tools", {}).get(t["name"], True))}
+              "enabled": bool((cfg.get("tools") or {}).get(t["name"], True))}
              for t in _all_tools()]
     return jsonify({
         "command": cmd,
