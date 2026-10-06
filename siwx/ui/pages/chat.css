@@ -131,6 +131,11 @@
 }
 .c-tip { text-align: center; color: var(--muted); padding: 48px 0; }
 .m-time-chip { text-align: center; color: var(--muted); font-size: 11px; margin: 14px 0 6px; }
+/* 内联小黄脸（与导出页同一素材源） */
+.wx-face {
+  width: 24px; height: 24px; vertical-align: -6px; margin: 0 1px;
+  display: inline-block; user-select: none;
+}
 .m-row.sys { text-align: center; margin: 6px 0; position: relative; }
 .m-row.sys .m-bubble {
   display: inline-block; background: var(--chip-bg); color: var(--muted);

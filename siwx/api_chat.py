@@ -14,7 +14,8 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, current_app as _current_app
+from flask import Blueprint, Response, jsonify, request, current_app as _current_app, \
+    send_from_directory
 
 from siwx import logger as _logger
 from siwx import media, sns_cdn, voice
@@ -1408,6 +1409,27 @@ def avatar():
         return jsonify({"error": "无头像"}), 404
     return Response(row[0], mimetype="image/jpeg",
                     headers={"Cache-Control": "private, max-age=86400"})
+
+
+@bp.get("/faces")
+def faces():
+    """聊天查看页内联小黄脸：返回权威名称表（不带方括号）。
+
+    与导出管线共用 siwx/wx_faces.py 的素材；前端据此把正文/引用/系统
+    消息里的 [表情名] 替换成 /api/chat/face 的内联图。"""
+    from siwx import wx_faces
+    return jsonify({"names": [n[1:-1] for n in wx_faces.load_faces()]})
+
+
+@bp.get("/face")
+def face():
+    """单个表情 PNG。名字先查权威表再定文件序号，不拼用户路径。"""
+    from siwx import wx_faces
+    p = wx_faces.face_file(request.args.get("name", ""))
+    if not p:
+        return jsonify({"error": "未知表情"}), 404
+    return send_from_directory(p.parent, p.name, mimetype="image/png",
+                               max_age=86400)
 
 
 @bp.get("/media/voice")

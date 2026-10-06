@@ -96,7 +96,9 @@
 
 /* 环形图 */
 .st-donut-wrap { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
-.st-donut { flex: none; }
+/* 锁定环形图宽度：.st-chart 是 width:100%，不锁会把 190 的 viewBox 撑大、
+   把图例挤到下方，左栏比右栏高出一大截（右栏底部一大块空白） */
+.st-donut { flex: none; width: 190px; }
 .st-legend { flex: 1; min-width: 170px; display: flex; flex-direction: column; gap: 7px; }
 .st-leg {
   display: flex; align-items: center; gap: 9px; font-size: 12.5px;

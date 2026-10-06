@@ -80,3 +80,15 @@ def datauris(names) -> dict:
     faces = load_faces()
     return {n: "data:image/png;base64," + faces[n]
             for n in sorted(names) if n in faces}
+
+
+def face_file(name: str):
+    """聊天查看页用：表情名（不带方括号）→ 对应 PNG 路径。
+
+    名字先查权威表定文件序号，不拼接用户输入路径；表内无此名或
+    素材缺失返回 None。"""
+    key = f"[{name}]"
+    if key not in NAMES:
+        return None
+    p = _ASSETS / f"f{NAMES.index(key):03d}.png"
+    return p if p.is_file() else None

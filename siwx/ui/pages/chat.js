@@ -232,6 +232,7 @@ async function init() {
     }
   });
 
+  await loadFaces();
   await loadSessions();
 }
 
@@ -548,9 +549,43 @@ function messageByKey(key) {
   return loadedMessages.find(m => msgKey(m) === key);
 }
 
+/* ── 小黄脸：与导出管线共用 siwx/wx_faces.py 素材表 ──────────────
+ * 后端 /api/chat/faces 给名称表、/api/chat/face 给 PNG；
+ * 正文/引用/系统消息里的已知 [表情名] 替换为内联图，未知名原样保留。 */
+let faceNames = null;
+async function loadFaces() {
+  try {
+    const d = await fetchJSON('/api/chat/faces');
+    faceNames = new Set(d.names || []);
+  } catch (e) {
+    faceNames = new Set();               // 后端不支持时维持纯文本
+  }
+}
+const FACE_TOKEN_RE = /\[[^\[\]\n]{1,20}\]/g;
+function faceText(escaped) {
+  if (!faceNames || !faceNames.size) return escaped;
+  return escaped.replace(FACE_TOKEN_RE, tok => {
+    const name = tok.slice(1, -1);
+    if (!faceNames.has(name)) return tok;
+    return `<img class="wx-face" alt="${tok}" title="${tok}"` +
+           ` src="/api/chat/face?name=${encodeURIComponent(name)}">`;
+  });
+}
+
+/** 复制用的纯文本：正文优先（保留 [表情名] 字面量）；媒体/特殊类型回退可读占位 */
+function messageCopyText(m) {
+  if (m.text) return m.text;
+  const fallback = {
+    image: '[图片]', file: '[文件]', voice: '[语音]', card: '[名片]',
+    video: '[视频]', sticker: '[动画表情]', location: '[位置]', call: '[通话]',
+    record: '[聊天记录]', channels: '[视频号卡片]',
+  }[m.kind];
+  return fallback || (m.link && m.link.url) || `[${m.type ?? '消息'}]`;
+}
+
 function bubble(m) {
   if (m.type === 10000 || m.type === 10002) {
-    return `<div class="m-row sys" data-key="${esc(msgKey(m))}" data-ts="${m.ts || 0}"><div class="m-bubble">${esc(m.text)}</div><button class="m-copy">复制</button></div>`;
+    return `<div class="m-row sys" data-key="${esc(msgKey(m))}" data-ts="${m.ts || 0}"><div class="m-bubble">${faceText(esc(m.text))}</div><button class="m-copy">复制</button></div>`;
   }
   const who = m.is_me ? 'me' : '';
   // 本人头像用服务端解析的 owner wxid：账号目录名可能带设备后缀，
@@ -565,7 +600,7 @@ function bubble(m) {
     inner = SX.renderNodes(m.render);
   } else if (m.kind === 'quote' && m.quote) {
     inner = `<div class="m-quote"><div class="m-quote-n">${esc(m.quote.displayname)}</div>` +
-            `<div class="m-quote-t">${esc(m.quote.content)}</div></div>` + esc(m.text);
+            `<div class="m-quote-t">${faceText(esc(m.quote.content))}</div></div>` + faceText(esc(m.text));
   } else if (m.kind === 'channels' && m.channels) {
     // 视频号卡片：还原客户端可见信息（作者/描述/封面），播放不强求
     const ch = m.channels;
@@ -619,7 +654,7 @@ function bubble(m) {
       inner = '[动画表情]';
     }
   } else {
-    inner = esc(m.text);
+    inner = faceText(esc(m.text));
   }
   let quoteHtml = '';
   if (m.quote && m.kind !== 'quote') {
