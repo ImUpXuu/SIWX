@@ -206,7 +206,11 @@ def find_wechat_data_dirs():
             _slog.detailed("discover", f"枚举根目录 {root} 失败: {e}")
             continue
 
-    _slog.detailed("discover", f"扫描 {len(roots)} 个根, 命中 {len(out)} 账号")
+    # 这行在每次扫描时都写：媒体解密每张图都会调 find_wechat_data_dirs()，
+    # 实测 logs/siwx.log 13760 行里 5800 行（42%）都是这条扫描噪音，把日志页
+    # 那个 5000 行的环形缓冲反复冲干净。降级为不写 UI 环的详细轨。
+    _slog.detailed("discover", f"扫描 {len(roots)} 个根, 命中 {len(out)} 账号",
+                   ring=False)
 
     # 用户手动指定的目录必须参与后续状态页、解密任务与媒体查找；否则自动
     # 扫描没命中时，引导页永远无法进入自定义路径流程。

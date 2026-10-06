@@ -14,6 +14,7 @@ import sqlite3
 import struct
 import tempfile
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -55,6 +56,13 @@ _IMG_CACHE_MAX = 200            # 最多 200 张（约几十 MB）
 # （最坏返回错误图片字节），Web API 多线程访问必须持锁
 _IMG_CACHE_LOCK = threading.Lock()
 
+# media_key.json 的"读-改-写"线程锁（跨进程由 _save_key_cache 的唯一临时名兜）
+_KEY_CACHE_LOCK = threading.Lock()
+
+# cache 根目录的进程内 memo：带 TTL，避免微信目录中途出现/消失时长期失真
+_CACHE_ROOTS_MEMO: dict = {}
+_CACHE_ROOTS_TTL = 60.0
+
 # 派生密钥持久缓存（只有密钥，没有明文）
 _KEY_FILE_NAME = "media_key.json"
 
@@ -87,11 +95,28 @@ def _load_key_cache() -> dict:
 
 
 def _save_key_cache(cache: dict) -> None:
+    """原子写入密钥缓存：唯一临时名 + os.replace。
+
+    旧实现用固定 media_key.tmp：导出是多进程（每会话重建 Pool）、Web API 是
+    threading=True，两个写者会抢同一个临时文件（os.replace 抛
+    FileNotFoundError / Windows PermissionError），或交错写出半个 JSON ——
+    缓存损坏后所有账号的派生密钥一起丢，下次全部走"V2 密钥未命中"。
+    唯一临时名把"多个写者"这一条彻底消掉；os.replace 本身仍是原子的。
+    """
     p = _key_file()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, p)
+    fd, tmp_name = tempfile.mkstemp(dir=str(p.parent),
+                                    prefix=p.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(cache, ensure_ascii=False))
+        os.replace(tmp_name, p)
+    except OSError:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def clean_wxid(wxid: str) -> str:
@@ -349,7 +374,16 @@ def resolve_image_path(acc_out_dir: Path, md5: str, wxid: str = None):
 
 
 def _wechat_cache_roots(wxid_full: str):
-    """该账号的 cache/<YYYY-MM> 根目录列表。"""
+    """该账号的 cache/ 根目录列表（进程内 TTL memo）。
+
+    旧实现每张图都调一次 find_wechat_data_dirs()：26 个盘符 is_dir() + Users
+    一层 iterdir，而且 discover 每次都无条件 detailed 打一条扫描日志——实测
+    logs/siwx.log 里 42% 的行都是这条，把 UI 的 5000 行环形缓冲反复冲掉。
+    """
+    now = time.time()
+    hit = _CACHE_ROOTS_MEMO.get(wxid_full)
+    if hit is not None and now - hit[0] < _CACHE_ROOTS_TTL:
+        return hit[1]
     from siwx.discover import find_wechat_data_dirs
     out = []
     for wxid, db in find_wechat_data_dirs():
@@ -358,6 +392,7 @@ def _wechat_cache_roots(wxid_full: str):
         cache = Path(db).parent / "cache"
         if cache.is_dir():
             out.append(cache)
+    _CACHE_ROOTS_MEMO[wxid_full] = (now, out)
     return out
 
 
@@ -371,16 +406,19 @@ def bubble_paths(wxid_full: str, chat: str, local_id: int, ts: int,
     目录名 = md5(会话username)，实测确认。
     """
     target = hashlib.md5(chat.encode()).hexdigest()
-    stems = []
-    if bubble_md5:
-        stems.append(bubble_md5)
-    if xml_md5:
-        stems.append(xml_md5)
-    stems.append(str(local_id))
+    # 实测两种文件名形态：<md5>_b.dat 与 <local_id>_<ts>_b.dat。local_id 分支
+    # 必须带下划线边界并带上 ts：旧写法 f"{local_id}*.dat" 里 local_id=9 会命中
+    # 91_…、9abc… 等同目录的兄弟文件，先选错再缓存 → 同一张图反复显示错图。
+    patterns = []
+    for md5v in (bubble_md5, xml_md5):
+        if md5v:
+            patterns.append(f"{md5v}*.dat")
+    if local_id:
+        patterns.append(f"{local_id}_{ts}_*.dat" if ts else f"{local_id}_*.dat")
     out = []
     for cache_root in _wechat_cache_roots(wxid_full):
-        for stem in stems:
-            for f in cache_root.glob(f"*/Message/{target}/Bubble/{stem}*.dat"):
+        for pat in patterns:
+            for f in cache_root.glob(f"*/Message/{target}/Bubble/{pat}"):
                 if f.is_file() and f not in out:
                     out.append(f)
     return out
@@ -460,6 +498,10 @@ def _plausible_image(body: bytes) -> bool:
 
 def _decrypt_any(data: bytes, wxid: str):
     """按文件头分派解密 → (bytes, ctype) 或 (None, None)。"""
+    if not data:
+        # 0 字节 .dat（下载中断/磁盘满）：下面 V0 分支的 data[0] 会 IndexError，
+        # 网页端没有 try 兜 → 500 + 完整 traceback 回显
+        return None, None
     head = data[:6]
     if head == V2_MAGIC:
         for aes_key, xor_key in candidate_keys(wxid):
@@ -487,7 +529,9 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
     多级来源：attach 原图目录（hq=True 时优先高清 _h 版）→ Bubble 气泡缓存
     （packed_info md5 映射）→ hardlink → Thumb 明文缩略图。
     """
-    cache_key = f"{account}:{chat}:{local_id}:{md5}:{bubble_md5}:{hq}"
+    # 缓存键必须带 ts：同一 (chat, local_id) 在不同 ts 下是不同消息，
+    # 缺 ts 时先命中的那张图会粘住后续请求（错图 + 缓存放大错误）
+    cache_key = f"{account}:{chat}:{local_id}:{ts}:{md5}:{bubble_md5}:{hq}"
     with _IMG_CACHE_LOCK:
         if cache_key in _IMG_CACHE:
             _IMG_CACHE.move_to_end(cache_key)
@@ -544,6 +588,9 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                 last_err = f"文件不存在: {path.name}"
                 continue
             data = path.read_bytes()
+            if not data:
+                last_err = "文件为空"
+                continue
             head = data[:6]
             if head == V2_MAGIC:
                 for aes_key, xor_key in candidate_keys(wxid):
@@ -632,15 +679,33 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
 
 
 def _remember_key(wxid_full: str, aes_key: bytes, xor_key: int) -> None:
-    """把验证成功的派生 key 记下来（只存密钥，不存明文）。"""
-    wx_clean = clean_wxid(wxid_full)
-    cache = _load_key_cache()
-    rec = {"aes": aes_key.hex(), "xor": f"{xor_key:02x}"}
-    if cache.get(wx_clean) != rec:
-        cache[wx_clean] = rec
-        _save_key_cache(cache)
+    """把验证成功的派生 key 记下来（只存密钥，不存明文）。
+
+    写缓存失败绝不能影响图片本身：静态目录里多个导出进程/请求线程会同时
+    读改写这个文件，旧实现把异常一路上抛——已经成功解密的图片被记成
+    ok=False（导出）或直接 500（网页端）。这里吞掉 OSError 只留痕。
+    线程内用锁串行化"读-改-写"，跨进程靠唯一临时名（_save_key_cache）。
+    """
+    try:
+        wx_clean = clean_wxid(wxid_full)
+        rec = {"aes": aes_key.hex(), "xor": f"{xor_key:02x}"}
+        with _KEY_CACHE_LOCK:
+            cache = _load_key_cache()
+            if cache.get(wx_clean) == rec:
+                return
+            cache[wx_clean] = rec
+            _save_key_cache(cache)
+    except OSError as e:
+        try:
+            _media_logger.warn("media", f"派生密钥缓存写入失败（本次解密不受影响）: "
+                                        f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 
 def extract_md5_from_xml(text: str):
-    m = re.search(r'md5\s*=\s*["\']([0-9a-fA-F]{32})["\']', text)
+    # 左边界：真实 XML 里并存 originsourcemd5 / androidmd5 / cdnthumbmd5 等属性，
+    # 裸 `md5\s*=` 只靠"真实 md5 属性恰好排在前面"才不误命中（实测 4343 条 0 例，
+    # 但那是运气）。加左边界后与属性顺序无关。
+    m = re.search(r'(?<![0-9A-Za-z_])md5\s*=\s*["\']([0-9a-fA-F]{32})["\']', text)
     return m.group(1).lower() if m else None

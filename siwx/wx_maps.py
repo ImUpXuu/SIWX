@@ -15,6 +15,7 @@
 import base64
 import math
 import re
+import time
 import urllib.request
 
 _ZOOM = 15
@@ -27,21 +28,28 @@ _UA = "Mozilla/5.0 (SIWX HTML export; location thumbnail)"
 
 # (zoom, x, y) -> bytes | None（None = 下载失败，同样进缓存避免重试）
 _CACHE: dict = {}
-# 网络不可用标记（首次下载异常后置位，进程内不再尝试）
-_disabled = False
+# 熔断：首次下载异常后暂停尝试，但**带时效**而不是永久——一次抖动（CDN 限流、
+# 4s 超时）就把常驻 serve 进程后续所有导出的缩略图永久关掉，只有重启才恢复。
+_disabled_until = 0.0
+_DISABLE_COOLDOWN = 300.0     # 秒；到点放行一次探测
+
+
+def _is_disabled(now: float) -> bool:
+    return now < _disabled_until
+
+
+def reset():
+    """清空缓存与熔断标记（测试、长驻进程、新导出任务启动时用）。"""
+    global _disabled_until
+    _CACHE.clear()
+    _disabled_until = 0.0
+
 
 # 逐属性解析（与渲染器 xmlAttr 一致，不依赖 x/y 在 XML 里的先后顺序）
 # x=纬度、y=经度（微信 XML 约定）
 def _xml_attr(raw: str, tag: str, attr: str) -> str:
     m = re.search(r'<%s\b[^>]*?\s%s="([^"]*)"' % (tag, attr), raw)
     return m.group(1) if m else ""
-
-
-def reset():
-    """清空缓存与离线标记（测试与长驻进程用）。"""
-    global _disabled
-    _CACHE.clear()
-    _disabled = False
 
 
 def tile_key(lat: float, lng: float, zoom: int = _ZOOM) -> str:
@@ -87,7 +95,7 @@ def _fetch_tile(key: str) -> bytes | None:
 
 def datauris(keys) -> dict:
     """瓦片键集合 → key → dataURI（尽力下载，失败静默跳过）。"""
-    global _disabled
+    global _disabled_until
     out: dict = {}
     fetched = 0
     for key in sorted(keys):
@@ -96,17 +104,19 @@ def datauris(keys) -> dict:
             if data:
                 out[key] = "data:image/png;base64," + base64.b64encode(data).decode("ascii")
             continue
-        if _disabled or fetched >= _MAX_NEW_FETCH:
+        # 熔断带时效：HTTPError（如限流 403）说明网络其实是通的，只暂停冷却期，
+        # 到点后放行一次探测；命中就恢复，未命中就再进冷却。
+        if fetched >= _MAX_NEW_FETCH or _is_disabled(time.time()):
             continue
         fetched += 1
         try:
             data = _fetch_tile(key)
         except Exception as e:
             data = None
-            _disabled = True
+            _disabled_until = time.time() + _DISABLE_COOLDOWN
             try:
                 from siwx import logger
-                logger.warn("export", f"地图缩略图下载失败，本次导出不再尝试: {e}")
+                logger.warn("export", f"地图缩略图下载失败，{int(_DISABLE_COOLDOWN)} 秒内不再尝试: {e}")
             except Exception:
                 pass
         _CACHE[key] = data

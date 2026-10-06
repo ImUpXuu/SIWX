@@ -330,13 +330,22 @@ def _chat_id(conn, chat: str):
 
 
 def _candidate_queries(chat_id, local_id, svr_id, ts):
-    """按可信度生成 VoiceInfo 查询条件。"""
-    if chat_id is not None and svr_id:
-        yield "chat_name_id=? AND svr_id=?", (chat_id, svr_id)
-    if chat_id is not None and local_id and ts:
-        yield "chat_name_id=? AND local_id=? AND create_time=?", (chat_id, local_id, ts)
-    if chat_id is not None and local_id:
-        yield "chat_name_id=? AND local_id=?", (chat_id, local_id)
+    """按可信度生成 VoiceInfo 查询条件。
+
+    带 chat_name_id 的查询优先。**只有在无法确定会话**（chat_id is None）时
+    才退到不带会话约束的查询：真实库 VoiceInfo 实测 40708 行只有 3556 个不同
+    local_id（平均 ~11 行共用一个值），裸 local_id=? 会捞到别的会话的语音，
+    而 get_voice 首个命中即返回 —— 跨会话音频泄漏（导出件是要外发的）。
+    """
+    if chat_id is not None:
+        if svr_id:
+            yield "chat_name_id=? AND svr_id=?", (chat_id, svr_id)
+        if local_id and ts:
+            yield "chat_name_id=? AND local_id=? AND create_time=?", (chat_id, local_id, ts)
+        if local_id:
+            yield "chat_name_id=? AND local_id=?", (chat_id, local_id)
+        return
+    # 会话未知（Name2Id 查不到）：只能按消息自身标识兜底，命中结果不作会话校验
     if svr_id:
         yield "svr_id=?", (svr_id,)
     if local_id and ts:
@@ -371,6 +380,10 @@ def get_voice(acc_dir: Path, chat: str = "", local_id: int = 0,
                         f"FROM VoiceInfo WHERE {where} ORDER BY create_time DESC LIMIT 1",
                         params).fetchone()
                     if not row or not row[4]:
+                        continue
+                    # 双保险：已知会话时，任何非本会话的命中一律丢弃（防以后有人
+                    # 在 cid 已知的情况下又把裸查询加回来）
+                    if cid is not None and row[0] is not None and int(row[0]) != cid:
                         continue
                     raw, offset = _clean_voice_data(bytes(row[4]))
                     if not raw:

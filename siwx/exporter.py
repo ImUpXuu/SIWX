@@ -792,36 +792,43 @@ def _write_batch(path, fmt, session, acc_dir, chat, start_ts, end_ts, account, n
 def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None):
     def toml_str(s):
         return json.dumps(str(s), ensure_ascii=False)
-    lines = ["[exportInfo]", f'version = {toml_str("1.0")}',
-             f'generator = {toml_str(GENERATOR)}', f'exportedAt = {int(time.time())}',
-             "", "[session]"]
+    header = ["[exportInfo]", f'version = {toml_str("1.0")}',
+              f'generator = {toml_str(GENERATOR)}', f'exportedAt = {int(time.time())}',
+              "", "[session]"]
     for k, v in session.items():
         if isinstance(v, str):
-            lines.append(f'{k} = {toml_str(v)}')
+            header.append(f'{k} = {toml_str(v)}')
         elif isinstance(v, dict):
             pass
         else:
-            lines.append(f'{k} = {v}')
-    lines.append("")
+            header.append(f'{k} = {v}')
+    header.append("")
     count = 0
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
-        _attach_media(msg, media_map)
-        if stats:
-            stats.observe(msg)
-        count += 1
-        lines.append("[[messages]]")
-        lines.append(f"localId = {msg['localId']}")
-        lines.append(f"createTime = {toml_str(datetime.fromtimestamp(msg['createTime']).strftime('%Y-%m-%d %H:%M:%S'))}")
-        lines.append(f"type = {toml_str(msg['typeName'])}")
-        lines.append(f"sender = {toml_str(msg['senderDisplayName'])}")
-        lines.append(f"isSend = {msg['isSend']}")
-        lines.append(f"content = {toml_str(msg['content'])}")
-        if msg.get("mediaFile"):
-            lines.append(f"mediaFile = {toml_str(msg['mediaFile'])}")
-        lines.append("")
-        if count % 500 == 0 and progress:
-            progress(0, f"已写入 {count} 条…")
-    path.write_text("\n".join(lines), encoding="utf-8")
+    # 逐条写盘：旧实现把整篇 messages 先 append 进 lines 列表、最后一次 write_text，
+    # 峰值 ≈ 输出文件的 3 倍（lines + join 串 + encode 缓冲），最长会话约 12.4 万条
+    # 时能到数百 MB；JSON/HTML 侧本就是 O(1) 流式，TOML 反而更差。
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(header))
+        f.write("\n")
+        for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+            _attach_media(msg, media_map)
+            if stats:
+                stats.observe(msg)
+            count += 1
+            block = ["[[messages]]",
+                     f"localId = {msg['localId']}",
+                     f"createTime = {toml_str(datetime.fromtimestamp(msg['createTime']).strftime('%Y-%m-%d %H:%M:%S'))}",
+                     f"type = {toml_str(msg['typeName'])}",
+                     f"sender = {toml_str(msg['senderDisplayName'])}",
+                     f"isSend = {msg['isSend']}",
+                     f"content = {toml_str(msg['content'])}"]
+            if msg.get("mediaFile"):
+                block.append(f"mediaFile = {toml_str(msg['mediaFile'])}")
+            block.append("")
+            f.write("\n".join(block))
+            f.write("\n")
+            if count % 500 == 0 and progress:
+                progress(0, f"已写入 {count} 条…")
     return count
 
 
@@ -873,9 +880,11 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
 
 def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None):
     from openpyxl import Workbook
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "聊天记录"
+    # write_only=True：默认 Workbook() 会把每个 Cell 对象都留在内存里，长会话
+    # （12.4 万条 × 7 列 = 近百万 Cell）占用远超文件本身；write_only 只保留
+    # 写游标，内存 O(1)。read_only 读回/校验不受影响。
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet("聊天记录")
     ws.append(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
     count = 0
     truncated = 0      # P3：单元格 32767 字上限，提前在 30000 字截断并留痕
