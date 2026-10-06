@@ -599,7 +599,7 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
                       datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                       msg["localType"], msg["typeName"], msg["isSend"],
                       msg["senderUsername"], msg["senderDisplayName"],
-                      msg["content"], msg.get("rawContent", "")[:8000],
+                      msg["content"], (msg.get("rawContent") or "")[:8000],
                       msg.get("mediaFile")))
         if count % 1000 == 0:
             conn.commit()

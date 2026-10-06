@@ -85,7 +85,8 @@ def save_config(cfg: dict) -> None:
 
 
 def tool_enabled(name: str) -> bool:
-    return bool(load_config().get("tools", {}).get(name, True))
+    # "tools" 若被手改配置写成 null，.get("tools", {}) 拿到的是 None → 每次工具调用都会崩
+    return bool((load_config().get("tools") or {}).get(name, True))
 
 
 # ── 数据助手（与 api_chat 同源，独立于 flask）──────────────────

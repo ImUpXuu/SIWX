@@ -249,7 +249,8 @@ def resolve_image_path(acc_out_dir: Path, md5: str, wxid: str = None):
             r = conn.execute("SELECT username FROM dir2id WHERE rowid=?", (did,)).fetchone()
             names[did] = r[0] if r else ""
         uuid_row = conn.execute("SELECT ValueStdStr FROM db_info WHERE Key='uuid'").fetchone()
-        storage_root = uuid_row[0].split("_", 2)[-1] if uuid_row else ""
+        # ValueStdStr 可能为 NULL：uuid_row=(None,) 时直接 .split 会崩
+        storage_root = (uuid_row[0] or "").split("_", 2)[-1] if uuid_row else ""
     finally:
         conn.close()
 

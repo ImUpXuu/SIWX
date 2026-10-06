@@ -2233,5 +2233,33 @@ class TestLogLevelSwitchAffectsFileLog(unittest.TestCase):
                          stdlib_logging.INFO)
 
 
+# ── 21. None 解引用加固（手改配置/异常库值）─────────────────────
+
+class TestNullConfigHardening(TempRootCase):
+    """手改 mcp_config.json 把 "tools" 写成 null 时，`.get("tools", {})`
+    拿到的是 None（键存在值为 null，默认值不生效）→ 每一次 MCP 工具调用
+    与 /api/mcp/info 都会 AttributeError。加固后必须正常降级。"""
+
+    def _write_null_tools_config(self):
+        import json as _json
+        from siwx import mcp_server
+        p = mcp_server.config_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(_json.dumps({"tools": None}), encoding="utf-8")
+
+    def test_tool_enabled_with_null_tools(self):
+        from siwx import mcp_server
+        self._write_null_tools_config()
+        self.assertTrue(mcp_server.tool_enabled("get_status"))
+
+    def test_mcp_info_endpoint_with_null_tools(self):
+        from siwx.server import app
+        self._write_null_tools_config()
+        c = app.test_client()
+        r = c.get("/api/mcp/info")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("tools", r.get_json())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

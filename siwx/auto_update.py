@@ -133,7 +133,7 @@ def _asset_urls(remote: dict, plat: str) -> list:
     ver = remote.get("version", "")
     urls = []
     key = "macos_dmg" if plat == "macos" else "windows"
-    primary = remote.get("assets", {}).get(key, "")
+    primary = (remote.get("assets") or {}).get(key, "")
     if primary:
         urls.append(primary)
     fallback = (f"https://github.com/{GITHUB_REPO}/releases/download/"
