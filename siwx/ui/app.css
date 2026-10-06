@@ -24,6 +24,7 @@
   --accent-soft: #e7f8ef;   /* 选中底 */
   --accent-line: #b9e9cf;   /* 选中描边 */
   --accent-fg: #067a43;     /* 浅底上的绿字（保证对比度） */
+  --on-accent: #ffffff;     /* 绿底上的文字（主按钮/选中态） */
   /* 语义色 */
   --ok: #07c160;            --ok-soft: #e7f8ef;
   --warn: #b45309;          --warn-soft: #fdf3e2;  --warn-line: #f0dcb8;
@@ -64,6 +65,7 @@
   --accent-soft: #183325;
   --accent-line: #2c5a40;
   --accent-fg: #4ede96;
+  --on-accent: #ffffff;
   --ok: #14cd70;            --ok-soft: #183325;
   --warn: #e09a3e;          --warn-soft: #32270f;  --warn-line: #4d3d1c;
   --danger: #ef6a5f;        --danger-soft: #3a2320; --danger-line: #5a3230;

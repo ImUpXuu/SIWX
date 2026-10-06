@@ -65,6 +65,7 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
 .type-tag{display:inline-flex;align-items:center;gap:4px;padding:5px 12px;
           border-radius:16px;border:1.5px solid var(--border);background:var(--tag-bg);
           color:var(--text);font-size:13px;cursor:pointer;user-select:none}
+button.type-tag{font:inherit}
 .type-tag.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 .filter-divider{height:1px;background:var(--border);margin:10px 0}
 .date-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -166,6 +167,7 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
 .lightbox img{max-width:95vw;max-height:95vh;object-fit:contain;border-radius:4px;
               -webkit-touch-callout:default}
 .loading{text-align:center;padding:20px;color:var(--sub);font-size:13px}
+.no-result{text-align:center;padding:60px 20px;color:var(--sub);font-size:14px}
 @media(max-width:600px){.msg-bubble{max-width:80%}.msg-image{max-width:220px}}
 </style>
 </head>
@@ -205,4 +207,4 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
     <div class="loading" id="loadingIndicator">加载中…</div></div>
   <footer class="chat-footer">由 stories-in-wx 导出 · 仅限个人数据备份研究</footer>
 </div>
-<div class="lightbox" id="lightbox"><img id="lightboxImg"></div>
+<div class="lightbox" id="lightbox"><img id="lightboxImg" alt="图片大图预览"></div>

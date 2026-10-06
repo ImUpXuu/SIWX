@@ -14,6 +14,8 @@
   var loaded = 0, BATCH = 50, isLoading = false;
   var activeTypes = new Set();
   var searchKw = '', fStart = 0, fEnd = 0;
+  var rendererSyncTypeTags = null;   // renderTypeFilters 注入：按 activeTypes 重算高亮
+  var searchTimer = null;
 
   function esc(s) {
     // 手写转义而非 div.innerHTML：innerHTML 不转义引号，名字含 ' " 时
@@ -99,7 +101,9 @@
     var colorCls = avatarColor(msg.sender);
     html += '<div class="msg-row'+(msg.isSend?' sent':'')+'">';
     html += '<div class="msg-avatar '+colorCls+'">';
-    if (avaRel) html += '<img src="'+esc(avaRel)+'" onerror="this.style.display=\'none\';this.parentElement.textContent=\''+esc(name.charAt(0))+'\'"/>';
+    // 头像加载失败 → 回退首字母：不用内联 onerror（esc() 的 &#39; 会被 HTML
+    // 解码回 ' 再进入 JS 字面量，名字含单引号时整段语法错误），走捕获级委托
+    if (avaRel) html += '<img src="'+esc(avaRel)+'" data-ava-fallback="'+esc(name.charAt(0))+'"/>';
     else html += esc(name.charAt(0));
     html += '</div>';
     html += '<div class="msg-bubble">';
@@ -259,6 +263,12 @@
   function renderAll() {
     container.innerHTML = '';
     loaded = 0;
+    if (!filtered.length) {
+      // 搜索/筛选 0 结果时给出空态，而不是一片空白
+      container.innerHTML = '<div class="no-result">没有匹配的消息</div>';
+      document.getElementById('loadingIndicator').style.display = 'none';
+      return;
+    }
     loadMore();
   }
 
@@ -292,13 +302,18 @@
     document.getElementById('lightbox').classList.add('active');
     document.getElementById('lightboxImg').src = src;
   };
+  // 灯箱 Esc 关闭（此前只能点击/触摸关闭）
+  document.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Escape') document.getElementById('lightbox').classList.remove('active');
+  });
   window.__imgErr = function(img) {
-    // 审计 §4.6：onerror 静默处理，破图无从排查；src 在 removeAttribute 之前取
+    // 审计 §4.6：onerror 静默处理，破图无从排查；src 在替换前取
     console.warn('[img-err]', img.getAttribute('src'), 'ts=' + (img.getAttribute('data-ts') || ''));
-    img.classList.add('broken');
-    img.removeAttribute('src');
-    img.style.width = '200px'; img.style.height = '60px';
-    img.textContent = '📷 图片';
+    // img 是替换元素，textContent 永远不渲染——必须换成真正的占位元素
+    var ph = document.createElement('div');
+    ph.className = 'msg-image broken';
+    ph.textContent = '📷 图片';
+    img.replaceWith(ph);
   };
   // 47 表情 CDN 回退失败（离线/URL 失效）→ 占位
   window.__stickerErr = function(img) {
@@ -308,6 +323,12 @@
     ph.textContent = '😊 表情';
     img.replaceWith(ph);
   };
+  // 头像加载失败（error 不冒泡，捕获接管）：隐藏图片、回退首字母
+  document.addEventListener('error', function(ev) {
+    var img = ev.target;
+    if (!img || img.tagName !== 'IMG' || img.dataset.avaFallback === undefined) return;
+    img.parentElement.textContent = img.dataset.avaFallback;
+  }, true);
   var lightbox = document.getElementById('lightbox');
   lightbox.addEventListener('click', function() {
     this.classList.remove('active');
@@ -379,20 +400,28 @@
     var box = document.getElementById('typeFilters');
     var names = {1:'文本',3:'图片',34:'语音',43:'视频',47:'表情',49:'链接',57:'引用',
                  42:'名片',48:'位置',50:'通话',10002:'撤回'};
-    var html = '<span class="type-tag active" data-type="all">全部</span>';
+    var html = '<button type="button" class="type-tag active" data-type="all">全部</button>';
     Object.keys(types).sort().forEach(function(k) {
-      html += '<span class="type-tag" data-type="'+k+'">'+(names[k]||'类型'+k)+' <span class="tag-count">'+types[k]+'</span></span>';
+      html += '<button type="button" class="type-tag" data-type="'+k+'">'+(names[k]||'类型'+k)+' <span class="tag-count">'+types[k]+'</span></button>';
     });
     box.innerHTML = html;
+    // 高亮一律由 activeTypes 重算：「全部」与具体类型互斥，不会同时亮着
+    function syncTypeTags() {
+      box.querySelectorAll('.type-tag').forEach(function(t) {
+        t.classList.toggle('active', t.dataset.type === 'all'
+          ? activeTypes.size === 0 : activeTypes.has(t.dataset.type));
+      });
+    }
     box.querySelectorAll('.type-tag').forEach(function(tag) {
       tag.addEventListener('click', function() {
         var type = this.dataset.type;
         if (type === 'all') { activeTypes.clear(); }
         else { activeTypes.has(type) ? activeTypes.delete(type) : activeTypes.add(type); }
-        this.classList.toggle('active');
+        syncTypeTags();
         applyFilter();
       });
     });
+    rendererSyncTypeTags = syncTypeTags;
   }
 
   // 事件绑定
@@ -428,14 +457,25 @@
     syncThemeIcon();
   });
   document.getElementById('searchInput').addEventListener('input', function() {
-    searchKw = this.value;
-    applyFilter();
+    var v = this.value;
+    clearTimeout(searchTimer);
+    // 每敲一个字符就全量重渲染大导出文件会卡顿，300ms 防抖
+    searchTimer = setTimeout(function() {
+      searchKw = v;
+      applyFilter();
+    }, 300);
   });
   document.getElementById('fApply').addEventListener('click', function() {
     var s = document.getElementById('fStart').value;
     var e = document.getElementById('fEnd').value;
     fStart = s ? new Date(s + 'T00:00:00').getTime() / 1000 : 0;
     fEnd = e ? new Date(e + 'T23:59:59').getTime() / 1000 : 0;
+    // 起止倒置时交换并回写输入框，用户看到的就是实际生效的范围
+    if (fStart && fEnd && fStart > fEnd) {
+      var tmp = fStart; fStart = fEnd; fEnd = tmp;
+      document.getElementById('fStart').value = e;
+      document.getElementById('fEnd').value = s;
+    }
     applyFilter();
   });
   document.getElementById('fReset').addEventListener('click', function() {
@@ -443,12 +483,13 @@
     document.getElementById('fEnd').value = '';
     fStart = fEnd = 0;
     activeTypes.clear();
-    document.querySelectorAll('.type-tag').forEach(function(t) { t.classList.add('active'); });
+    if (rendererSyncTypeTags) rendererSyncTypeTags();
     applyFilter();
   });
 
   // 初始化
   document.getElementById('chatTitle').textContent = data.meta.sessionName;
+  document.title = data.meta.sessionName + ' · 聊天记录';   // 浏览器历史里能区分会话
   var range = data.meta.dateRange;
   document.getElementById('chatMeta').textContent =
     data.meta.messageCount + ' 条消息 · ' + fmtDate(range.start) + ' - ' + fmtDate(range.end);

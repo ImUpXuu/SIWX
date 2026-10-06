@@ -60,21 +60,30 @@ async function init() {
         method: 'POST', headers: {'content-type': 'application/json'},
         body: JSON.stringify({ mode: 'sync', export_opts: { account } }),
       });
-      if (r.status === 409) { el('c-sessions').innerHTML = '<div class="c-empty">已有任务在运行</div>'; return; }
+      if (r.status === 409) {
+        toast('已有任务在运行，稍后再试', true);
+        await loadSessions();              // 恢复列表，不再停留在一行字
+        return;
+      }
+      if (!r.ok) throw new Error('启动失败');
       for (let i = 0; i < 300; i++) {
         await new Promise(res => setTimeout(res, 1000));
         if (gone()) return;
         const j = await (await fetch('/api/job')).json();
         if (!j.running) break;
         if (j.logs.length) {
-          const last = j.logs[j.logs.length - 1][1];
-          el('c-sessions').innerHTML = `<div class="c-loading">${esc(last.substring(0, 60))}</div>`;
+          const entry = j.logs[j.logs.length - 1];
+          const msg = String(entry.length >= 4 ? entry[3] : entry[1]);
+          el('c-sessions').innerHTML = `<div class="c-loading">${esc(msg.substring(0, 60))}${msg.length > 60 ? '…' : ''}</div>`;
         }
       }
       await loadSessions();
       if (currentChat) await Promise.all([loadMessages(true), loadTimeline()]);
     } catch (e) {
-      if (!gone()) el('c-sessions').innerHTML = `<div class="c-empty">刷新失败: ${esc(e.message)}</div>`;
+      if (!gone()) {
+        el('c-sessions').innerHTML = `<div class="c-empty">刷新失败: ${esc(e.message)}</div>`;
+        toast('刷新失败：' + (e.message || e), true);
+      }
     } finally {
       if (!gone()) btn.disabled = false;
     }
@@ -121,6 +130,8 @@ async function init() {
       loadNewer();
       return;
     }
+    // 多选模式下点击链接只做选中，不触发跳转
+    if (selectionMode && ev.target.closest('a')) ev.preventDefault();
     const copyBtn = ev.target.closest('.m-copy');
     if (copyBtn) {
       ev.stopPropagation();
@@ -130,8 +141,8 @@ async function init() {
       return;
     }
     const img = ev.target.closest('.m-img');
-    if (img) {
-      window.open(img.src + '&hq=1');
+    if (img && !selectionMode) {
+      window.open(img.src + '&hq=1', '_blank', 'noopener');
       return;
     }
     const finderImg = ev.target.closest('.m-finder-cover img');
@@ -172,8 +183,9 @@ async function init() {
     ev.preventDefault();
     openRangeMenu(row.dataset.key, ev.clientX, ev.clientY);
   });
-  // 触屏长按 500ms = 右键
+  // 触屏长按 500ms = 右键；菜单弹出后随后的 click 不再翻转选中
   let pressTimer = null;
+  let suppressNextRowClick = false;
   el('c-msgs').addEventListener('touchstart', (ev) => {
     if (!selectionMode) return;
     const row = ev.target.closest('.m-row[data-key]');
@@ -181,12 +193,20 @@ async function init() {
     const touch = ev.touches[0];
     pressTimer = setTimeout(() => {
       pressTimer = null;
+      suppressNextRowClick = true;
       openRangeMenu(row.dataset.key, touch.clientX, touch.clientY);
     }, 500);
   }, { passive: true });
   const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
   el('c-msgs').addEventListener('touchmove', cancelPress, { passive: true });
-  el('c-msgs').addEventListener('touchend', cancelPress);
+  el('c-msgs').addEventListener('touchend', (ev) => {
+    cancelPress();
+    // 长按刚弹出菜单时吞掉紧随的 click，防止菜单下方消息被误选中
+    if (suppressNextRowClick) {
+      ev.preventDefault();
+      suppressNextRowClick = false;
+    }
+  });
 
   // 滚动到顶部自动加载更早消息
   el('c-msgs').addEventListener('scroll', async () => {
@@ -195,11 +215,20 @@ async function init() {
       loading = true;
       const keep = box.scrollHeight;
       box.insertAdjacentHTML('afterbegin', '<div class="c-loading">加载更早消息…</div>');
-      await loadMessages(false);
-      const tip = box.querySelector('.c-loading');
-      if (tip) tip.remove();
-      box.scrollTop = box.scrollHeight - keep;
-      loading = false;
+      try {
+        await loadMessages(false);
+      } catch (e) {
+        toast('加载更早消息失败：' + (e.message || e), true);
+      } finally {
+        const tip = box.querySelector('.c-loading');
+        if (tip) tip.remove();
+        // 锚定视口：直接赋值会被 scroll-behavior:smooth 拖成动画滚动
+        const prev = box.style.scrollBehavior;
+        box.style.scrollBehavior = 'auto';
+        box.scrollTop = box.scrollHeight - keep;
+        box.style.scrollBehavior = prev;
+        loading = false;
+      }
     }
   });
 
@@ -210,18 +239,18 @@ async function loadSessions() {
   if (gone()) return;
   el('c-sessions').innerHTML = '<div class="c-loading">加载会话…</div>';
   officialOpen = false;
-  const t0 = performance.now();
   try {
     const { sessions: ss } = await fetchJSON(
       `/api/chat/sessions?account=${encodeURIComponent(account)}`);
     if (gone()) return;
     sessions = ss;
     renderSessions('');
-    const ms = Math.round(performance.now() - t0);
-    if (el('c-sub') && !currentChat) el('c-sub').textContent = `${ss.length} 个会话 · ${ms}ms`;
+    if (el('c-sub') && !currentChat) el('c-sub').textContent = `${ss.length} 个会话`;
   } catch (e) {
     if (gone()) return;
-    el('c-sessions').innerHTML = `<div class="c-empty">${esc(e.message)}</div>`;
+    el('c-sessions').innerHTML = `<div class="c-empty">加载失败：${esc(e.message)}<br>` +
+      '<button class="btn" id="c-sess-retry" type="button">重试</button></div>';
+    el('c-sess-retry')?.addEventListener('click', loadSessions);
   }
 }
 
@@ -308,7 +337,16 @@ async function openChat(s) {
   el('c-msgs').innerHTML = '<div class="c-loading">加载消息…</div>';
   el('c-select').disabled = false;
   el('c-stats').disabled = false;
-  await Promise.all([loadMessages(true, { stick: true }), loadTimeline()]);
+  el('c-export').disabled = false;
+  try {
+    await Promise.all([loadMessages(true, { stick: true }), loadTimeline()]);
+  } catch (e) {
+    if (gone()) return;
+    el('c-msgs').innerHTML = `<div class="c-empty">加载失败：${esc(e.message)}<br>` +
+      '<button class="btn" id="c-msgs-retry" type="button">重试</button></div>';
+    el('c-msgs-retry')?.addEventListener('click', () => openChat(s));
+    el('c-sub').textContent = `${s.is_group ? '群聊' : '私聊'} · 加载失败`;
+  }
 }
 
 /** 让消息区立即回到底部。
@@ -403,14 +441,15 @@ async function loadMessages(fresh, opts = {}) {
     loadedMessages = mergeMessages(data.messages, loadedMessages);
     const added = data.messages.filter(m => prevLast && (m.ts > prevLast.ts ||
       (m.ts === prevLast.ts && (m.id || 0) > (prevLast.id || 0))));
-    box.insertAdjacentHTML('beforeend',
-      renderMessageList(added.length ? added : data.messages));
-    refreshRenderedPositions();
-    refreshSelectionUI();
+    if (added.length) {
+      box.insertAdjacentHTML('beforeend', renderMessageList(added));
+      dedupeTimeChips(box);
+      refreshSelectionUI();
+    }
   } else {
     loadedMessages = mergeMessages(data.messages, loadedMessages);
-    box.insertAdjacentHTML('afterbegin', renderMessageList(data.messages, true));
-    refreshRenderedPositions();
+    box.insertAdjacentHTML('afterbegin', renderMessageList(data.messages));
+    dedupeTimeChips(box);
     refreshSelectionUI();
   }
   if (after) {
@@ -449,7 +488,7 @@ async function loadNewer() {
     '<div class="c-loading" id="newer-tip">加载之后的消息…</div>');
   try {
     await loadMessages(false, { after: last.ts || 0, afterId: last.id || 0 });
-    box.scrollTop = box.scrollHeight;
+    jumpToBottom(box);
   } catch (e) {
     toast('加载失败: ' + (e.message || e), true);
   } finally {
@@ -476,10 +515,19 @@ function renderMessageList(msgs) {
   }).join('');
 }
 
-function refreshRenderedPositions() {
-  const order = new Map(loadedMessages.map((m, i) => [msgKey(m), i]));
-  el('c-msgs').querySelectorAll('.m-row[data-key]').forEach(row => {
-    row.dataset.pos = String(order.get(row.dataset.key) ?? 0);
+/** 相邻去重时间 chip：一条 chip 只在它与上一条消息间隔 >300s 时保留。
+ *  分批追加/前插后，批次接缝处会渲染出间隔很近的两个 chip。 */
+function dedupeTimeChips(box) {
+  let prevTs = null;
+  let pendingChip = null;
+  [...box.children].forEach(n => {
+    if (n.classList.contains('m-time-chip')) { pendingChip = n; return; }
+    const ts = Number(n.dataset?.ts || 0);
+    if (pendingChip) {
+      if (prevTs != null && ts - prevTs <= 300) pendingChip.remove();
+      pendingChip = null;
+    }
+    if (n.classList.contains('m-row')) prevTs = ts;
   });
 }
 
@@ -594,15 +642,17 @@ function bubble(m) {
 
 async function loadTimeline() {
   if (!currentChat) return;
+  const chat = currentChat.username;      // 快速切换会话时丢弃过期响应
   const list = el('c-timeline-list');
   list.innerHTML = '<div class="tl-empty">正在生成月份索引…</div>';
   timelineDayCache.clear();
   try {
-    const data = await fetchJSON(`/api/chat/timeline?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(currentChat.username)}`);
-    if (gone()) return;
+    const data = await fetchJSON(`/api/chat/timeline?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(chat)}`);
+    if (gone() || !currentChat || currentChat.username !== chat) return;
     timelineMonths = data.months || [];
     renderTimelineMonths();
   } catch (e) {
+    if (gone() || !currentChat || currentChat.username !== chat) return;
     list.innerHTML = `<div class="tl-empty">时间轴加载失败：${esc(e.message)}</div>`;
   }
 }
@@ -653,11 +703,12 @@ async function expandTimelineMonth(section) {
   inner.innerHTML = '<div class="tl-empty">加载日期…</div>';
   try {
     const data = await fetchJSON(`/api/chat/timeline?account=${encodeURIComponent(account)}&chat=${encodeURIComponent(currentChat.username)}&month=${encodeURIComponent(month)}`);
-    if (gone()) return;
+    if (gone() || !section.isConnected) return;
     const days = data.days || [];
     timelineDayCache.set(month, days);
     renderTimelineDays(inner, days);
   } catch (e) {
+    if (gone() || !section.isConnected) return;
     inner.innerHTML = `<div class="tl-empty">加载失败</div>`;
   } finally {
     section.dataset.loading = '0';
@@ -699,6 +750,14 @@ async function jumpToTime(day) {
   earliest = 0;
   try {
     await loadMessages(true, { before: endOfDay, limit: 80 });
+  } catch (e) {
+    if (!gone()) {
+      el('c-msgs').innerHTML = `<div class="c-empty">跳转失败：${esc(e.message)}<br>` +
+        '<button class="btn" id="c-jump-retry" type="button">重试</button></div>';
+      el('c-jump-retry')?.addEventListener('click', () => jumpToTime(day));
+      toast('跳转失败：' + (e.message || e), true);
+    }
+    return;
   } finally {
     loading = false;
   }
@@ -855,11 +914,18 @@ async function copyWithFlash(btn, text, doneText) {
 
 function flashButton(btn, text) {
   if (!btn) return;
-  const old = btn.textContent;
+  // 1 秒内重复闪字（如多选连点多条）：复位到基础文案再闪，避免「已复制」被当成基础文案永久残留
+  if (btn._flashTimer) {
+    clearTimeout(btn._flashTimer);
+    btn.textContent = btn._flashBase ?? btn.textContent;
+  }
+  btn._flashBase = btn._flashBase ?? btn.textContent;
   btn.textContent = text;
   btn.classList.add('copied');
-  setTimeout(() => {
-    btn.textContent = old;
+  btn._flashTimer = setTimeout(() => {
+    btn._flashTimer = null;
+    btn.textContent = btn._flashBase;
+    delete btn._flashBase;
     btn.classList.remove('copied');
   }, 1000);
 }
@@ -874,7 +940,7 @@ function updateSubtitle() {
   el('c-sub').textContent = `${type} · 已载入 ${loadedMessages.length} 条${more}`;
 }
 
-/* ── 会话统计弹层：Esc 关闭 + 焦点闭环 ───────────────────────── */
+/* ── 会话统计弹层：Esc 关闭 ───────────────────────────────────── */
 let statsModalPrevFocus = null;
 let statsModalKeyHandler = null;
 
@@ -885,6 +951,7 @@ async function openStatsModal() {
   statsModalPrevFocus = document.activeElement;
   modal.classList.remove('hidden');
   el('c-stats-close').focus();
+  if (statsModalKeyHandler) document.removeEventListener('keydown', statsModalKeyHandler);
   statsModalKeyHandler = (ev) => {
     if (ev.key === 'Escape') { ev.preventDefault(); closeStatsModal(); }
   };
