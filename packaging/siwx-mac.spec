@@ -37,6 +37,8 @@ a = Analysis(
     pathex=[str(ROOT)],
     datas=[
         (str(ROOT / "siwx" / "ui"), "ui"),
+        (str(ROOT / "siwx" / "assets"), "siwx/assets"),
+        (str(ROOT / "siwx" / "templates"), "siwx/templates"),
         (str(ROOT / "version.json"), "."),
     ],
     hiddenimports=["pilk"],
