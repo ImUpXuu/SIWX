@@ -723,8 +723,11 @@ class TestStatsApi(TempRootCase):
         acc = root / "output" / account
         msg_dir = acc / "message"
         msg_dir.mkdir(parents=True, exist_ok=True)
-        # 固定基准时间，便于断言小时/月份（本地时区，用正午避开跨日边界）
-        base = 1_700_000_000
+        # 固定基准时间（本地时区正午）：任何时区下这 6 条消息的本地日期都是
+        # 2023-11-15。此前硬编码 epoch（=2023-11-15 06:13 +08:00），在 UTC 的
+        # CI 上跨到 11-14/11-15 两天，日期过滤用例把 6 条过滤成了 1 条。
+        from datetime import datetime
+        base = int(datetime(2023, 11, 15, 12, 0, 0).timestamp())
 
         def shard(name, chat, rows):
             conn = sqlite3.connect(msg_dir / name)
@@ -1192,7 +1195,7 @@ class TestVersionSource(unittest.TestCase):
         from siwx import __version__
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
-        self.assertEqual(__version__, "5.0.7")
+        self.assertEqual(__version__, "5.0.8")
 
     def test_release_metadata_matches_package_version(self):
         """version.json 与 README 徽章的版本号必须跟 __version__ 一致。
@@ -1728,7 +1731,7 @@ class TestAccountConflicts(unittest.TestCase):
 
 # ── 数据安全修复：manifest 来源保护（方案 B）──────────────────
 
-class TestManifestSourceGuard(unittest.TestCase):
+class TestManifestSourceGuard(TempRootCase):
     """同名账号共用 output/<wxid>/ 时，来源变更不得静默覆盖已存在产物。
 
     核心兼容约束：旧 manifest 无 @source（升级自 v5.0.x）必须放行，
@@ -1736,12 +1739,18 @@ class TestManifestSourceGuard(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_srcguard_"))
-        from siwx import extract
+        super().setUp()
+        from siwx import extract, keystore
         from siwx import pool
         self.extract, self.pool = extract, pool
         self._bench = []
-        # 隔离密钥依赖：让 _resolve_key 必定成功，从而走到来源判定分支
+        # 密钥依赖必须自给自足：此前用的是开发者本机真实密钥库，干净环境
+        # （CI）里 0 密钥，5 个用例全在 _resolve_key 处因"无密钥"跳过。
+        # 显式种入 salt→key，配合下方 mock 的 parse_key/verify_enc_key，
+        # 让 _resolve_key 在任何机器上都必定命中。
+        store = keystore.load()
+        keystore.insert(store, "aa" * 16, "ab" * 32, "test")
+        keystore.save(store)
         self._orig = (extract.parse_key, extract.verify_enc_key,
                       extract.decrypt_parallel)
         extract.parse_key = lambda k: b"\x00" * 32
@@ -1764,7 +1773,7 @@ class TestManifestSourceGuard(unittest.TestCase):
     def tearDown(self):
         (self.extract.parse_key, self.extract.verify_enc_key,
          self.extract.decrypt_parallel) = self._orig
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        super().tearDown()
 
     def _entry(self, rel, path, size=8192):
         from siwx.sqlcipher import DbEntry
