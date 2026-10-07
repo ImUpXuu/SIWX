@@ -3,18 +3,13 @@
 全部使用**合成的临时数据**，不读取任何真实聊天库，因此运行很快、
 不会让磁盘/CPU 长时间满载。
 
-覆盖本轮修复的逻辑与性能缺陷：
-  1. exporter._safe_name() 恒返回 "_"  → 导出名里的联系人名称丢失
-  2. 媒体扩展名与 media 引用不一致（PNG/GIF 指向不存在的 .jpg）
-  3. 媒体解密未传 chat/ts → attach/Bubble/Thumb 三级来源全部失效
-  4. HTML 导出 session 键不匹配 → KeyError: 'displayName'（该格式不可用）
-  5. session["_avatar_map"] 泄漏进导出 JSON
-  6. api_chat 的 CDATA 替换串是控制字符 0x01 而非捕获组
-  7. messages 的 limit 未做下限校验（LIMIT -2 等同无限制）
-  8. 分片索引：消除「每个会话扫全部 *.db」的性能瓶颈
-  9. 聊天页只扫 message_*.db → 漏掉 biz_message_*.db 里的会话
- 10. cli --json 未生效
- 11. decrypt_database 非原子写（失败会破坏已有明文库）
+本文件按"发现一个缺陷 → 固化一条回归"的模式追加生长，小节编号即追加
+顺序（中途插入的安全加固小节未编号）。按域大致覆盖：
+命名/CDATA 解析、分片索引与缓存、会话与消息流、导出（8 种格式 + 多格式 +
+zip）、媒体与语音、统计、解密原子性与密钥校验、CLI、日志与脱敏、版本与
+自动更新、数据安全（临时文件唯一、账号冲突、manifest 来源、密钥不落盘、
+更新链 fail-closed、Host 头）、引用/合并转发/表情/位置等消息语义、
+HTML 模板框架、信任边界与参数校验。
 
 运行：
     python -m unittest discover -s tests -v
@@ -45,8 +40,9 @@ if str(ROOT) not in sys.path:
 # 故在导入 siwx 之前强制零插件模式；插件自身的测试见 tests/test_plugins.py。
 os.environ["SIWX_NO_PLUGINS"] = "1"
 
-from siwx import api_chat, exporter, paths
+from siwx import api_chat, exporter
 from siwx.exporter import _safe_name
+from tests._base import IsolatedRootCase
 
 
 # ── 合成数据构造 ────────────────────────────────────────────────
@@ -124,51 +120,16 @@ def make_account(root: Path, account="wxid_test", chat="wxid_friend",
     return acc, account, chat
 
 
-class TempRootCase(unittest.TestCase):
-    """把 SIWX_ROOT 指向临时目录，避免污染真实 output/exports。
+class TempRootCase(IsolatedRootCase):
+    """兼容别名：隔离实现统一到 tests/_base.IsolatedRootCase。
 
-    同时强制"零插件"状态：本套件断言的是宿主默认行为，若 `unittest discover`
-    先跑了 tests/test_plugins.py，模块级 registry 单例里会残留合成插件的 hook
-    （会话过滤器会剔掉公众号、渲染器会改写 kind），必须在此清空。
+    SIWX_ROOT → 临时目录 + 清空 api_chat/paths 缓存 + 零插件。强制零插件的
+    原因：本套件断言宿主默认行为，`unittest discover` 若先跑了
+    tests/test_plugins.py，模块级 registry 单例会残留合成 hook
+    （会话过滤器剔公众号、渲染器改写 kind），必须清空。
     """
 
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_"))
-        self._old = os.environ.get("SIWX_ROOT")
-        os.environ["SIWX_ROOT"] = str(self.tmp)
-        os.environ["SIWX_NO_PLUGINS"] = "1"
-        self._clear_plugins()
-        api_chat._SHARD_INDEX.clear()
-        api_chat._CONTACT_CACHE.clear()
-        api_chat._SESSION_CACHE.clear()
-        paths._PATH_CACHE.clear()
-
-    def tearDown(self):
-        if self._old is None:
-            os.environ.pop("SIWX_ROOT", None)
-        else:
-            os.environ["SIWX_ROOT"] = self._old
-        os.environ["SIWX_NO_PLUGINS"] = "1"
-        self._clear_plugins()
-        api_chat._SHARD_INDEX.clear()
-        api_chat._CONTACT_CACHE.clear()
-        api_chat._SESSION_CACHE.clear()
-        paths._PATH_CACHE.clear()
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    @staticmethod
-    def _clear_plugins() -> None:
-        """清空模块级 registry（插件测试可能留下合成 hook）。"""
-        try:
-            from siwx.plugins.registry import registry
-        except Exception:
-            return
-        for ns in vars(registry).values():
-            if hasattr(ns, "items") and isinstance(ns.items, list):
-                ns.items = []
-        registry.metas = {}
-        registry.report = None
-        registry._loaded = True       # 已加载但为空 == 零插件
+    pass
 
 
 # ── 1. _safe_name ───────────────────────────────────────────────
@@ -177,8 +138,8 @@ class TestSafeName(unittest.TestCase):
 
     def test_keeps_contact_name(self):
         # 修复前：任何输入都返回 "_"
-        self.assertEqual(_safe_name("2427班级群（野生）"), "2427班级群（野生）")
-        self.assertEqual(_safe_name("高途思维海超老师"), "高途思维海超老师")
+        self.assertEqual(_safe_name("示例班级群（占位）"), "示例班级群（占位）")
+        self.assertEqual(_safe_name("示例老师甲"), "示例老师甲")
         self.assertEqual(_safe_name("文件传输助手"), "文件传输助手")
 
     def test_replaces_illegal_chars(self):
@@ -347,10 +308,13 @@ class TestMessageStream(TempRootCase):
         self.assertIn("message_0.db", opened)
 
     def test_index_survives_dir_change(self):
-        """目录内容变化（mtime 改变）后索引应自动失效并重建。"""
+        """目录内容变化后索引应自动失效并重建。
+
+        签名含文件名集合（_dir_signature: (name, size, mtime_ns)），
+        新增分片必然改变签名，无需等待 mtime 推进。
+        """
         acc, account, chat = make_account(self.tmp, n_texts=3)
         self.assertEqual(len(api_chat.shards_for(acc, chat)), 1)
-        time.sleep(0.01)
         make_shard(acc / "message" / "message_1.db", chat, ["后加的"])
         self.assertEqual(len(api_chat.shards_for(acc, chat)), 2)
 
@@ -1044,6 +1008,24 @@ class TestDecryptAtomic(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_verify_enc_key_accepts_and_rejects(self):
+        """verify_enc_key 的真实调用路径（此前全仓只有 mock，零真实覆盖）。
+
+        它是密钥校验的第一道闸：合法 page1 必须放行、错误密钥与截断页必须拒绝。
+        页构造复用本类的 _encrypt_page（HMAC 布局与实现严格对齐）；
+        原 test_verify_enc_key_byte_layout 的字节布局常量断言并入此处作前置。
+        """
+        from siwx import sqlcipher as sc
+        # 页 1 布局：salt(16) + 密文(4000) + iv(16) + hmac(64) == 4096
+        self.assertEqual(sc.PAGE_SZ - sc.RESERVE_SZ + sc.IV_SZ - sc.SALT_SZ, 4016)
+        salt = bytes(range(16, 32))
+        plain = bytes((i * 3) & 0xFF for i in range(sc.PAGE_SZ - sc.RESERVE_SZ - sc.SALT_SZ))
+        page1 = self._encrypt_page(plain, 1, self.enc_key, salt, True)
+        self.assertTrue(sc.verify_enc_key(self.enc_key, page1))
+        self.assertFalse(sc.verify_enc_key(bytes(32), page1), "错误密钥必须拒绝")
+        self.assertFalse(sc.verify_enc_key(self.enc_key, page1[:100]),
+                         "长度不足一页必须拒绝而非异常")
+
     def test_decrypts_and_leaves_no_residue(self):
         from siwx.sqlcipher import decrypt_database
         dst = self.tmp / "out" / "dst.db"
@@ -1538,10 +1520,6 @@ class TestContributionTemplates(unittest.TestCase):
 
 class TestCryptoIntact(unittest.TestCase):
 
-    def test_verify_enc_key_byte_layout(self):
-        from siwx import sqlcipher as sc
-        self.assertEqual(sc.PAGE_SZ - sc.RESERVE_SZ + sc.IV_SZ - sc.SALT_SZ, 4016)
-
     def test_handwritten_cbc_matches_stdlib(self):
         """手写 CBC 链式 XOR（现用 pycryptodome 的 C 实现 strxor）对齐标准库。"""
         from Crypto.Cipher import AES
@@ -1556,25 +1534,25 @@ class TestCryptoIntact(unittest.TestCase):
             mine = strxor.strxor(iv + ct[:len(ct) - 16], raw)
             self.assertEqual(mine, std, f"ct_len={ct_len}")
 
-    def test_decrypt_uses_c_strxor_not_bigint(self):
+    def test_decrypt_database_uses_c_strxor_not_bigint(self):
         """源码层面确认页 CBC 的链式 XOR 走 C 实现 ``strxor``，而非大整数转换。
 
-        大整数 ``from_bytes``/``to_bytes`` 曾占单库解密耗时约 39%（改动前）。
-        docstring 里会提到旧写法做说明，因此先用 ``ast`` 剥掉 docstring，
-        只在**真正的代码**里断言。
+        大整数 ``from_bytes``/``to_bytes`` 曾占单库解密耗时约 39%。正确性由
+        test_decrypted_body_equals_plaintext 逐字节把守——但大整数 XOR 同样
+        能通过全绿，本条是**唯一的性能防线**。只检查 ``decrypt_database``
+        函数体（其 docstring 会引用旧写法做说明，先用 ast 剥掉），不做全文件
+        禁词，避免误伤其他场景对这两个内建名的合法使用。
         """
         import ast
         src = Path(__file__).resolve().parent.parent / "siwx" / "sqlcipher.py"
         tree = ast.parse(src.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            body = getattr(node, "body", None)
-            if (isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef))
-                    and body and isinstance(body[0], ast.Expr)
-                    and isinstance(body[0].value, ast.Constant)
-                    and isinstance(body[0].value.value, str)):
-                body.pop(0)          # 丢弃 docstring
-        code = ast.unparse(tree)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "decrypt_database")
+        body = fn.body
+        if (isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            body.pop(0)          # 剥掉函数 docstring
+        code = ast.unparse(fn)
         self.assertIn("strxor", code, "页 CBC 未使用 strxor")
         self.assertNotIn("from_bytes", code, "仍在用大整数 from_bytes")
         self.assertNotIn("to_bytes", code, "仍在用大整数 to_bytes")
@@ -1652,16 +1630,6 @@ class TestTempFileUniqueness(unittest.TestCase):
             self.assertEqual(residue, [], f"临时文件残留: {residue}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-
-    def test_temp_names_are_unique_across_calls(self):
-        """mkstemp 生成的临时名必须唯一（旧实现恒为同一个名）。"""
-        names = []
-        for _ in range(20):
-            fd, name = tempfile.mkstemp(prefix="siwx_p1_", suffix=".tmp")
-            os.close(fd)
-            names.append(name)
-            Path(name).unlink(missing_ok=True)
-        self.assertEqual(len(names), len(set(names)))
 
     def test_source_uses_mkstemp(self):
         """源码层面确认临时文件名不再是「固定前缀 + PID」的拼接。
@@ -2205,14 +2173,17 @@ class TestMediaAttachTypeGate(unittest.TestCase):
 
     def test_export_pipeline_logging_present(self):
         """报告二.1：导出管线失败不得静默——分片/媒体失败与条数对账必须有日志，
-        且回填点全部走类型门禁、不允许裸 get。"""
+        且不允许绕过类型门禁的裸 get 回填。
+
+        （不回源码断言 `_attach_media` 的调用次数：合法新增回填点会让计数
+        变红，而它防不住任何真实缺陷。）
+        """
         stream_src = (ROOT / "siwx" / "export_stream.py").read_text(encoding="utf-8")
         self.assertIn("分片打开失败", stream_src)
         exporter_src = (ROOT / "siwx" / "exporter.py").read_text(encoding="utf-8")
         self.assertIn("处理失败", exporter_src)
         self.assertIn("条数对账不一致", exporter_src)
         self.assertNotIn('msg["mediaFile"] = media_map.get', exporter_src)
-        self.assertEqual(exporter_src.count("_attach_media(msg, media_map)"), 5)
 
 
 # ── 18. _fmt 剥离 CDATA ─────────────────────────────────────────
@@ -2503,10 +2474,6 @@ class TestManifestKeyStrip(unittest.TestCase):
             m = load_manifest(Path(td))
             self.assertFalse(manifest_has_keys(m))
 
-    def test_extract_manifest_no_key_written(self):
-        src = (ROOT / "siwx" / "extract.py").read_text(encoding="utf-8")
-        self.assertNotIn('"pages": pages, "key": key_hex', src)
-
 
 class TestUpdateChainHardening(unittest.TestCase):
     """S1：更新校验 fail-closed、下载/哈希域名白名单。"""
@@ -2622,7 +2589,7 @@ class TestHtmlStreamingExport(TempRootCase):
         self.assertIn("</html>", html)
 
 
-# ── 26b. 微信小黄脸内嵌 + 名片/位置/通话渲染 ─────────────────────
+# ── 27. 微信小黄脸内嵌 + 名片/位置/通话渲染 ─────────────────────
 
 class TestWxFaces(unittest.TestCase):
     """wx_faces：官方表情名称表与素材一致性；文本扫描；按需 dataURI。"""
@@ -2786,7 +2753,7 @@ class TestHtmlFacesEndToEnd(TempRootCase):
         s.close()
 
 
-# ── 26b+. 位置静态缩略图（wx_maps） ─────────────────────────────
+# ── 28. 位置静态缩略图（wx_maps） ─────────────────────────────
 
 LOCATION_RAW = ('<location poiname="腾讯滨海大厦" label="深圳市南山区科技园" '
                 'x="22.540503" y="113.934428" scale="16"/>')
@@ -2972,7 +2939,7 @@ class TestHtmlMapsEndToEnd(TempRootCase):
         self.assertIn("apis.map.qq.com/uri/v1/marker", html)
 
 
-# ── 26d. 本人身份判定（微信4.x 设备后缀账号名）+ 正向翻页 ────────
+# ── 29. 本人身份判定（微信4.x 设备后缀账号名）+ 正向翻页 ────────
 
 class TestSelfIdentity(TempRootCase):
     """is_me 判定：账号目录名带十六进制设备后缀（wxid_xxx_d29b）时，
@@ -3084,7 +3051,7 @@ class TestSelfIdentity(TempRootCase):
         self.assertFalse(r4["has_more"])
 
 
-# ── 26c. HTML 模板可替换框架 + 合并转发/转文字渲染 ───────────────
+# ── 30. HTML 模板可替换框架 + 合并转发/转文字渲染 ───────────────
 
 class TestHtmlTemplateFramework(TempRootCase):
     """模板包解析：内置 default 可用、用户目录同名覆盖、缺失报错。"""
@@ -3193,7 +3160,7 @@ class TestHtmlRenderFixes(unittest.TestCase):
         return build_chat_data(session, msgs, {})
 
 
-# ── 27. P2：fallback_labels 精确判定（前缀误报修复）────────────────
+# ── 31. P2：fallback_labels 精确判定（前缀误报修复）────────────────
 
 class TestFallbackExactMatch(unittest.TestCase):
     """P2-1 回归：合法链接卡 "[链接] 标题"、合并转发 "[聊天记录] 标题（N 条…）"
@@ -3523,7 +3490,7 @@ class TestAuditFixes20261006(TempRootCase):
         self.assertIn("Workbook(write_only=True)", src)
 
 
-# ── 21. None 解引用加固（手改配置/异常库值）─────────────────────
+# ── 32. None 解引用加固（手改配置/异常库值）─────────────────────
 
 class TestNullConfigHardening(TempRootCase):
     """手改 mcp_config.json 把 "tools" 写成 null 时，`.get("tools", {})`

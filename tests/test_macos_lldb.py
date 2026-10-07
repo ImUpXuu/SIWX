@@ -336,8 +336,13 @@ class MacosLldbScriptTest(unittest.TestCase):
         self.assertIn("FAIL:NoSymbol", out)
         self.assertTrue(target._process.detached)
 
-    def test_attach_rejects_debugger_as_listener(self):
-        """旧代码把 debugger 传给 AttachToProcessWithID 会直接抛 TypeError。"""
+    def test_script_passes_listener_to_attach(self):
+        """AttachToProcessWithID 首参必须是 listener（issue #3 根因）。
+
+        fake 对首参做了强类型校验：脚本若回退到旧写法（传 debugger）会抛
+        TypeError → 脚本输出 FAIL:ScriptError，本用例即红。动态执行能抓到
+        test_api_invariants 静态字符串断言漏掉的「等价但换了写法」的回归。
+        """
         target = _make_v2_scenario(b"x" * 32)
         _install_fake_lldb([eStateStopped], target)
         out = _run_script()
