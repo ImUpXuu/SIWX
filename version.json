@@ -1,12 +1,12 @@
 {
-  "version": "5.0.7",
-  "date": "2026-10-02 12:49:23",
-  "notes": "## 主要修复：导出渲染 + 日志系统\n\n> 本版为问题修复版，全部改动由 v5.0.6 的问题报告驱动（静态分析 + 全量导出产物复核：31437 条引用消息、885 条错挂媒体、45 条 CDATA 泄漏）。无破坏性变更，无需迁移。\n\n### 导出渲染\n\n- **引用消息修复**：微信 5.0 数据库中引用消息外层为 `local_type=49`、引用信息在内层 `<refermsg>`，原实现只解析外层 57 导致 `quote` 字段恒为空（0/31437）。导出与 Web 端三处富化逻辑统一按 `<refermsg>` 探测，\"谁引用了什么\"完整恢复；真链接消息不受影响\n- **媒体错挂修复**：多分片会话的 `local_id` 独立编号会撞号，文本/链接/系统消息被错挂上属于其它消息的图片（实测 885 条，含\"邀请你加入群聊\"卡片被整张顶掉）。5 处回填点全部收敛到类型门禁：仅图片(3/47)与语音(34)可获 `mediaFile`，图片/语音槽位互斥\n- **CDATA 泄漏修复**：链接/引用消息的 `content` 不再出现 `<![CDATA[...]]>` 原文（实测 45 条）；HTML 渲染器 type 49 分支复用预解析 link 字段，引用消息正文走纯文本\n\n### 日志系统\n\n- **终结导出失败静默**：图片/语音处理失败按原因分布聚合告警、分片打开失败告警、采集与写出条数对账告警——不再只能从进度数字缺口猜测\"哪一张、为什么\"\n- **日志级别切换生效**：UI 粗略/详细切换此前只影响环形缓冲、`siwx.log` 恒 DEBUG；现在同步作用于文件日志\n- **日志页统一脱敏**：新增键值对账号标识规则（`account=`/`chat=`/`ownerId=` 等，覆盖 `wxalias_xxx` 类自定义微信号），wxid/群号/密钥/路径不随截图外泄；无控制台打包运行时 `print` 不再可能抛异常\n\n### 测试\n\n- 回归测试 290 → 304：引用消息（4）、媒体门禁（2）、CDATA（3）、日志脱敏（4）、级别切换（1）\n\n**升级说明**：升级后建议重新导出一次以验证引用消息与媒体挂载；导出产物格式无变化。",
+  "version": "5.0.8",
+  "date": "2026-10-07 00:00:00",
+  "notes": "v5.0.8\n\n**合入 5.0.7 优化线：两个 P0 安全修复、引用/转发解析根治、导出增强、诊断日志全面铺开，解密提速。**\n\n- **安全（P0）**\n  - SQLCipher 明文密钥不再写入输出目录 .siwx_cache.json（旧缓存加载时就地剥离并重写）——同步盘/备份工具再也拿不到全部库密钥。\n  - 更新链加固：version.json 提供的下载/哈希地址限定域名与仓库路径，版本号严格校验，安装落点断言——防 manifest 投毒与路径穿越（打包版未鉴权 RCE 链）。\n- **引用与转发解析**\n  - 修复引用解析崩溃导致整个会话丢弃/聊天页 500（真实命中 182 条）。\n  - 修复引用气泡实体转义乱码（真实命中 7358 条，占全部引用 23%）。\n  - 合并转发（type 19）不再显示为 [链接]（实测 2252 条）。\n  - 导出类型门禁：只有图片/表情/语音可挂媒体文件，根治跨分片 local_id 撞号导致的“转发的入群申请被错挂成群图片”。\n- **导出增强**\n  - 微信官方小黄脸内嵌渲染（146 张官方表情图，[表情名] → 图片）。\n  - 位置消息静态地图缩略图 + 地图跳转链接；名片/通话消息渲染补全。\n  - 自定义 HTML 导出模板框架（siwx/templates/，同名用户模板覆盖内置）。\n  - 多格式同时导出（一次扫描逐格式写出）。\n- **解密提速**：CBC 链式 XOR 改用 pycryptodome 的 C 实现 strxor，单库解密耗时降约 39%。\n- **Apple Silicon（PR #26）**：修复 M 系列 Mac 上密钥提取 0/N 失败（4 个叠加问题）。\n- **诊断日志**：日志双轨桥接 + 全模块埋点，30+ 处静默异常不再吞错；日志页统一脱敏。\n- **UI**：首启改为全屏引导向导（同意条款 → 选号 → 提取解密），账号可随时“＋添加”。\n- **健壮性**：加固 5 处 None 解引用（null 配置/NULL 列值不再崩）。\n- **工程**：CI 加测试闸门（测试不过打不出包）；打包产物补入表情素材与模板；3 个环境敏感测试修复（UTC 时区/干净密钥库）。\n\n全量测试 398 通过 / 1 跳过（CI 首次在干净 Windows 环境验证）。",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.7/stories-in-wx-v5.0.7-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.7/stories-in-wx-v5.0.7-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.8/stories-in-wx-v5.0.8-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.8/stories-in-wx-v5.0.8-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.7/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.8/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
