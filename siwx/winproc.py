@@ -7,7 +7,7 @@ from ctypes import wintypes
 
 import psutil
 
-kernel32 = ctypes.windll.kernel32
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 MEM_COMMIT = 0x1000
 READABLE_PROTECT = {0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80}
@@ -16,6 +16,17 @@ REGION_LIMIT = 500 * 1024 * 1024
 PAGE_SZ = 4096
 PROCESS_VM_READ = 0x0010
 PROCESS_QUERY_INFORMATION = 0x0400
+
+# 模块级失败计数 / 最近错误码（审计 §3.6）：本层是热路径原语，绝不逐次打日志，
+# 策略层在扫描结束后读 _stats 汇总。*_last_err 为最近一次失败的 GetLastError
+# 码（5=拒绝访问，87=参数错误 等），依赖上方 use_last_error=True 才有效。
+# 签名兼容（核查 C.4）：open_process / read_mem 签名与返回值不变，7 个调用点无需改动。
+_stats = {
+    "open_fail": 0, "open_last_err": 0,
+    "rpm_fail": 0, "rpm_last_err": 0,
+    "enum_breaks": 0, "enum_break_addr": 0,
+    "big_region_skipped": 0,
+}
 
 
 class MBI(ctypes.Structure):
@@ -29,9 +40,13 @@ class MBI(ctypes.Structure):
 
 
 def open_process(pid: int):
-    """返回只读句柄；失败（权限不足等）返回 None。"""
+    """返回只读句柄；失败（权限不足等）返回 None，错误码见 _stats["open_last_err"]。"""
     h = kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
-    return h or None
+    if not h:
+        _stats["open_fail"] += 1
+        _stats["open_last_err"] = ctypes.get_last_error()
+        return None
+    return h
 
 
 def close_handle(h) -> None:
@@ -44,6 +59,9 @@ def read_mem(h, addr: int, size: int):
     n = ctypes.c_size_t(0)
     if kernel32.ReadProcessMemory(h, ctypes.c_uint64(addr), buf, size, ctypes.byref(n)):
         return buf.raw[: n.value]
+    # 热路径：只计数 + 记最近错误码，由策略层结束汇总（审计 §7.5）
+    _stats["rpm_fail"] += 1
+    _stats["rpm_last_err"] = ctypes.get_last_error()
     return None
 
 
@@ -62,10 +80,16 @@ def enum_regions(h):
     while addr < MAX_USER_ADDRESS:
         if kernel32.VirtualQueryEx(h, ctypes.c_uint64(addr), ctypes.byref(mbi),
                                    ctypes.sizeof(mbi)) == 0:
+            # 枚举提前终止（句柄失效等），与正常走完区分（审计 §3.6:63-65）
+            _stats["enum_breaks"] += 1
+            _stats["enum_break_addr"] = addr
             break
-        if (mbi.State == MEM_COMMIT and mbi.Protect in READABLE_PROTECT
-                and 0 < mbi.RegionSize < REGION_LIMIT):
-            regs.append((mbi.BaseAddress, mbi.RegionSize))
+        if mbi.State == MEM_COMMIT and mbi.Protect in READABLE_PROTECT:
+            if 0 < mbi.RegionSize < REGION_LIMIT:
+                regs.append((mbi.BaseAddress, mbi.RegionSize))
+            elif mbi.RegionSize >= REGION_LIMIT:
+                # ≥500MB 区域被过滤（needle 恰在大堆里时扫描必然失败的线索）
+                _stats["big_region_skipped"] += 1
         nxt = mbi.BaseAddress + mbi.RegionSize
         if nxt <= addr:
             break

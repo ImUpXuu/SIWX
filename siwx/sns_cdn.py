@@ -216,16 +216,26 @@ def _decompress(raw: bytes, encoding: str | None) -> bytes:
             except zlib.error:
                 return zlib.decompress(raw, -zlib.MAX_WBITS)
     except (OSError, zlib.error):
+        # 审计 §4.7 方案①：解压失败静默 return raw，之后会被误报成 undecodable；
+        # 至少在日志里留个真实方向（_decompress 不持有 url 上下文，按时间戳对照）
+        try:
+            from . import logger as _ring
+            _ring.detailed("sns",
+                           f"[媒体] 解压失败 enc={enc} got={len(raw)}B（按原始数据处理）")
+        except Exception:  # noqa: BLE001  日志永远不能影响下载
+            pass
         return raw
     return raw
 
 
 def fetch(url: str, timeout: float = 15.0, ctx=None) -> tuple[bytes, dict]:
     """下载 URL，返回 (body, headers)。body 已解压。"""
+    # 曾默认关闭 TLS 校验（check_hostname=False + CERT_NONE），生产链路
+    # （/api/sns/media、/api/sns/emoji、贴纸、朋友圈导出）全走这里 —— 中间人
+    # 可替换 CDN 返回的任意字节。create_default_context() 本身就校验证书，
+    # 显式传 ctx 的调用方（诊断脚本）仍可自定。
     if ctx is None:
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
         raw = resp.read()
@@ -362,6 +372,12 @@ def read_cached(cache_dir, url: str):
         try:
             data = p.read_bytes()
         except OSError:
+            # 审计 §4.7：读失败被当 miss 会触发重新下载（可恢复），detailed 即可
+            try:
+                from . import logger as _ring
+                _ring.detailed("sns", f"[媒体] 缓存读取失败 file={p.name}")
+            except Exception:  # noqa: BLE001
+                pass
             return None
         ext = p.suffix.lstrip(".")
         mime = detect_mime(data)[1] or "application/octet-stream"
@@ -406,14 +422,17 @@ def _log_media_failure(url: str, out: dict) -> None:
         out.get("got_bytes"), out.get("error"), safe_url(url))
 
 
-def _log_media_ok(url: str, out: dict) -> None:
+def _log_media_ok(url: str, out: dict, tid=None, idx=None) -> None:
     """成功不写文件日志（一次翻页几十张图，会把「运行日志」冲爆）。
 
     走 ``siwx.logger.detailed``：只有用户把日志切到「详细模式」时才记录。
+    审计 §4.7（agent-6 修正）：成功记录本身已存在，缺的是 tid/idx 归属维度——
+    由调用方传入，不在 sns_export 侧重复打一条。
     """
     try:
         from . import logger as _ring
-        _ring.detailed("sns", f"[媒体] 成功 ext={out.get('ext')} "
+        _ring.detailed("sns", f"[媒体] 成功 tid={tid} idx={idx} "
+                             f"ext={out.get('ext')} "
                              f"{len(out.get('data') or b'')}B "
                              f"encrypted={out.get('encrypted')} "
                              f"cached={out.get('cached')} url={safe_url(url)}")
@@ -425,11 +444,13 @@ def fetch_media(url: str, key: str | int | None = None,
                 token: str | None = None,
                 timeout: float = 15.0,
                 cache_dir=None,
-                hosts: int = 3) -> dict:
+                hosts: int = 3,
+                tid=None, idx=None) -> dict:
     """下载并按需解密一个朋友圈媒体资源（可选磁盘缓存 + 域名回退）。
 
     :param cache_dir: 媒体缓存目录；命中缓存时不再访问网络
     :param hosts:     最多尝试几个域名（微信 CDN 域名可能部分失效）
+    :param tid/idx:   归属动态与媒体序号（仅用于日志定位，可选）
     :return: ``{ok, data, ext, mime, error, status, encrypted, cached,
               reason, hosts_tried, got_bytes}``
 
@@ -455,7 +476,7 @@ def fetch_media(url: str, key: str | int | None = None,
     if hit:
         data, ext, mime = hit
         out.update(ok=True, data=data, ext=ext, mime=mime, cached=True)
-        _log_media_ok(url, out)
+        _log_media_ok(url, out, tid=tid, idx=idx)
         return out
 
     # key="0" / "" 是占位值（sns._meta_attr 已归一化，这里再兜一层，
@@ -501,9 +522,19 @@ def fetch_media(url: str, key: str | int | None = None,
             continue
 
         if cache_dir:
-            _atomic_write(cached_path(cache_dir, url, ext), body)
+            cp = cached_path(cache_dir, url, ext)
+            # 审计 §4.7：_atomic_write 失败返回 False，此前被静默忽略
+            if not _atomic_write(cp, body):
+                try:
+                    from . import logger as _ring
+                    _ring.detailed(
+                        "sns",
+                        f"[媒体] 缓存写入失败 tid={tid} idx={idx} "
+                        f"file={cp.name if cp else '?'} url={safe_url(url)}")
+                except Exception:  # noqa: BLE001
+                    pass
         out.update(ok=True, data=body, ext=ext, mime=mime)
-        _log_media_ok(url, out)
+        _log_media_ok(url, out, tid=tid, idx=idx)
         return out
 
     if undecodable:

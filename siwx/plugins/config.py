@@ -12,6 +12,8 @@ import os
 import threading
 from pathlib import Path
 
+from siwx import logger as log
+
 _LOCKS: dict = {}
 _LOCKS_GUARD = threading.Lock()
 
@@ -92,7 +94,7 @@ def defaults_from_schema(schema: list) -> dict:
     return out
 
 
-def build_values(schema: list, stored: dict) -> dict:
+def build_values(schema: list, stored: dict, plugin: str = "") -> dict:
     """schema 默认值 + 已存值（经类型校验），非法值回退默认。"""
     out = defaults_from_schema(schema)
     for item in schema or []:
@@ -102,6 +104,9 @@ def build_values(schema: list, stored: dict) -> dict:
         coerced = _coerce(item, stored[key])
         if coerced is not None:
             out[key] = coerced
+        else:
+            # 只记 key 不记值（防用户数据入日志）
+            log.detailed("plugin", f"{plugin or '?'}.{key} 存储值非法，回退默认")
     return out
 
 
@@ -113,7 +118,14 @@ def load_raw(plugin: str) -> dict:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+    except FileNotFoundError:
+        return {}                            # 懒创建，缺文件是正常首态
+    except ValueError as e:
+        # 损坏文件会被下次 save 直接覆盖，用户设置将永久丢失——务必告警
+        log.warn("plugin", f"插件配置 JSON 损坏（下次保存将被覆盖）: {p.name}: {e}")
+        return {}
+    except OSError as e:
+        log.warn("plugin", f"插件配置读取失败: {p.name}: {type(e).__name__}")
         return {}
 
 
@@ -121,7 +133,7 @@ def load(plugin: str, schema: list = None) -> dict:
     """读取并校验后的配置值。schema 为空时直接返回原始值。"""
     raw = load_raw(plugin)
     if schema:
-        return build_values(schema, raw)
+        return build_values(schema, raw, plugin=plugin)
     return raw
 
 
@@ -143,7 +155,7 @@ def apply_update(plugin: str, schema: list, incoming: dict) -> dict:
     """
     from siwx import logger as log
 
-    current = build_values(schema, load_raw(plugin))
+    current = build_values(schema, load_raw(plugin), plugin=plugin)
     unknown = [k for k in (incoming or {}) if k not in current]
     if unknown:
         log.warn("plugin", f"{plugin} 设置忽略未声明字段: {', '.join(unknown[:5])}")

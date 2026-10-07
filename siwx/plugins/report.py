@@ -9,6 +9,8 @@
 """
 from dataclasses import dataclass, field
 
+from siwx import logger as log
+
 
 @dataclass
 class PluginStatus:
@@ -57,8 +59,6 @@ class PluginLoadReport:
 
     def add_error(self, name: str, phase: str, exc: BaseException) -> PluginStatus:
         """记录一个加载失败的插件。phase 如 "import" / "contract" / "register"。"""
-        from siwx import logger as log
-
         detail = log.desensitize_msg(f"{type(exc).__name__}: {exc}")
         st = PluginStatus(
             name=name, source="", status="error",
@@ -76,6 +76,9 @@ class PluginLoadReport:
     def _add(self, st: PluginStatus) -> None:
         """同名插件只保留首个（确定性：加载顺序在先者胜）。"""
         if st.name in self._seen:
+            # import 成功但 register 失败时，后者的错误信息会走到这里被丢弃
+            log.detailed("plugin",
+                         f"报告重复条目 {st.name}({st.status}) 被忽略（保留首条）")
             return
         self._seen[st.name] = st
         self.statuses.append(st)

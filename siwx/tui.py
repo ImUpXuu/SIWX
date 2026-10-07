@@ -15,6 +15,8 @@ from rich.text import Text
 from rich.theme import Theme
 from rich.columns import Columns
 
+from siwx import logger as log
+
 console = Console(
     theme=Theme({
         "tag.cipher": "bold cyan",
@@ -158,10 +160,20 @@ def run_live_status(getter, on_start):
     status = ["初始化…"]
     running = True
 
+    # 每秒轮询一次，必须节流：连续失败 N 次才 warn（审计 §7.5 热路径纪律）。
+    # 1（首次即报，"状态栏长期 …"的根因第一现场）+ 之后每 60 次（约 1 分钟）。
+    bar_fail = {"n": 0}
+
     def _bar():
         try:
-            return make_status_bar(getter())
-        except Exception:
+            bar = make_status_bar(getter())
+            bar_fail["n"] = 0
+            return bar
+        except Exception as e:
+            bar_fail["n"] += 1
+            if bar_fail["n"] == 1 or bar_fail["n"] % 60 == 0:
+                log.warn("server", f"TUI 状态栏渲染连续失败 {bar_fail['n']} 次"
+                                   f"（状态栏将显示默认值）: {type(e).__name__}: {e}")
             return make_status_bar({})
 
     def _loop():

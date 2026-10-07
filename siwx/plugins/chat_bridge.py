@@ -41,16 +41,23 @@ def apply_renderer(msg: dict, ctx: dict = None) -> None:
     try:
         out = r.render(dict(msg), ctx or {})
     except Exception as e:
-        log.warn("plugin", f"{plugin}.render 失败（type={local_type}）: {e}")
+        log.warn("plugin", log.desensitize_msg(
+            f"{plugin}.render 失败（type={local_type}）: {e}"))
         return
     if not isinstance(out, dict):
+        # 插件以为生效了实际被丢弃——只记类型，不记返回内容
+        log.detailed(f"plugin:{plugin}",
+                     f"render(type={local_type}) 返回 {type(out).__name__}"
+                     f"（非 dict），已忽略")
         return
     # 只接受约定字段，避免插件污染整条消息
-    for key in ("kind", "render", "text", "extra"):
-        if key in out:
-            msg[key] = out[key]
+    applied = [key for key in ("kind", "render", "text", "extra") if key in out]
+    for key in applied:
+        msg[key] = out[key]
     if not msg.get("kind"):
         msg["kind"] = r.kind or msg.get("kind") or "text"
+    log.detailed(f"plugin:{plugin}",
+                 f"render(type={local_type}) 应用字段={applied}")
 
 
 # ── 装饰器 ──────────────────────────────────────────────────
@@ -84,10 +91,15 @@ def transform_content(text: str, msg: dict = None, ctx: dict = None) -> str:
         try:
             res = h.fn(out, msg or {}, ctx or {})
         except Exception as e:
-            log.warn("plugin", f"{plugin}.transform_content 失败: {e}")
+            log.warn("plugin", log.desensitize_msg(f"{plugin}.transform_content 失败: {e}"))
             continue
         if isinstance(res, str):
             out = res
+        else:
+            # 插件以为改写了正文实际被丢弃——只记类型，严禁正文入日志
+            log.detailed(f"plugin:{plugin}",
+                         f"transform_content 返回 {type(res).__name__}"
+                         f"（非 str），已跳过")
     return out
 
 
@@ -107,9 +119,11 @@ def filter_sessions(sessions: list, ctx: dict = None) -> list:
             try:
                 if h.fn(s, ctx) is False:
                     keep = False
+                    # 过滤生效对插件作者是不可见的——记剔除动作，不含会话内容
+                    log.detailed(f"plugin:{plugin}", "filter_session 剔除一个会话")
                     break
             except Exception as e:
-                log.warn("plugin", f"{plugin}.filter_session 失败: {e}")
+                log.warn("plugin", log.desensitize_msg(f"{plugin}.filter_session 失败: {e}"))
         if keep:
             out.append(s)
     return out
@@ -129,10 +143,17 @@ def resolve_avatar(username: str, account: str, ctx: dict = None) -> Optional[by
         try:
             data = h.fn(username, ctx)
         except Exception as e:
-            log.warn("plugin", f"{plugin}.resolve_avatar 失败: {e}")
+            log.warn("plugin", log.desensitize_msg(f"{plugin}.resolve_avatar 失败: {e}"))
             continue
         if isinstance(data, (bytes, bytearray)) and data:
+            # 成功命中：只记字节数，严禁 username 明文与图片内容
+            log.detailed(f"plugin:{plugin}",
+                         f"resolve_avatar 命中 {len(data)} 字节")
             return bytes(data)
+        if data is not None and not isinstance(data, (bytes, bytearray)):
+            log.detailed(f"plugin:{plugin}",
+                         f"resolve_avatar 返回 {type(data).__name__}"
+                         f"（非 bytes），已忽略")
     return None
 
 

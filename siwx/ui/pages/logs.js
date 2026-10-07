@@ -5,10 +5,22 @@ let paused = false;
 let autoScroll = true;
 let lastSig = "";
 let pollTimer = null;
+let clearMark = 0;          // 「清空」水位：只显示该时刻之后的日志，避免 1s 后整屏刷回来
 
 function el(id) { return document.getElementById(id); }
 
-function levelClass(m) {
+/* /api/logs 返回混合形状：[ts, msg]（文件轨）与 [ts, level, module, msg]（结构化轨） */
+function entryMsg(entry) {
+  return String(entry.length >= 4 ? entry[3] : entry[1]);
+}
+
+function levelClass(entry) {
+  const lv = entry.length >= 4 ? String(entry[1]).toUpperCase() : "";
+  if (lv === "ERROR") return "log-line err";
+  if (lv === "WARN") return "log-line warn";
+  if (lv === "INFO") return "log-line ok";
+  if (lv === "DEBUG") return "log-line dim";
+  const m = entryMsg(entry);
   if (m.includes("[错误]") || m.includes("✗") || m.includes("失败")) return "log-line err";
   if (m.includes("✔") || m.includes("成功") || m.includes("已验证")) return "log-line ok";
   if (m.includes("⚠") || m.includes("跳过") || m.includes("缺失")) return "log-line warn";
@@ -16,23 +28,23 @@ function levelClass(m) {
 }
 
 function renderLogs(logs) {
+  // 轮询可能在切页后仍在飞，视图已卸载时直接放弃本轮渲染
   const box = el("log-box");
-  const shown = logs.slice(-1000);
-  const sig = shown.length ? `${shown.length}:${shown[shown.length - 1][0]}:${shown[shown.length - 1][1]}` : "0";
+  if (!box) return;
+  const shown = logs.filter(l => l[0] > clearMark).slice(-1000);
+  const last = shown[shown.length - 1];
+  const sig = shown.length ? `${shown.length}:${last[0]}:${entryMsg(last)}` : "0";
   if (sig === lastSig) return;
   lastSig = sig;
-  box.innerHTML = shown.map(([, m]) => {
-    const div = document.createElement("div");
-    div.className = levelClass(m);
-    div.textContent = m;
-    return div.outerHTML;
-  }).join("") || '<div class="log-line dim">暂无日志…</div>';
-  el("log-count").textContent = `${logs.length} 条`;
+  box.innerHTML = shown.map((entry) =>
+    `<div class="${levelClass(entry)}">${esc(entryMsg(entry))}</div>`).join("")
+    || '<div class="log-line dim">暂无日志…</div>';
+  el("log-count").textContent = `${shown.length} 条（最近）`;
   if (autoScroll) box.scrollTop = box.scrollHeight;
 }
 
 async function poll() {
-  if (paused) return;
+  if (paused || document.hidden) return;
   try {
     const d = await fetchJSON("/api/logs");
     renderLogs(d.logs || []);
@@ -42,9 +54,11 @@ async function poll() {
 export async function init() {
   el("log-pause").addEventListener("click", () => {
     paused = !paused;
-    el("log-pause").textContent = paused ? "▶ 继续" : "⏸ 暂停";
+    el("log-pause").textContent = paused ? "继续" : "暂停";
+    el("log-pause").setAttribute("aria-pressed", String(paused));
   });
   el("log-clear").addEventListener("click", () => {
+    clearMark = Date.now() + 1;
     el("log-box").innerHTML = "";
     lastSig = "";
   });

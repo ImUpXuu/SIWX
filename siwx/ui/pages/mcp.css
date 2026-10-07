@@ -1,59 +1,17 @@
-/* MCP 配置页 —— 黑白描边 */
+/* MCP 配置页 —— 单栏卡片布局。
+   左侧曾挂过一个不可点击的会话列表（纯摆设），已移除。 */
 .mcp-wrap {
-  display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 18px;
-  height: calc(100vh - 56px); min-height: 520px;
-  align-items: stretch;
+  max-width: 980px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 16px;
 }
-.mcp-list {
-  display: flex; flex-direction: column; min-height: 0;
-  background: var(--card);
-  border: 1px solid var(--line); border-radius: var(--radius-lg);
-  overflow: hidden; box-shadow: none;
-}
-.mcp-top { padding: 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
-#m-account, #m-search { width: 100%; }
-#m-sessions { flex: 1; overflow-y: auto; }
-.sess {
-  position: relative;
-  padding: 12px 12px 12px 62px;
-  min-height: 66px;
-  cursor: default;
-  border-bottom: 1px solid var(--line-soft);
-  background: var(--card);
-  transition: background .12s ease;
-}
-.sess:hover { background: var(--card-alt); }
-.sess .ava {
-  position: absolute; left: 12px; top: 13px;
-  width: 38px; height: 38px; border-radius: var(--radius-sm);
-  background: var(--card); color: var(--text); border: 1px solid var(--line);
-  font-size: 13px; font-weight: 700;
-  text-align: center; line-height: 36px;
-  overflow: hidden;
-}
-.sess .name {
-  display: block; font-size: 13px; font-weight: 700; color: var(--text);
-  line-height: 18px; min-height: 18px;
-  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-  margin: 0 0 4px 0; padding: 0 86px 0 0;
-}
-.sess .prev {
-  display: block; font-size: 12px; color: var(--muted);
-  line-height: 16px; min-height: 16px;
-  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
-  margin: 0; padding: 0;
-}
-.sess .tm { position: absolute; right: 12px; top: 12px; font-size: 11px; color: var(--muted); }
-.c-empty { padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px; }
-.mcp-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow-y: auto; }
 .mcp-logcard { flex: 1; min-height: 170px; display: flex; flex-direction: column; }
 .mcp-logcard .console { flex: 1; min-height: 130px; max-height: 360px; }
-.log-line.ok, .log-line.err { color: var(--text); }
 .m-block { margin-top: 16px; }
-.m-label { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+.m-block:first-of-type { margin-top: 0; }
+.m-label { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
 .m-cmdbox { position: relative; }
 .m-cmdbox code, .m-cmdbox pre {
-  display: block; background: var(--card); color: var(--text);
+  display: block; background: var(--card-alt); color: var(--text);
   border: 1px solid var(--line); border-radius: var(--radius-sm);
   padding: 12px 82px 12px 12px; font-size: 12px; line-height: 1.65;
   overflow-x: auto; white-space: pre-wrap; word-break: break-word;
@@ -61,19 +19,20 @@
 }
 .m-cmdbox pre { margin: 0; }
 .m-cmdbox .copy-btn { position: absolute; right: 8px; top: 8px; }
-.m-tool { display: flex; align-items: flex-start; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); cursor: pointer; }
-.m-tool:last-child { border-bottom: none; }
-.m-tool:hover { background: var(--card-alt); }
-.m-tool input { width: 16px; height: 16px; accent-color: var(--text); margin-top: 2px; flex: none; }
-.m-tool b { display: block; font-size: 13px; color: var(--text); }
-.m-tool span { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.55; }
-.m-notes { font-size: 13px; color: var(--text); line-height: 2; padding-left: 20px; }
-.m-notes code { background: var(--card); border: 1px solid var(--line); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
-@media (max-width: 900px) {
-  .mcp-wrap { grid-template-columns: 1fr; height: auto; min-height: 0; }
-  .mcp-list { max-height: 42vh; }
-  .mcp-side { overflow: visible; }
+.m-tool {
+  display: flex; align-items: flex-start; gap: 10px; padding: 12px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  cursor: pointer; transition: border-color .12s ease, background .12s ease;
 }
+.m-tool:hover { background: var(--card-alt); }
+.m-tool + .m-tool { margin-top: 8px; }
+.m-tool input { width: 16px; height: 16px; accent-color: var(--accent); margin-top: 2px; flex: none; }
+.m-tool b { display: block; font-size: 13px; color: var(--text); font-family: "SF Mono", Consolas, monospace; }
+.m-tool span { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.55; }
+.m-nav { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.m-nav-gap { flex: 1; }
+.m-notes { font-size: 13px; color: var(--text); line-height: 2; padding-left: 20px; }
+.m-notes code { background: var(--card-alt); border: 1px solid var(--line); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
 @media (max-width: 560px) {
   .m-cmdbox code, .m-cmdbox pre { padding-right: 12px; padding-top: 46px; }
   .m-cmdbox .copy-btn { left: 8px; right: auto; }

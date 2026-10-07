@@ -22,6 +22,8 @@ import tempfile
 import wave
 from pathlib import Path
 
+from siwx import logger as _voice_logger
+
 
 SILK_MAGIC = b"#!SILK_V3"
 WAV_MAGIC = b"RIFF"
@@ -53,6 +55,12 @@ def parse_voice_meta(text: str) -> dict | None:
         try:
             return int(attrs.get(name) or default)
         except (TypeError, ValueError):
+            # 审计 §4.5：属性非法回退 0（时长显示 0）此前无人知晓（量小）
+            try:
+                _voice_logger.detailed(
+                    "voice", f"voicemsg属性非法 {name}={attrs.get(name)!r}")
+            except Exception:
+                pass
             return default
 
     return {
@@ -220,8 +228,14 @@ def _decode_silk_to_pcm_with_pilk(data: bytes) -> tuple[bytes | None, str, str]:
     """默认用 pilk 解码 SILK；pilk 是项目依赖，不需要 ffmpeg。"""
     try:
         import pilk  # type: ignore
-    except Exception:
-        return None, "", ""
+    except Exception as e:
+        # 审计 §4.5：pilk 是默认依赖，导入失败 err 必须非空，
+        # 否则"默认依赖挂了"与"真的解不出"不可区分
+        try:
+            _voice_logger.detailed("voice", f"pilk 导入失败: {e}")
+        except Exception:
+            pass
+        return None, f"pilk 导入失败: {e}", ""
     try:
         with tempfile.TemporaryDirectory(prefix="siwx_voice_") as td:
             silk_path = Path(td) / "input.silk"
@@ -305,18 +319,33 @@ def _chat_id(conn, chat: str):
     try:
         row = conn.execute("SELECT rowid FROM Name2Id WHERE user_name=?", (chat,)).fetchone()
         return int(row[0]) if row else None
-    except (sqlite3.Error, TypeError, ValueError):
+    except (sqlite3.Error, TypeError, ValueError) as e:
+        # 审计 §4.5：映射失败静默，后续 VoiceInfo 查询命中率下降无人知晓
+        try:
+            _voice_logger.detailed(
+                "voice", f"Name2Id查询失败 chat={chat}: {type(e).__name__}")
+        except Exception:
+            pass
         return None
 
 
 def _candidate_queries(chat_id, local_id, svr_id, ts):
-    """按可信度生成 VoiceInfo 查询条件。"""
-    if chat_id is not None and svr_id:
-        yield "chat_name_id=? AND svr_id=?", (chat_id, svr_id)
-    if chat_id is not None and local_id and ts:
-        yield "chat_name_id=? AND local_id=? AND create_time=?", (chat_id, local_id, ts)
-    if chat_id is not None and local_id:
-        yield "chat_name_id=? AND local_id=?", (chat_id, local_id)
+    """按可信度生成 VoiceInfo 查询条件。
+
+    带 chat_name_id 的查询优先。**只有在无法确定会话**（chat_id is None）时
+    才退到不带会话约束的查询：真实库 VoiceInfo 实测 40708 行只有 3556 个不同
+    local_id（平均 ~11 行共用一个值），裸 local_id=? 会捞到别的会话的语音，
+    而 get_voice 首个命中即返回 —— 跨会话音频泄漏（导出件是要外发的）。
+    """
+    if chat_id is not None:
+        if svr_id:
+            yield "chat_name_id=? AND svr_id=?", (chat_id, svr_id)
+        if local_id and ts:
+            yield "chat_name_id=? AND local_id=? AND create_time=?", (chat_id, local_id, ts)
+        if local_id:
+            yield "chat_name_id=? AND local_id=?", (chat_id, local_id)
+        return
+    # 会话未知（Name2Id 查不到）：只能按消息自身标识兜底，命中结果不作会话校验
     if svr_id:
         yield "svr_id=?", (svr_id,)
     if local_id and ts:
@@ -352,6 +381,10 @@ def get_voice(acc_dir: Path, chat: str = "", local_id: int = 0,
                         params).fetchone()
                     if not row or not row[4]:
                         continue
+                    # 双保险：已知会话时，任何非本会话的命中一律丢弃（防以后有人
+                    # 在 cid 已知的情况下又把裸查询加回来）
+                    if cid is not None and row[0] is not None and int(row[0]) != cid:
+                        continue
                     raw, offset = _clean_voice_data(bytes(row[4]))
                     if not raw:
                         continue
@@ -371,6 +404,12 @@ def get_voice(acc_dir: Path, chat: str = "", local_id: int = 0,
                     }
             finally:
                 conn.close()
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            # 审计 §4.5：media_*.db 损坏静默跳过——"真没有"与"库打不开"分不清。
+            # 必须绑定 e（原 `except sqlite3.Error:` 照抄文档会 NameError）
+            try:
+                _voice_logger.warn("voice", f"media分片打开失败: {db.name}: {e}")
+            except Exception:
+                pass
             continue
     return None, "语音数据不存在或尚未同步"

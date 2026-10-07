@@ -37,11 +37,15 @@ function fmtDay(s) {
 const CAL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M8 3v4M16 3v4M3.5 10h17"/></svg>';
 
 /* ── 下拉选择 ─────────────────────────────────────────────
- * 替代原生 <select>：触发按钮 + 列表弹层，键盘 ↑↓/Enter/Esc 可用。 */
+ * 替代原生 <select>：触发按钮 + 列表弹层，键盘 ↑↓/Enter/Esc 可用。
+ * multi: true 时为多选——value 为字符串数组，点选项切换选中态且弹层不关闭。 */
 export function createDropdown({ options = [], value = null, onChange = null,
-                                 label = '', placeholder = '请选择' } = {}) {
+                                 label = '', placeholder = '请选择',
+                                 multi = false } = {}) {
   let opts = (options || []).slice();
-  let val = value;
+  let val = multi
+    ? (Array.isArray(value) ? value.map(String) : (value ? [String(value)] : []))
+    : value;
   let open = false;
   let activeIdx = -1;
 
@@ -62,20 +66,34 @@ export function createDropdown({ options = [], value = null, onChange = null,
     const o = opts.find(o => String(o.value) === String(v));
     return o ? o.label : (v == null || v === '' ? '' : String(v));
   }
+  function isOn(v) {
+    return multi ? val.includes(String(v)) : String(val ?? '') === String(v);
+  }
   function renderBtn() {
-    const empty = val == null || val === '';
-    txt.textContent = empty ? placeholder : labelOf(val);
+    const empty = multi ? (!val || !val.length) : (val == null || val === '');
+    txt.textContent = empty ? placeholder
+      : (multi ? val.map(labelOf).join('、') : labelOf(val));
     txt.classList.toggle('is-empty', empty);
   }
   function renderPop() {
     pop.replaceChildren();
     opts.forEach((o, i) => {
-      const on = String(o.value) === String(val);
+      const on = isOn(o.value);
       const item = h('div', 'sxw-opt' + (on ? ' on' : '') + (i === activeIdx ? ' focus' : ''),
-                     o.label);
+                     (multi ? (on ? '✓ ' : '　') : '') + o.label);
       item.setAttribute('role', 'option');
       item.setAttribute('aria-selected', String(on));
-      item.addEventListener('click', () => { setValue(o.value, true); close(); btn.focus(); });
+      item.addEventListener('click', () => {
+        if (multi) {
+          const v = String(o.value);
+          val = val.includes(v) ? val.filter(x => x !== v) : [...val, v];
+          renderBtn();
+          renderPop();
+          if (api.onChange) api.onChange(val.slice());
+        } else {
+          setValue(o.value, true); close(); btn.focus();
+        }
+      });
       pop.appendChild(item);
     });
   }
@@ -93,13 +111,22 @@ export function createDropdown({ options = [], value = null, onChange = null,
       if (t) t.scrollIntoView({ block: 'nearest' });
     } else if (ev.key === 'Enter') {
       ev.preventDefault();
-      if (activeIdx >= 0 && activeIdx < opts.length) { setValue(opts[activeIdx].value, true); close(); }
+      if (activeIdx >= 0 && activeIdx < opts.length) {
+        if (multi) {
+          const v = String(opts[activeIdx].value);
+          val = val.includes(v) ? val.filter(x => x !== v) : [...val, v];
+          renderBtn(); renderPop();
+          if (api.onChange) api.onChange(val.slice());
+        } else { setValue(opts[activeIdx].value, true); close(); }
+      }
     }
   }
   function openPop() {
     if (open) return;
     open = true;
-    activeIdx = Math.max(0, opts.findIndex(o => String(o.value) === String(val)));
+    activeIdx = multi
+      ? Math.max(0, opts.findIndex(o => val.includes(String(o.value))))
+      : Math.max(0, opts.findIndex(o => String(o.value) === String(val)));
     root.classList.add('open');
     btn.setAttribute('aria-expanded', 'true');
     renderPop();
@@ -118,21 +145,27 @@ export function createDropdown({ options = [], value = null, onChange = null,
 
   /* onChange 从实例上读取（api.onChange），页面可以在构造之后再赋值/换绑 */
   function setValue(v, fire) {
-    val = v;
+    if (multi) {
+      val = Array.isArray(v) ? v.map(String) : (v ? [String(v)] : []);
+    } else {
+      val = v;
+    }
     renderBtn();
-    if (fire && api.onChange) api.onChange(val);
+    if (fire && api.onChange) api.onChange(multi ? val.slice() : val);
   }
 
   const api = {
     onChange: onChange || null,
     el: root,
-    get value() { return val; },
+    get value() { return multi ? val.slice() : val; },
     set value(v) { setValue(v, false); },
     get options() { return opts.slice(); },
     /** 替换选项；当前值不在新选项里时回落到第一项 */
     set options(list) {
       opts = (list || []).slice();
-      if (!opts.some(o => String(o.value) === String(val))) {
+      if (multi) {
+        val = val.filter(v => opts.some(o => String(o.value) === v));
+      } else if (!opts.some(o => String(o.value) === String(val))) {
         val = opts.length ? opts[0].value : null;
       }
       renderBtn();

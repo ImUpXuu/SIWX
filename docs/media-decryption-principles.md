@@ -199,5 +199,5 @@ Web API
 - 原项目 `pc_wechat_exp`：V2 布局、V1 固定 key、动态收割三策略、wxgf 处理
 - py_wx_key (H3CoF6)：MMKV 派生算法
 - ZedeX/weixin-decrypte-script：32hex 内存正则扫描思路
-- 本项目实测：`diag_media.py`（研究脚本）、`media_research/`（解密样张）、
+- 本项目实测：`scripts/diag_media.py`（研究脚本）、`media_research/`（解密样张）、
   `docs/media-research.md`（研究记录）

@@ -54,9 +54,12 @@ def extract(ctx) -> int:
     key_map = ctx["key_map"]
     attrib = ctx["attrib"]
     log = ctx["log"]
+    dbg = ctx.get("dbg", log)
 
     mmkv_dir = Path(db_dir) / "MMKV"
     if not mmkv_dir.is_dir():
+        # 审计 §3.4:58-60：目录不存在静默 return 0 → Debug 可见
+        dbg(f"[mmkv] MMKV 目录不存在: {mmkv_dir}")
         return 0
     wxid_full = os.path.basename(os.path.dirname(os.path.abspath(str(db_dir))))
     wxid = clean_wxid(wxid_full)
@@ -72,7 +75,9 @@ def extract(ctx) -> int:
     found = 0
     try:
         paths = list(mmkv_dir.iterdir())
-    except OSError:
+    except OSError as e:
+        # 审计 §3.4:73-76：枚举失败 warn（结果残缺，用户可感）
+        log(f"[mmkv] ⚠ MMKV 目录枚举失败: {e}")
         return 0
     if not paths:
         log("[mmkv] MMKV 目录为空")
@@ -84,12 +89,17 @@ def extract(ctx) -> int:
         m = CODE_RE.match(name)
         try:
             raw = path.read_bytes()
-        except OSError:
+        except OSError as e:
+            # 审计 §3.4:85-88：单文件读失败 detailed
+            dbg(f"[mmkv] {name} 读取失败: {e}")
             continue
         if len(raw) < 40:
+            dbg(f"[mmkv] {name} 过短 ({len(raw)} bytes)，跳过")
             continue
         total_size = struct.unpack("<I", raw[:4])[0]
         if total_size < 33 or 4 + total_size > len(raw):
+            # 审计 §3.4:89-93：头部校验失败是格式变化的唯一线索
+            dbg(f"[mmkv] {name} 头部异常 len={len(raw)} total_size={total_size}")
             continue
         iv = raw[4:20]
         ct = raw[20: 4 + total_size - 16]
@@ -104,17 +114,25 @@ def extract(ctx) -> int:
             if plaintext is not None:
                 break
         if plaintext is None:
+            # 审计 §3.4:100-107：全部候选派生密钥 GCM 失败 = "文件存在但密钥
+            # 未命中"的最重要细分（派生密钥不对 vs 文件不是 tinfo 格式）。
+            # 只记候选 label 列表，绝不记 aes_key 本身。
+            dbg(f"[mmkv] {name}: {len(candidates)} 个候选派生密钥全部 GCM 校验失败 "
+                f"labels={[l for l, _ in candidates]}")
             continue
         log(f"[mmkv] 解密 {name} 成功 ({label}, {len(plaintext)} bytes)")
 
+        missing_rels = []
         for salt_hex, rel in rel_by_salt.items():
             if salt_hex in key_map:
                 continue
             page1 = page1_by_salt[salt_hex]
+            hit_rel = False
             for sep in ("\\", "/"):
                 pos = plaintext.find(rel.replace("\\", sep).encode())
                 if pos < 0:
                     continue
+                hit_rel = True
                 nearby = plaintext[pos: pos + 512 + len(rel)]
                 for hm in HEX64_RE.finditer(nearby):
                     try:
@@ -129,6 +147,12 @@ def extract(ctx) -> int:
                         break
                 if salt_hex in key_map:
                     break
+            if not hit_rel:
+                missing_rels.append(rel)
+        if missing_rels:
+            # 审计 §3.4:115-117：明文中找不到 rel 路径（按文件聚合，防刷屏）
+            dbg(f"[mmkv] {name} 明文中未找到 {len(missing_rels)} 个库路径: "
+                f"{missing_rels[:5]}")
     if found:
         log(f"[mmkv] MMKV 离线提取完成: +{found}")
     else:

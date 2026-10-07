@@ -32,6 +32,8 @@ def extract(ctx) -> int:
     key_map = ctx["key_map"]
     attrib = ctx["attrib"]
     log = ctx["log"]
+    # 审计 §3.4：逐 salt 细分等 Debug 才需要的信号走 dbg（95 行已有无条件汇总）
+    dbg = ctx.get("dbg", log)
 
     try:
         result = subprocess.run(["lldb", "--version"], capture_output=True, check=True, timeout=10)
@@ -65,7 +67,7 @@ def extract(ctx) -> int:
         if len(key_map) >= len(page1_by_salt):
             break
         log(f"[macos_lldb] PID={pid}: 开始 LLDB 断点捕获...")
-        passphrase = _capture_passphrase_via_lldb(pid, log)
+        passphrase = _capture_passphrase_via_lldb(pid, log, dbg)
         if not passphrase:
             log(f"[macos_lldb] PID={pid}: 未捕获到 passphrase")
             continue
@@ -90,6 +92,9 @@ def extract(ctx) -> int:
                 key_map[salt_hex] = key_hex
                 attrib[salt_hex] = "macos_lldb"
                 derived += 1
+            else:
+                # 审计 §3.4:87：passphrase 抓到但该 salt 派生 HMAC 未命中
+                dbg(f"[macos_lldb] salt={salt_hex[:16]}... 派生 HMAC 未命中")
             if len(key_map) >= len(page1_by_salt):
                 break
         log(f"[macos_lldb] PID={pid}: 派生 {derived} 个密钥")
@@ -160,7 +165,8 @@ def _main():
     # 空壳），因此额外在 CCKeyDerivationPBKDF 上下断点：SQLCipher 用它把 passphrase
     # 派生为数据库密钥 (rounds=256000)，参数里直接就是 passphrase。
     bp_cc = target.BreakpointCreateByName("CCKeyDerivationPBKDF")
-    n_loc = bp_key.GetNumLocations() + bp_v2.GetNumLocations() + bp_cc.GetNumLocations()
+    n_loc = (bp_key.GetNumLocations() + bp_v2.GetNumLocations()
+             + bp_cc.GetNumLocations())
 
     # Fallback: 扫描各模块符号表按地址建断点
     # (SBModule.FindSymbols 返回 SBSymbolContextList，取 .symbol 才有 .addr)
@@ -169,7 +175,10 @@ def _main():
             for fn in ["sqlite3_key", "sqlite3_key_v2"]:
                 try:
                     sc_list = mod.FindSymbols(fn)
-                except Exception:
+                except Exception as e:
+                    # 审计 §3.4:168：符号扫描失败带 SYMERR: 前缀回传，
+                    # 外层解析钩子（_capture 的 SYMERR: 分支）可见
+                    print(f"SYMERR:{{fn}}:{{type(e).__name__}}: {{e}}")
                     continue
                 if not sc_list:
                     continue
@@ -188,8 +197,9 @@ def _main():
     if n_loc == 0:
         try:
             process.Detach()
-        except Exception:
-            pass
+        except Exception as e:
+            # 审计 §3.4:186-188：Detach 失败 = 微信可能卡在断点暂停，用户可感副作用
+            print(f"WARN:DetachFail:{{type(e).__name__}}: {{e}}")
         print("FAIL:NoSymbol")
         return
 
@@ -298,8 +308,9 @@ def _main():
     try:
         if process.IsValid():
             process.Detach()
-    except Exception:
-        pass
+    except Exception as e:
+        # 审计 §3.4:267-271：Detach 失败静默会让微信卡在断点暂停
+        print(f"WARN:DetachFail:{{type(e).__name__}}: {{e}}")
 
 try:
     _main()
@@ -337,9 +348,11 @@ def _lldb_cmd_prefix(log) -> list:
         return []
 
 
-def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
+def _capture_passphrase_via_lldb(pid: int, log, dbg=None) -> str | None:
     """LLDB breakpoint to capture sqlite3_key passphrase arg, with detailed logging."""
+    dbg = dbg or log
     script = _build_lldb_script(pid)
+    script_path = None
 
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -347,13 +360,14 @@ def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
             script_path = f.name
 
         result = subprocess.run(
-            _lldb_cmd_prefix(log) + ["lldb", "-b", "-O", f"command script import {script_path}"],
+            _lldb_cmd_prefix(log)
+            + ["lldb", "-b", "-O", f"command script import {script_path}"],
             capture_output=True, text=True, timeout=90)
-        os.unlink(script_path)
 
         # Parse and log output
         for line in result.stdout.splitlines():
             if line.startswith("OK:"):
+                # OK: 行含 passphrase 明文，直接 return，绝不落日志
                 return line[3:].strip()
             elif line.startswith("BP:"):
                 log(f"[macos_lldb] 断点位置数: {line[3:]}")
@@ -361,12 +375,20 @@ def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
                 log(f"[macos_lldb] LLDB: {line}")
             elif line.startswith("SYM:"):
                 log(f"[macos_lldb] symbol: {line[4:]}")
+            elif line.startswith("SYMERR:"):
+                log(f"[macos_lldb] 符号扫描失败: {line[7:]}")
+            elif line.startswith("WARN:"):
+                log(f"[macos_lldb] ⚠ {line[5:]}")
             elif line.startswith("HIT:"):
                 log(f"[macos_lldb] breakpoint hit: {line[4:]}")
             elif line.startswith("PROCESS_DEAD:"):
                 log(f"[macos_lldb] process died: {line[13:]}")
             elif line.startswith("Traceback") or line.startswith("  File"):
                 log(f"[macos_lldb] 脚本异常: {line}")
+            else:
+                # 审计 §3.4:299-317：只补不匹配任何已知前缀的行（OK: 行已在
+                # 上面 return，不会走到这里）
+                dbg(f"[macos_lldb] 未识别行: {line[:200]}")
         if result.stderr:
             err = result.stderr.strip()[:4000]
             if err:
@@ -375,5 +397,13 @@ def _capture_passphrase_via_lldb(pid: int, log) -> str | None:
         log("[macos_lldb] error: LLDB timeout (90s)")
     except Exception as e:
         log(f"[macos_lldb] error: {e}")
+    finally:
+        # 审计核查 agent-2 B4：os.unlink 原在 subprocess.run 之后，超时异常
+        # 直接抛出导致临时脚本残留；try/finally 保证任何路径都清理。
+        if script_path:
+            try:
+                os.unlink(script_path)
+            except OSError:
+                pass
 
     return None

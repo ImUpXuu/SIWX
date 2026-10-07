@@ -13,12 +13,14 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request
 
+from siwx import logger as log
 from siwx import paths
 from siwx import sns
 from siwx import sns_cdn
+from siwx import validate
 
 bp = Blueprint("sns_api", __name__, url_prefix="/api/sns")
-_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
+_ACCOUNT_RE = validate.ACCOUNT_RE
 
 # 媒体接口的失败原因要落 logs/siwx.log（「运行日志」页会 tail 该文件）
 _media_log = logging.getLogger("siwx")
@@ -29,17 +31,9 @@ KEYWORD_MAX_SCAN = 5000
 
 
 def _account_dir(account: str) -> Path | None:
-    if not account or not _ACCOUNT_RE.fullmatch(account):
-        return None
-    root = paths.out_root().resolve()
-    p = (root / account).resolve()
-    try:
-        p.relative_to(root)
-    except ValueError:
-        return None
-    if not p.is_dir():
-        return None
-    return p
+    # 规则已抽到 siwx/validate.py：单段名 + resolve()/relative_to 越界兜底。
+    # 此处保留薄封装，兼容既有调用点。
+    return validate.account_dir(account)
 
 
 def _sns_db(account: str) -> Path | None:
@@ -50,6 +44,11 @@ def _sns_db(account: str) -> Path | None:
 
 def _feed_json(feed: dict, include_comments: bool = True) -> dict:
     out = dict(feed)
+    # tid 是 int64（编码毫秒时间戳，近期动态 ~3e18），远超 JS Number 2^53 安全范围；
+    # 以数字输出会被 JSON.parse 丢精度，点详情/翻页游标传回的 tid 已变 → 查不到。
+    # 字符串化后原样传回，后端 int() 解析两种写法都兼容。
+    if out.get("tid") is not None:
+        out["tid"] = str(out["tid"])
     # card 统一走 sns.public_card()（与导出同一份形状），避免前端猜字段名
     out["card"] = sns.public_card(feed.get("card"))
     if not include_comments:
@@ -68,6 +67,9 @@ def _ts_arg(name: str, end: bool = False):
         return None
     ts = sns.parse_ts_arg(raw)
     if ts is None:
+        # 非法时间参数被静默忽略：用户以为在筛时间范围，实际是全量
+        log.detailed("sns", f"[filter] {name} 时间参数无法解析，已忽略"
+                            f"（退化为不过滤）: {raw!r}")
         return None
     if end and re.fullmatch(r"\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}\s*", str(raw)):
         ts += 86399
@@ -99,7 +101,8 @@ def _avatar_usernames(acc_dir: Path | None, usernames) -> set:
                         found.add(u)
         finally:
             con.close()
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        log.detailed("sns", f"[avatar] head_image.db 批量查询失败 db={db.name}: {e}")
         return set()
     # 自己的头像：SNS 里的 user_name 通常是原始 wxid，但输出目录名可能是 wxid_xxx_6409
     for u in wanted:
@@ -135,7 +138,10 @@ def accounts():
                 try:
                     st = sns.timeline_stats(db)
                     out.append({"wxid": d.name, **st})
-                except Exception:
+                except Exception as e:
+                    # 统计失败伪装 0 条 → 前端把"打不开"当"没发过动态"
+                    log.warn("sns", f"[accounts] {d.name} 统计失败，伪装 0 条: "
+                                    f"{type(e).__name__}: {e}")
                     out.append({"wxid": d.name, "count": 0})
     return jsonify({"accounts": out})
 
@@ -194,6 +200,7 @@ def timeline():
             sql += " LIMIT ?"
             args.append(limit)
         scanned = 0
+        parsed_fail = 0
         for tid, who, content in con.execute(sql, args):
             scanned += 1
             if keyword and scanned > KEYWORD_MAX_SCAN:
@@ -206,6 +213,8 @@ def timeline():
                 continue
             feed = sns.parse_timeline(content)
             if feed is None:
+                # 解析失败的动态静默消失（实测全库约 0.3% 失败率）
+                parsed_fail += 1
                 continue
             feed.update(tid=tid, ts_ms=sns.sns_id_to_ms(tid), ts=ts_sec,
                         user_name=(who or b"").decode("utf-8", "replace") if isinstance(who, bytes) else (who or ""))
@@ -218,7 +227,10 @@ def timeline():
                 break
     finally:
         con.close()
-    next_tid = rows[-1]["tid"] if rows else None
+    # 循环外记三计数（scanned/parsed/skipped），失败明细不逐条打防刷屏
+    log.detailed("sns", f"[timeline] account={account} scanned={scanned} "
+                        f"parsed={len(rows)} 解析失败={parsed_fail}")
+    next_tid = str(rows[-1]["tid"]) if rows else None
     return jsonify({"timeline": [_feed_json(x) for x in rows], "next_before_tid": next_tid,
                     "has_more": len(rows) >= limit})
 
@@ -268,6 +280,17 @@ def emoji():
         return jsonify({"error": "emoji 参数不是合法 JSON"}), 400
     if not isinstance(spec, dict) or not (spec.get("url") or spec.get("encrypt_url")):
         return jsonify({"error": "emoji 缺少 url"}), 400
+    # url/encrypt_url 来自好友评论的 XML（sns.py 解析后由前端原样回传），是 GET，
+    # 任意联系人就能驱动本机服务去请求任意地址（含 file://、内网探测）。
+    # 与 /media 同一条白名单：非微信 CDN 的字段直接丢弃。
+    spec = dict(spec)
+    for k in ("url", "encrypt_url"):
+        v = spec.get(k) or ""
+        if v and not sns_cdn.is_wechat_cdn(v):
+            _media_log.warning("[sns-emoji] 拒绝非微信 CDN 地址：%s", sns_cdn.safe_url(v))
+            spec[k] = ""
+    if not (spec.get("url") or spec.get("encrypt_url")):
+        return jsonify({"error": "只允许微信 CDN 表情地址", "reason": "not-cdn"}), 400
 
     acc_dir = _account_dir(request.args.get("account", ""))
     cache = (acc_dir / "sns_media" / "emoji") if acc_dir else None
@@ -376,6 +399,7 @@ def export():
 
     with _server._lock:
         if _server._job["running"]:
+            log.warn("sns", f"[export] 任务被拒绝: 已有任务在运行 account={account}")
             return jsonify({"error": "已有任务在运行"}), 409
         _server._job.update({"running": True, "mode": "sns_export", "done": False,
                              "ok": False, "logs": [], "report": None})
@@ -428,6 +452,23 @@ def media():
     acc_dir = _account_dir(account)
     if acc_dir:
         cache = acc_dir / "sns_media"
+    # 磁盘缓存命中的**视频**直接 send_file：conditional=True 走 Flask/Werkzeug
+    # 的 Range/206，实况照片/小视频在灯箱里拖动进度条不必整段重拉。
+    # 旧实现一律整文件读进内存 + 200 全量返回，<video> 只能全量缓冲——
+    # 用户实测"实况照片有概率卡"（首次打开等 CDN 全量下载，拖动重下）。
+    # 图片不走这条：缓存的是未 strip 微信尾部的原始字节，需按结果处理。
+    if cache is not None and cache.is_dir():
+        stem = sns_cdn.cache_key(url)
+        for p in cache.glob(f"{stem}.*"):
+            if p.suffix == ".part":
+                continue
+            if p.suffix.lower() in (".mp4", ".mov", ".webm"):
+                from flask import send_file
+                resp = send_file(p, mimetype="video/mp4", conditional=True)
+                resp.headers["X-SIWX-SNS-Cached"] = "1"
+                resp.headers["Cache-Control"] = "private, max-age=86400"
+                return resp
+            break
     result = sns_cdn.fetch_media(url, key=key, token=token, cache_dir=cache)
     if not result["ok"]:
         # 失败原因由 sns_cdn 落 logs/siwx.log（含 reason / 试了几个域名 / HTTP 码）

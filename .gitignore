@@ -6,6 +6,8 @@ media_research/
 dist/
 build/
 *.log
+# 轮转件是 siwx.log.1，*.log 匹配不到；logs/ 里还含明文微信路径与账号目录名
+logs/
 blobs.txt
 *.spec.bak
 .DS_Store
@@ -19,15 +21,11 @@ video/
 
 # 本地私有产物（勿提交）
 siwx-issues-report.md
-logs/
-output/
-exports/
 .dsh-src/
 .zcodeignore
 .probe-effort.ps1
 .asar-extract.mjs
 .asar-header.json
-.workbuddy-ai/
 
 # 文档站（VitePress）本地产物
 node_modules/

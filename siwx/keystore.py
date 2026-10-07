@@ -12,6 +12,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from siwx import logger as _slog
+
 _ENTROPY = b"stories-in-wx::keystore::v1"
 
 _USE_DPAPI = sys.platform == "win32"
@@ -92,7 +94,9 @@ def store_path() -> Path:
     try:
         from siwx.paths import data_dir
         return data_dir() / "keystore.bin"
-    except Exception:
+    except Exception as e:
+        # 审计 §3.5：密钥库实际落在哪里不可见，是排"密钥库为什么总为空"第一问题
+        _slog.detailed("keystore", f"store_path 回退 legacy: {type(e).__name__}: {e}")
         return _legacy_store_path()
 
 
@@ -110,6 +114,8 @@ def _safe_root() -> Path:
         from siwx.paths import app_root
         return app_root()
     except Exception:
+        # 审计 §3.5：落 TEMP 重启即丢，必须可见
+        _slog.warn("keystore", "数据目录不可用，密钥库回退到 TEMP（重启后丢失）")
         return Path(tempfile.gettempdir())
 
 
@@ -126,16 +132,20 @@ def load() -> dict:
             return {}
         try:
             store = json.loads(_unprotect(legacy.read_bytes()).decode("utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError) as e:
+            _slog.warn("keystore", f"旧位置密钥库读取失败 path={legacy} err={e}")
             return {}
         try:
             save(store)  # 尽力迁移到新位置，失败不阻塞
-        except OSError:
-            pass
+        except OSError as e:
+            _slog.detailed("keystore", f"迁移到 {p} 失败: {e}")
         return store
     try:
         return json.loads(_unprotect(p.read_bytes()).decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        # 审计 §3.5:136-139（本链路最值得修的一处）：主路径读取失败 = 整个
+        # 密钥库静默清零，下次必然全量重收割
+        _slog.warn("keystore", f"密钥库读取失败 path={p} err={e}（可尝试备份该文件后重跑）")
         return {}
 
 
@@ -143,8 +153,20 @@ def save(store: dict) -> None:
     p = store_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(".tmp")
-    tmp.write_bytes(_protect(json.dumps(store, ensure_ascii=False).encode("utf-8")))
-    os.replace(tmp, p)
+    try:
+        tmp.write_bytes(_protect(json.dumps(store, ensure_ascii=False).encode("utf-8")))
+        os.replace(tmp, p)
+    except OSError as e:
+        # 审计 §3.5:142-147：只补日志，不改异常传播语义（记完仍抛出），
+        # 不要吞掉写入失败而掩盖数据丢失
+        _slog.error("keystore", f"保存失败 path={p}: {e}")
+        raise
+    if not _USE_DPAPI:
+        # 审计 S3：非 Windows 兜底路径是明文 JSON，权限至少收紧到仅属主可读写
+        try:
+            p.chmod(0o600)
+        except OSError as e:
+            _slog.detailed("keystore", f"chmod 0600 失败 {p}: {e}")
 
 
 def insert(store: dict, salt: str, key: str, strategy: str) -> None:

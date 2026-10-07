@@ -11,11 +11,13 @@ import platform
 import time
 from pathlib import Path
 
-from siwx import logger as log
+from siwx import logger as _slog
 from siwx import keystore
 from siwx.discover import find_wechat_data_dirs, wxid_of
-from siwx.pool import decrypt_parallel, load_manifest, save_manifest
-from siwx.sqlcipher import collect_db_files, decrypt_database, parse_key, verify_enc_key
+from siwx.pool import (decrypt_parallel, load_manifest, manifest_has_keys,
+                       save_manifest)
+from siwx.sqlcipher import (collect_db_files, decrypt_database, mask_key,
+                            parse_key, verify_enc_key)
 from siwx.strategies import run_strategies
 
 # manifest 中记录「产出该输出目录的 db_dir」的保留键。
@@ -23,12 +25,6 @@ from siwx.strategies import run_strategies
 # 注意：pool.load_manifest 只有 extract.py 一处读取，且只用 .get(rel) 查询，
 # 从不遍历，因此新增该键不会影响任何既有逻辑。
 SOURCE_FIELD = "@source"
-
-
-def mask_key(k: str) -> str:
-    if len(k) <= 10:
-        return "…"
-    return f"{k[:6]}…{k[-4:]}"
 
 
 def _round_mb(n: float) -> float:
@@ -40,16 +36,17 @@ def _discover(log_fn):
     dirs = find_wechat_data_dirs()
     if not dirs:
         log_fn("✗ 未找到微信数据目录 (xwechat_files/*/db_storage)")
-        log.detailed("discover", "搜索路径: USERPROFILE/Documents/xwechat_files, USERPROFILE/xwechat_files, A-Z:/xwechat_files")
+        _slog.detailed("discover", "搜索路径: USERPROFILE/Documents/xwechat_files, USERPROFILE/xwechat_files, A-Z:/xwechat_files")
     else:
         log_fn(f"自动扫描到 {len(dirs)} 个微信账号")
         for wxid, db_dir in dirs:
-            log.detailed("discover", f"账号={wxid}, 路径={db_dir}")
+            _slog.detailed("discover", f"账号={wxid}, 路径={db_dir}")
     return dirs
 
 
 def _keystore_preset(entries_by_dir, log) -> dict:
     """检查密钥库覆盖率：全部命中返回全量 preset，否则返回 None（需收割）。"""
+    log = _slog.ensure_dual(log, "keystore")
     store = keystore.load()
     if not store:
         return None
@@ -63,8 +60,11 @@ def _keystore_preset(entries_by_dir, log) -> dict:
                     if verify_enc_key(parse_key(rec["key"]), e.page1):
                         covered += 1
                         continue
-                except ValueError:
-                    pass
+                except ValueError as ve:
+                    # 核查 C.1：用条目变量 e（except 块里的 ve 是 ValueError，
+                    # 用 ve.salt_hex 会 AttributeError）；存量损坏记录 warn
+                    _slog.warn("keystore",
+                               f"密钥库记录解析失败 salt={e.salt_hex[:16]}… err={ve}")
     if total and covered == total:
         log(f"[keystore] 密钥缓存全覆盖 ({covered}/{total})，跳过内存扫描")
         return {s: r["key"] for s, r in store.items()}
@@ -94,23 +94,35 @@ def global_harvest(dirs, entries_by_dir, log=print, only_missing=None):
         return {}, {}
     from siwx.strategies import config_cipher
 
+    # 双写注入点（审计 §2.1 模式 A）：任务轨保留，结构化轨受 Debug 开关控制
+    log = _slog.ensure_dual(log, "harvest")
     page1_by_salt = {}
     for entries in entries_by_dir.values():
         for e in entries:
             if only_missing is None or e.salt_hex in only_missing:
                 page1_by_salt.setdefault(e.salt_hex, e.page1)
     if not page1_by_salt:
+        _slog.detailed("harvest", "无待收割 salt，跳过内存扫描")
         return {}, {}
 
     log(f"[harvest] 收割目标 {len(page1_by_salt)} 个 salt，一次内存扫描联合验证")
+    t0 = time.time()
     key_map, attrib = {}, {}
     ctx = {
         "db_dir": "", "entries": [], "page1_by_salt": page1_by_salt,
-        "key_map": key_map, "attrib": attrib, "log": log,
+        "key_map": key_map, "attrib": attrib,
+        # 直调 config_cipher（不经 run_strategies）：按策略标签单独包装
+        "log": _slog.dual_log(getattr(log, "task", log), "strategy:cipher"),
+        "dbg": _slog.dbg_log("strategy:cipher"),
     }
     config_cipher.extract(ctx)
     if key_map:
-        log(f"[harvest] 收割完成: {len(key_map)} 个新密钥验证通过")
+        log(f"[harvest] 收割完成: {len(key_map)} 个新密钥验证通过 "
+            f"(耗时 {time.time() - t0:.1f}s)")
+    else:
+        _slog.detailed("harvest",
+                       f"收割 0 命中，目标 {len(page1_by_salt)} 个 salt，"
+                       f"耗时 {time.time() - t0:.1f}s")
     return key_map, attrib
 
 
@@ -118,6 +130,8 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
                          entries=None, use_memory=True) -> dict:
     """对单个账号执行提取。preset = 全局收割/密钥库的 {salt: key}。"""
     t0 = time.time()
+    # 双写注入点（审计 §2.1 模式 A）
+    log = _slog.ensure_dual(log, "extract")
     wxid = wxid_of(db_dir)
     log(f"── 账号 {wxid} ──")
     _d = lambda m: log(f"[extract] {m}") if log else None
@@ -176,6 +190,7 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
             try:
                 kb = parse_key(k)
             except ValueError:
+                _slog.detailed("extract", "交叉验证: 已知密钥解析失败")
                 continue
             if verify_enc_key(kb, page1):
                 log(f"  [交叉验证] salt={salt[:16]}… 复用已知密钥")
@@ -190,8 +205,12 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
         store = keystore.load()
         for salt, key in key_map.items():
             keystore.insert(store, salt, key, attrib.get(salt, "extract"))
-        keystore.save(store)
-        log("[keystore] 密钥已保存到 DPAPI 加密密钥库")
+        # 审计 §3.1:174-179：磁盘满/权限等 OSError 不应炸穿整个提取
+        try:
+            keystore.save(store)
+            log("[keystore] 密钥已保存到 DPAPI 加密密钥库")
+        except OSError as exc:
+            _slog.error("keystore", f"密钥库保存失败: {exc}")
 
     salts = []
     for salt in sorted(salt_to_dbs, key=lambda s: (s not in key_map, s)):
@@ -236,6 +255,8 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     旧 manifest 无 `@source`（升级自 v5.0.x）视为放行，行为与旧版一致。
     """
     t0 = time.time()
+    # 双写注入点（审计 §2.1 模式 A）
+    log = _slog.ensure_dual(log, "decrypt")
     wxid = wxid_of(db_dir)
     store = keystore.load()
     if entries is None:
@@ -246,11 +267,18 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     log(f"[decrypt] 密钥库: {len(store)} 条, 唯一密钥: {len(uniq)} 个")
 
     manifest = load_manifest(out_root) if use_cache else {}
+    # S6 迁移：旧版缓存清单把每个库的 SQLCipher 明文密钥落盘了——加载时已
+    # 就地剥离，这里立即重写，把磁盘上的存量明文也清掉。
+    if manifest and manifest_has_keys(manifest):
+        log("[decrypt] ⚠ 检测到旧版缓存清单含明文密钥，已剥离并重写"
+            "（密钥改为每次会话从加密密钥库重取，见审计 S6）")
+        save_manifest(out_root, manifest)
     # 本次来源标签 + 历史来源标签（用于覆盖保护）
     try:
         src_tag = str(Path(db_dir).resolve()).casefold()
     except OSError:
         src_tag = str(db_dir).casefold()
+        _slog.detailed("decrypt", f"resolve 失败，来源标签用原始路径: {db_dir}")
     source_guard = (manifest.get(SOURCE_FIELD) or "").strip() or None
     if source_guard and src_tag and source_guard != src_tag:
         log(f"[decrypt] ⚠ 该输出目录上次由其他副本目录产出：")
@@ -264,12 +292,19 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     def _resolve_key(e):
         rec = store.get(e.salt_hex)
         if rec:
+            kb = None
             try:
                 kb = parse_key(rec["key"])
+            except ValueError:
+                # 核查 C.1：ValueError 块里用条目变量，勿用异常对象取属性
+                _slog.detailed("decrypt",
+                               f"{e.rel} keystore 记录解析失败 salt={e.salt_hex[:16]}…")
+            if kb is not None:
                 if verify_enc_key(kb, e.page1):
                     return rec["key"]
-            except ValueError:
-                pass
+                # 有记录但 HMAC 不过 = 密钥轮换，重要诊断信号（审计 §3.1:255-271）
+                _slog.detailed("decrypt",
+                               f"{e.rel} keystore 记录 HMAC 未命中 salt={e.salt_hex[:16]}…")
         for k in uniq:
             try:
                 kb = parse_key(k)
@@ -289,12 +324,16 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
             continue
         try:
             mtime = int(e.path.stat().st_mtime)
-        except OSError:
+        except OSError as oe:
             mtime = 0
+            _slog.warn("decrypt", f"stat 失败 {e.rel}: {oe}（该库缓存将永不命中）")
         m = manifest.get(e.rel)
         dst = out_root / e.rel
+        # S6：缓存命中不再比对 manifest 里的 key（密钥已不落盘）。
+        # 能走到这里说明密钥已从 keystore 解析成功；(mtime,size) 未变且
+        # 产物存在即为有效缓存。
         if (use_cache and m and m.get("size") == e.size and m.get("mtime") == mtime
-                and m.get("key") == key_hex and dst.is_file()):
+                and dst.is_file()):
             cached += 1
             files.append({"rel": e.rel, "size_mb": _round_mb(e.size),
                           "pages": m.get("pages", 0), "status": "cached",
@@ -328,9 +367,17 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
         key_hex = next(t[3] for t in tasks if t[0] == rel)
         if status == "ok":
             ok += 1
+            # S6：manifest 不再持久化密钥（size/mtime/pages 足以判定缓存命中，
+            # 密钥每次会话从 keystore 重取）
+            # 审计 §3.1:327-329：源库被微信删除的竞态不应炸掉已成功任务与缓存
+            try:
+                mtime = int(e.path.stat().st_mtime)
+            except OSError as oe:
+                mtime = 0
+                _slog.warn("decrypt", f"{rel} manifest 记录失败: {oe}")
             manifest[rel] = {"size": e.size,
-                             "mtime": int(e.path.stat().st_mtime),
-                             "pages": pages, "key": key_hex}
+                             "mtime": mtime,
+                             "pages": pages}
         else:
             failed += 1
         files.append({"rel": rel, "size_mb": _round_mb(e.size), "pages": pages,
@@ -360,27 +407,50 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     return report
 
 
+def _covered_salts(store, entries_by_dir) -> set:
+    """密钥库能 HMAC 覆盖的 salt 集合（extract_all / auto_all 共用，审计 §3.1）。
+
+    损坏记录（parse_key ValueError）detailed 记录后按未覆盖处理，不影响其余。"""
+    covered = set()
+    for entries in entries_by_dir.values():
+        for e in entries:
+            rec = store.get(e.salt_hex)
+            if not rec:
+                continue
+            try:
+                if verify_enc_key(parse_key(rec["key"]), e.page1):
+                    covered.add(e.salt_hex)
+            except ValueError as ve:
+                _slog.detailed("keystore",
+                               f"覆盖判定: 记录解析失败 salt={e.salt_hex[:16]}… err={ve}")
+    return covered
+
+
+def _collect_entries_by_dir(dirs) -> dict:
+    """逐账号收集 db 文件（审计 §3.1:364/400）：单账号目录损坏只跳过该账号，
+    不再让 extract_all/auto_all 整体失败。"""
+    entries_by_dir = {}
+    for _w, db in dirs:
+        try:
+            entries_by_dir[db] = collect_db_files(db)
+        except Exception as exc:
+            _slog.error("discover", f"收集 {db} 失败: {exc}")
+    return entries_by_dir
+
+
 def extract_all(log=print, use_cache=True):
     """自动发现全部账号 → 缓存判定 → 收割补漏 → 逐账号提取。"""
+    log = _slog.ensure_dual(log, "extract")
     dirs = _discover(log)
     if not dirs:
         return []
-    entries_by_dir = {db: collect_db_files(db) for _w, db in dirs}
+    entries_by_dir = _collect_entries_by_dir(dirs)
     preset_full = _keystore_preset(entries_by_dir, log) if use_cache else None
     preset = preset_full
     if preset is None:
         # 收割补漏：只针对密钥库未覆盖的 salt
         store = keystore.load()
-        covered = set()
-        for e in entries_by_dir.values():
-            for e2 in e:
-                rec = store.get(e2.salt_hex)
-                if rec:
-                    try:
-                        if verify_enc_key(parse_key(rec["key"]), e2.page1):
-                            covered.add(e2.salt_hex)
-                    except ValueError:
-                        pass
+        covered = _covered_salts(store, entries_by_dir)
         missing = {e.salt_hex for es in entries_by_dir.values() for e in es
                    if e.salt_hex not in covered}
         gm, ga = ({}, {})
@@ -394,15 +464,16 @@ def extract_all(log=print, use_cache=True):
     return [extract_keys_for_dir(db, log, preset=preset,
                                  entries=entries_by_dir.get(db),
                                  use_memory=_use_memory_per_account())
-            for _w, db in dirs]
+            for _w, db in dirs if db in entries_by_dir]
 
 
 def auto_all(out_dir: str, log=print, use_cache=True, workers=None):
     """全自动：发现 → 缓存判定 → 收割补漏 → 提取 → 并行解密。"""
+    log = _slog.ensure_dual(log, "extract")
     dirs = _discover(log)
     if not dirs:
         return []
-    entries_by_dir = {db: collect_db_files(db) for _w, db in dirs}
+    entries_by_dir = _collect_entries_by_dir(dirs)
     preset_full = _keystore_preset(entries_by_dir, log) if use_cache else None
     attrib = {}
     if preset_full is not None:
@@ -410,16 +481,7 @@ def auto_all(out_dir: str, log=print, use_cache=True, workers=None):
         attrib = {s: "keystore" for s in preset}
     else:
         store = keystore.load()
-        covered = set()
-        for es in entries_by_dir.values():
-            for e in es:
-                rec = store.get(e.salt_hex)
-                if rec:
-                    try:
-                        if verify_enc_key(parse_key(rec["key"]), e.page1):
-                            covered.add(e.salt_hex)
-                    except ValueError:
-                        pass
+        covered = _covered_salts(store, entries_by_dir)
         missing = {e.salt_hex for es in entries_by_dir.values() for e in es
                    if e.salt_hex not in covered}
         gm, ga = ({}, {})
@@ -430,6 +492,8 @@ def auto_all(out_dir: str, log=print, use_cache=True, workers=None):
 
     accounts = []
     for wxid, db in dirs:
+        if db not in entries_by_dir:
+            continue   # 收集失败的账号已记 error，此处跳过（勿再触发重收集）
         rep = extract_keys_for_dir(db, log, preset=preset,
                                    entries=entries_by_dir.get(db),
                                    use_memory=_use_memory_per_account())
@@ -439,5 +503,8 @@ def auto_all(out_dir: str, log=print, use_cache=True, workers=None):
             dec = decrypt_dir(db, str(Path(out_dir) / wxid), log,
                               entries=entries_by_dir.get(db),
                               workers=workers, use_cache=use_cache)
+        else:
+            # 审计 §3.1:432-436：0 密钥跳过解密不再静默
+            _slog.detailed("extract", f"账号 {wxid} 无已验证密钥，跳过解密")
         accounts.append({**rep, "decrypt": dec})
     return accounts

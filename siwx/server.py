@@ -6,85 +6,30 @@ import threading
 import time
 import webbrowser
 from datetime import datetime
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from flask import Flask, Response, abort, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, g, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 from siwx import extract, keystore, logger as log
 from siwx import paths as _paths
+from siwx import validate
 from siwx.discover import (add_manual_data_dir, find_account_conflicts,
                            find_wechat_data_dirs, find_wechat_pids,
                            load_manual_data_dirs, wxid_of)
+from siwx.logging_setup import flush_logs as _flush_logs
+from siwx.logging_setup import install_crash_hooks, setup_file_logger
 from siwx.sqlcipher import collect_db_files
 
 
-# ── 文件日志（详细）──────────────────────────────────────────────
-def _setup_file_logger():
-    log_dir = _paths.app_root() / "logs"
-    log_dir.mkdir(exist_ok=True)
-    logger = logging.getLogger("siwx")
-    logger.setLevel(logging.DEBUG)
-    # 避免重复添加
-    if logger.handlers:
-        return logger
-    fh = RotatingFileHandler(log_dir / "siwx.log", maxBytes=10 * 1024 * 1024,
-                              backupCount=5, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"))
-    logger.addHandler(fh)
-    # 控制台也输出 INFO+
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    logger.addHandler(ch)
-    return logger
+# ── 文件日志 + 崩溃钩子（已抽到 siwx/logging_setup.py，CLI 模式也统一安装）──
+_siwx_logger = setup_file_logger()
+install_crash_hooks()
+# 启动恢复 Debug 级别（环境变量 SIWX_LOG_LEVEL / 持久化设置）。
+# 必须在 setup_file_logger() 之后：其内部会把 "siwx" logger 置回 DEBUG（审计 §2.3）。
+from siwx import loglevel as _loglevel  # noqa: E402
 
-_siwx_logger = _setup_file_logger()
-_CRASH_FH = None
-
-
-def _flush_logs() -> None:
-    """尽量把日志落盘；logging 的 handler 通常会自动 flush，这里用于异常路径兜底。"""
-    for h in _siwx_logger.handlers:
-        try:
-            h.flush()
-        except Exception:
-            pass
-
-
-def _install_crash_hooks() -> None:
-    """记录非 Flask/任务线程里的未捕获异常和 Python fatal traceback。"""
-    global _CRASH_FH
-    log_dir = _paths.app_root() / "logs"
-    log_dir.mkdir(exist_ok=True)
-
-    def _sys_excepthook(exc_type, exc, tb):
-        _siwx_logger.critical("未捕获主线程异常", exc_info=(exc_type, exc, tb))
-        _flush_logs()
-        sys.__excepthook__(exc_type, exc, tb)
-
-    sys.excepthook = _sys_excepthook
-
-    if hasattr(threading, "excepthook"):
-        def _thread_excepthook(args):
-            _siwx_logger.critical("未捕获线程异常: %s", args.thread.name,
-                                  exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
-            _flush_logs()
-        threading.excepthook = _thread_excepthook
-
-    try:
-        import faulthandler
-        _CRASH_FH = open(log_dir / "crash.log", "a", encoding="utf-8")
-        faulthandler.enable(_CRASH_FH, all_threads=True)
-    except Exception:
-        _CRASH_FH = None
-
-
-_install_crash_hooks()
+_loglevel.startup()
 
 
 def _ui_dir() -> Path:
@@ -97,6 +42,57 @@ def _ui_dir() -> Path:
 UI_DIR = _ui_dir()
 
 app = Flask(__name__, static_folder=None)
+
+# ── 请求级 access log（审计 §2.5）──────────────────────────────
+# werkzeug access log 被彻底禁用（见 run_server），detailed 模式下用结构化轨
+# 补一条 "{method} {path} {status} {ms}ms"。不含 query string（防消息内容/
+# 关键词入日志）。404 跳过：与日志页的 404 过滤口径一致，避免浏览器探测刷屏。
+@app.before_request
+def _access_log_t0():
+    g._siwx_t0 = time.perf_counter()
+    return None
+
+
+@app.after_request
+def _access_log(response):
+    try:
+        if response.status_code != 404:
+            ms = (time.perf_counter() - getattr(g, "_siwx_t0", time.perf_counter())) * 1000
+            log.detailed("http", f"{request.method} {request.path} "
+                                 f"{response.status_code} {ms:.0f}ms")
+    except Exception:
+        pass
+    return response
+
+
+# ── Host 头校验（审计 S2）────────────────────────────────────────
+# 默认绑定 127.0.0.1 时，无 Host 校验意味着 DNS rebinding 页面可以把
+# <攻击域名> 解析到 127.0.0.1 并跨源读取 /api/status、/api/logs、/api/job。
+# 浏览器正常访问的 Host 是 127.0.0.1:port / localhost:port，攻击页的 Host
+# 是攻击者域名 → 直接 403。显式 --trust-lan 时跳过校验（用户已确认接受
+# 局域网访问，Host 形态不可预知）。
+_BOUND = {"host": "127.0.0.1", "trust_lan": False}
+
+
+def _request_hostname() -> str:
+    try:
+        from urllib.parse import urlsplit
+        return (urlsplit(f"//{request.host or ''}").hostname or "").lower()
+    except ValueError:
+        return (request.host or "").lower()
+
+
+@app.before_request
+def _host_guard():
+    if _BOUND["trust_lan"]:
+        return None
+    host = _request_hostname()
+    if host in ("", "127.0.0.1", "localhost", "::1"):
+        return None
+    if host == (_BOUND["host"] or "").lower():
+        return None
+    _siwx_logger.warning("拒绝非本机 Host 请求: %s", host)
+    return jsonify({"error": f"Host 校验失败: {host} 不在允许列表内"}), 403
 
 # 模块化 API 蓝图（聊天查看 / 设置 / 导出 / MCP）
 from siwx.api_chat import bp as chat_bp  # noqa: E402
@@ -160,9 +156,22 @@ _register_plugin_blueprints(app)
 # ── 全局状态（必须在路由和错误处理之前定义）──────────────────────
 _lock = threading.Lock()
 _job = {"running": False, "mode": None, "done": False, "ok": False,
-        "logs": [], "report": None}
+        "logs": [], "report": None, "error": None}
 _LOG_RING: list = []          # 环形日志缓冲（供日志页展示）
 _LOG_RING_MAX = 2000
+
+# 任务短 ID 生成器（P1：跨日志轨对账）。job-0001 递增，任务入口设置进
+# threading.local（logger.set_job_id），同线程内 exporter 的 detailed
+# 用 logger.job_prefix() 携带同一 ID，任务轨/结构化轨从此可按 ID 对账
+_JOB_SEQ = 0
+_JOB_SEQ_LOCK = threading.Lock()
+
+
+def _next_job_id() -> str:
+    global _JOB_SEQ
+    with _JOB_SEQ_LOCK:
+        _JOB_SEQ += 1
+        return f"job-{_JOB_SEQ:04d}"
 
 
 # ── 全局错误处理：确保所有异常都有日志 + JSON 响应 ──────────────
@@ -191,7 +200,12 @@ def _handle_exception(e):
         _LOG_RING.append([ts, msg])
         if len(_LOG_RING) > _LOG_RING_MAX:
             del _LOG_RING[:len(_LOG_RING) - _LOG_RING_MAX]
-    return jsonify({"error": f"{type(e).__name__}: {e}", "traceback": tb}), 500
+    body = {"error": f"{type(e).__name__}: {e}"}
+    # traceback 只在本机 debug 模式回显：默认状态下它是一份完整的源码路径/行号
+    # 清单，直接吐给任何触发 500 的调用方（含 --trust-lan 下的局域网 peer）。
+    if app.debug:
+        body["traceback"] = tb
+    return jsonify(body), 500
 
 
 def _log(msg: str) -> None:
@@ -213,10 +227,15 @@ def _now_ms() -> int:
 
 
 def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
-             export_opts=None) -> None:
-    """任务执行器。keys/decrypt 支持指定 db_dir（引导页单账号流程）。"""
+             export_opts=None, jid: str = "") -> None:
+    """任务执行器。keys/decrypt 支持指定 db_dir（引导页单账号流程）。
+
+    jid 由任务入口（/api/run 或 auto-sync 调度）生成并传入，任务轨与
+    结构化轨携带同一 ID；缺省（直接调用）时自生成一个。"""
     use_cache = not no_cache
-    _log(f"[job] 模式={mode}, 指定目录={db_dir or '无'}, 缓存={use_cache}, 进程数={workers or '默认'}")
+    jid = jid or _next_job_id()
+    log.set_job_id(jid)
+    _log(f"[{jid}] 模式={mode}, 指定目录={db_dir or '无'}, 缓存={use_cache}, 进程数={workers or '默认'}")
     _emit_task_event("start", mode=mode, db_dir=db_dir, out_dir=out_dir,
                      no_cache=no_cache, workers=workers)
     _t0 = time.time()
@@ -226,9 +245,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             from siwx import sns_export
             data = export_opts or {}
             account = data.get("account") or ""
-            acc_dir = _paths.out_root() / account
-            db = acc_dir / "sns" / "sns.db"
-            if not db.is_file():
+            acc_dir = validate.account_dir(account)
+            db = acc_dir / "sns" / "sns.db" if acc_dir else None
+            if not db or not db.is_file():
                 raise RuntimeError("该账号还没有朋友圈数据库，请先完成引导")
             fmt = data.get("format", "json")
             if fmt not in sns_export.FORMATS:
@@ -372,8 +391,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         elif mode == "export":
             from siwx import exporter
             data = export_opts or {}
-            acc_dir = _paths.out_root() / (data.get("account") or "")
-            if not (acc_dir / "message").is_dir():
+            # account 是请求值，必须过账号名校验 + 越界检查（此前直接拼 out_root）
+            acc_dir = validate.account_dir(data.get("account"))
+            if acc_dir is None or not (acc_dir / "message").is_dir():
                 raise RuntimeError("该账号还没有解密产物，请先完成引导")
             chats = data.get("chats") or []
             if not chats and data.get("chat"):
@@ -401,6 +421,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 want_avatars=data.get("avatars", False),
                 export_root=_paths.exports_root(),
                 pack=data.get("pack", "folder"),
+                template=data.get("template"),
                 progress=lambda pct, msg: _log(f"[export] {pct}% {msg}"))
             _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
                  f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"
@@ -422,6 +443,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             ts = _now_ms()
             msg = f"[错误] {e}"
             _job["ok"] = False
+            # 失败原因单独成字段：前端四处（export/settings/onboarding）此前只能
+            # 从 logs 末尾猜，误判成「完成/无导出结果」。
+            _job["error"] = f"{type(e).__name__}: {e}"
             _job["logs"].append([ts, msg])
             _LOG_RING.append([ts, msg])
             if len(_LOG_RING) > _LOG_RING_MAX:
@@ -432,6 +456,8 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         with _lock:
             _job["running"] = False
             _job["done"] = True
+        log.detailed("server", f"[{jid}] job 状态: running=False mode={mode} done=True")
+        log.set_job_id("")  # 线程归还线程池/复用前清掉，防跨任务串 ID
 
 
 def _emit_task_event(event: str, **ctx) -> None:
@@ -442,7 +468,9 @@ def _emit_task_event(event: str, **ctx) -> None:
     """
     try:
         from siwx.plugins import registry
-    except Exception:
+    except Exception as e:
+        # 插件系统注册表本身导入失败 → 任务事件不广播给插件监听器
+        log.warn("plugin", f"插件系统注册表导入失败，任务事件不广播: {e}")
         return
     if not registry.task_listeners:
         return
@@ -468,7 +496,9 @@ def _plugin_theme_links() -> str:
     """插件主题 → <link> 标签串（按 priority 排序，内置主题之后加载）。"""
     try:
         from siwx.plugins import registry
-    except Exception:
+    except Exception as e:
+        # 与 _emit_task_event 的失败影响面不同：这里只影响主题 CSS 注入
+        log.warn("plugin", f"插件系统注册表导入失败，主题 CSS 注入失败: {e}")
         return ""
     if not registry.themes:
         return ""
@@ -506,9 +536,33 @@ def widgets_js():
     return send_from_directory(UI_DIR, "widgets.js", mimetype="text/javascript")
 
 
+@app.get("/onboarding.js")
+def onboarding_js():
+    """首启全屏引导向导（壳层组件）：由 app.js 动态 import 调起。"""
+    return send_from_directory(UI_DIR, "onboarding.js", mimetype="text/javascript")
+
+
 @app.get("/pages/<path:filename>")
 def pages(filename: str):
-    """模块化页面资源：pages/<name>.html / .js / .css"""
+    """模块化页面资源：pages/<name>.html / .js / .css
+
+    审计 F4：JS 里的静态资源缓存版本号（?v=…）由 siwx.__version__ 在响应时
+    注入，发版不再依赖手工改 5 个页面的版本串（漏改即用户端缓存旧 JS）。"""
+    target = (UI_DIR / "pages" / filename)
+    try:
+        target.resolve().relative_to((UI_DIR / "pages").resolve())
+    except (ValueError, OSError):
+        abort(404)
+    if not target.is_file():
+        abort(404)
+    if filename.endswith(".js"):
+        try:
+            from siwx import __version__ as _ver
+            text = target.read_text(encoding="utf-8").replace(
+                "?v=2026100203", f"?v={_ver}")
+            return Response(text, mimetype="text/javascript")
+        except OSError:
+            pass
     return send_from_directory(UI_DIR / "pages", filename)
 
 
@@ -563,8 +617,12 @@ def status():
                             cached += 1
                     except ValueError:
                         pass
-        except Exception:
-            pass
+        except ValueError as e:
+            log.detailed("server", f"[status] 账号={wxid} db 扫描失败: "
+                                   f"{type(e).__name__}: {e}")
+        except Exception as e:
+            log.detailed("server", f"[status] 账号={wxid} db 扫描失败: "
+                                   f"{type(e).__name__}: {e}")
         try:
             is_manual = str(Path(db).resolve()).casefold() in manual_set
         except OSError:
@@ -584,17 +642,50 @@ def status():
 
 @app.post("/api/run")
 def run():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if data is None:
+        log.warn("server", "/api/run 请求体不是合法 JSON，已按空参数处理")
+    data = data or {}
+    # 输入校验：db_dir 是「密钥提取/解密要读哪个目录」，out_dir 是「明文写到哪」。
+    # 二者都来自请求体，不校验就等于把任意目录读/写原语暴露给本机任意进程
+    # 与 --trust-lan 下的局域网peer。UI 只传发现列表里的 db_dir、从不传 out_dir。
+    db_dir = data.get("db_dir")
+    if db_dir:
+        from siwx import discover
+        v = discover.validate_db_path(str(db_dir))
+        if not v.get("ok"):
+            log.warn("server", f"/api/run 拒绝非法 db_dir: {v.get('error')}")
+            return jsonify({"error": f"db_dir 无效：{v.get('error') or '未识别到微信数据目录'}"}), 400
+    out_dir = data.get("out_dir")
+    if out_dir:
+        if not validate.within(out_dir, _paths.out_root()):
+            log.warn("server", "/api/run 拒绝越界 out_dir（必须位于输出根目录内）")
+            return jsonify({"error": "out_dir 必须位于输出根目录内"}), 400
+    log.detailed("server", f"/api/run mode={data.get('mode', '')} "
+                           f"db_dir={data.get('db_dir') or ''} "
+                           f"out_dir={data.get('out_dir') or ''} "
+                           f"no_cache={bool(data.get('no_cache'))} "
+                           f"workers={data.get('workers')}")
     with _lock:
         if _job["running"]:
+            log.warn("server", "任务被拒绝: 已有任务在运行")
             return jsonify({"error": "已有任务在运行"}), 409
         _job.update({"running": True, "mode": data.get("mode", ""), "done": False,
-                     "ok": False, "logs": [], "report": None})
+                     "ok": False, "logs": [], "report": None, "error": None})
+    jid = _next_job_id()
+    log.detailed("server", f"[{jid}] job 状态: running=True "
+                           f"mode={data.get('mode', '')} done=False")
     args = (data.get("mode", ""), data.get("db_dir"), data.get("out_dir"),
             bool(data.get("no_cache")), data.get("workers"),
-            data.get("export_opts") or {})
+            data.get("export_opts") or {}, jid)
     threading.Thread(target=_run_job, args=args, daemon=True).start()
     return jsonify({"started": True})
+
+
+# tail 读取失败的一次性告警标志：/api/logs 会被前端轮询，失败若每次都记会刷屏。
+# P0 后 log.error 会桥接进 siwx.log（正是被读的文件），但写文件不触发再次
+# 读取，无递归；保留一次性标志只为防轮询刷量。
+_TAIL_ERR_REPORTED = {"app": False, "mcp": False}
 
 
 def _tail_app_log(limit: int = 800) -> list:
@@ -637,7 +728,11 @@ def _tail_app_log(limit: int = 800) -> list:
                     pass
             out.append([ts_ms, ln])
         return out
-    except Exception:
+    except Exception as e:
+        if not _TAIL_ERR_REPORTED["app"]:
+            _TAIL_ERR_REPORTED["app"] = True
+            log.error("server", f"读取 siwx.log 失败（日志页文件日志缺失）: "
+                                f"{type(e).__name__}: {e}")
         return []
 
 
@@ -665,7 +760,11 @@ def _tail_mcp_log(limit: int = 500) -> list:
                 ts_ms = 0
             result.append([ts_ms, f"[MCP] {ln}"])
         return result
-    except Exception:
+    except Exception as e:
+        if not _TAIL_ERR_REPORTED["mcp"]:
+            _TAIL_ERR_REPORTED["mcp"] = True
+            log.error("server", f"读取 mcp.log 失败（日志页 MCP 日志缺失）: "
+                                f"{type(e).__name__}: {e}")
         return []
 
 
@@ -683,31 +782,70 @@ def _desensitize_item(item):
     return [item[0], log.desensitize_msg(str(item[1]))]
 
 
-@app.get("/api/logs")
-def api_logs():
-    """返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）。"""
-    limit = min(int(request.args.get("limit", "2000") or 2000), 5000)
+def _merged_logs(limit: int, *, desensitize: bool = True,
+                 start_ts=None, end_ts=None) -> list:
+    """合并四源日志并按时间排序（日志页与日志导出共用同一份数据）。
+
+    四源：siwx.log 文件轨 + _LOG_RING 任务轨 + mcp.log + 进程内结构化轨。
+    旧实现里「查看」走这四源、「导出」只走 logger._FILE_LOG（进程内列表，
+    重启即空）——用户看着的任务轨和 MCP 行永远不在导出文件里，而 bug 报告
+    模板恰恰要求粘贴日志。
+    """
     with _lock:
         ring_logs = list(_LOG_RING)
-    app_logs = _tail_app_log(800)
+    app_logs = _tail_app_log(max(800, limit))
     mcp_logs = _tail_mcp_log(500)
     structured_logs = log.get_logs(limit=limit)
 
     # 去重：同一条任务日志会同时进入 _LOG_RING 和 siwx.log。
+    # P0 后 siwx.log 恒收 DEBUG（detailed 始终落盘），ROUGH 模式下日志页
+    # 按开关口径过滤文件轨里的 DEBUG 行——开关只控展示，留存不受影响。
+    rough = log.get_level() == log.LogLevel.ROUGH
     seen = set()
     merged = []
-    for item in sorted(app_logs + ring_logs + mcp_logs + structured_logs, key=lambda x: x[0]):
+    for item in sorted(app_logs + ring_logs + mcp_logs + structured_logs,
+                       key=lambda x: x[0] or 0):
         text = _log_item_text(item)
         if "404 Not Found" in text:
+            continue
+        if rough and "] [DEBUG]" in text:
+            continue
+        if start_ts and (item[0] or 0) < start_ts:
+            continue
+        if end_ts and (item[0] or 0) > end_ts:
             continue
         key = (item[0], text)
         if key in seen:
             continue
         seen.add(key)
         merged.append(item)
-    # 日志页统一脱敏：账号标识（含 wxalias_xxx 类自定义微信号）、密钥、路径
-    # 不随截图/粘贴外泄。导出日志另有 desensitize=0 通道可拿原文。
-    merged = [_desensitize_item(item) for item in merged]
+    if desensitize:
+        merged = [_desensitize_item(item) for item in merged]
+    return merged
+
+
+def _log_line_text(item) -> str:
+    """合并条目 → 纯文本行（导出用）。条目形状是混合的：[ts,msg] 或 [ts,level,module,msg]。"""
+    ts = (item[0] if item else 0) or 0
+    body = item[3] if len(item) >= 4 else (item[1] if len(item) > 1 else "")
+    if len(item) >= 4:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts / 1000)) if ts else "-"
+        return f"{stamp}.{ts % 1000 if ts else 0:03d} [{str(item[1]):7}] [{item[2]}] {body}"
+    # 文件轨 / MCP 轨条目只带 [ts, 原文]，原文已含自己的时间与级别，不再套一层
+    if not ts:
+        return str(body)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts / 1000))
+    return f"{stamp}.{ts % 1000:03d} {body}"
+
+
+@app.get("/api/logs")
+def api_logs():
+    """返回文件日志 + 环形任务日志 + MCP 调用日志（合并按时间排序）。"""
+    try:
+        limit = max(1, min(int(request.args.get("limit", "2000") or 2000), 5000))
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit 参数无效（必须是整数）"}), 400
+    merged = _merged_logs(limit)
     return jsonify({"logs": merged[-limit:], "level": log.get_level().value})
 
 
@@ -719,25 +857,28 @@ def api_log_settings():
 
 @app.post("/api/logs/settings")
 def api_log_settings_save():
-    """设置日志模式。"""
+    """设置日志模式（持久化 + 双通道同步，见 siwx/loglevel.py）。"""
     data = request.get_json(silent=True) or {}
     level = data.get("level", "rough")
-    log.set_level(log.LogLevel.DETAILED if level == "detailed" else log.LogLevel.ROUGH)
-    # 级别切换必须同时作用于 siwx.log：此前文件日志恒 DEBUG，UI 里切换等于没切
-    logging.getLogger("siwx").setLevel(
-        logging.DEBUG if level == "detailed" else logging.INFO)
+    if not isinstance(level, str):
+        level = "rough"
+    _loglevel.apply(level, persist=True)
     return jsonify({"level": log.get_level().value})
 
 
 @app.get("/api/logs/export")
 def api_log_export():
-    """导出脱敏日志。"""
+    """导出日志（与日志页同源：文件轨 + 任务轨 + MCP 轨 + 结构化轨）。"""
     start_ts = request.args.get("start")
     end_ts = request.args.get("end")
     desensitize = request.args.get("desensitize", "1") == "1"
-    start = int(start_ts) if start_ts else None
-    end = int(end_ts) if end_ts else None
-    text = log.export_logs(start_ts=start, end_ts=end, desensitize=desensitize)
+    try:
+        start = int(start_ts) if start_ts else None
+        end = int(end_ts) if end_ts else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "start/end 参数无效（必须是整数毫秒时间戳）"}), 400
+    items = _merged_logs(20000, desensitize=desensitize, start_ts=start, end_ts=end)
+    text = "\n".join(_log_line_text(it) for it in items)
     return Response(text, mimetype="text/plain",
                     headers={"Content-Disposition": "attachment; filename=siwx_log.txt"})
 
@@ -753,6 +894,7 @@ def api_job():
             "mode": _job["mode"],
             "logs": _job["logs"],
             "report": _job["report"],
+            "error": _job["error"],
         })
 
 
@@ -789,13 +931,18 @@ def _start_auto_sync_scheduler() -> None:
                     continue
                 with _lock:
                     if _job["running"]:
+                        log.warn("server", "auto-sync 跳过本轮: 已有任务在运行")
                         continue
                     _job.update({"running": True, "mode": "sync", "done": False,
                                  "ok": False, "logs": [], "report": None})
-                _log(f"[auto-sync] 微信在线，开始定时增量同步（间隔 {interval // 60} 分钟）")
+                jid = _next_job_id()
+                log.detailed("server", f"[{jid}] job 状态: running=True "
+                                       f"mode=sync done=False (auto-sync)")
+                _log(f"[{jid}] [auto-sync] 微信在线，开始定时增量同步"
+                     f"（间隔 {interval // 60} 分钟）")
 
                 def _worker():
-                    _run_job("sync")
+                    _run_job("sync", jid=jid)
                     with _lock:
                         ok = bool(_job.get("ok"))
                     mark_auto_sync_result(ok, "增量同步完成" if ok else "增量同步失败")
@@ -809,18 +956,26 @@ def _start_auto_sync_scheduler() -> None:
     threading.Thread(target=_loop, name="siwx-auto-sync", daemon=True).start()
 
 
-def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
-    """serve 模式：rich TUI 状态栏 + 日志流，Flask 完全静默。"""
+def run_server(host="127.0.0.1", port=8787, open_browser=True,
+               trust_lan=False) -> None:
+    """serve 模式：rich TUI 状态栏 + 日志流，Flask 完全静默。
+
+    trust_lan：绑定非回环地址时必须由 CLI 显式确认（审计 S2）——局域网内
+    任何设备都能无凭证触发导出等操作，需用户知情方可开启。"""
     import logging
     import time as _time
 
     from siwx import media, tui, keystore
 
+    _BOUND["host"] = host
+    _BOUND["trust_lan"] = bool(trust_lan)
+
     tui.banner()
     tui.log(f"控制台 http://{host}:{port} · 按 Ctrl+C 停止")
 
-    # 媒体解密事件 → TUI
-    media.event = tui.log
+    # 媒体解密事件 → 结构化轨（默认实现已走 logger.detailed）+ TUI 实时流
+    _base_event = media.event
+    media.event = lambda msg: (_base_event(msg), tui.log(msg))
 
     # 彻底关闭 Flask/werkzeug 所有日志
     logging.getLogger("werkzeug").handlers = []
@@ -835,6 +990,8 @@ def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
 
     # 状态 getter（供 TUI 状态栏轮询）
+    status_fail = {"n": 0}
+
     def _status_getter() -> dict:
         d = {}
         try:
@@ -851,8 +1008,13 @@ def run_server(host="127.0.0.1", port=8787, open_browser=True) -> None:
                     d["job"] = "✓完成" if _job["ok"] else "✗失败"
                 else:
                     d["job"] = "空闲"
-        except Exception:
-            pass
+            status_fail["n"] = 0
+        except Exception as e:
+            # 每秒轮询一次，必须节流：首次 + 之后每连续 60 次（约 1 分钟）warn 一条
+            status_fail["n"] += 1
+            if status_fail["n"] == 1 or status_fail["n"] % 60 == 0:
+                log.warn("server", f"TUI 状态栏数据采集连续失败 {status_fail['n']} 次"
+                                   f"（状态栏将长期显示 …）: {type(e).__name__}: {e}")
         return d
 
     # Flask 后台线程（完全静默：启动横幅+运行时日志全部吞掉）

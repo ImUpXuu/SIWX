@@ -15,6 +15,7 @@ def extract(ctx) -> int:
     key_map = ctx["key_map"]
     attrib = ctx["attrib"]
     log = ctx["log"]
+    dbg = ctx.get("dbg", log)
 
     pids = winproc.psutil_pid_list()
     if not pids:
@@ -22,16 +23,22 @@ def extract(ctx) -> int:
         return 0
 
     entry = len(key_map)
+    total_regions = literals = 0
     for pid in pids:
         if len(key_map) >= len(page1_by_salt):
             break
         h = winproc.open_process(pid)
         if not h:
+            # 审计 §3.4：兜底策略对外完全黑盒，open 失败至少 Debug 可见
+            dbg(f"[memscan] PID={pid} 打开失败 "
+                f"err={winproc._stats.get('open_last_err', 0)}")
             continue
         try:
             regions = winproc.enum_regions(h)
+            total_regions += len(regions)
             for base, data in winproc.iter_chunks(h, regions, chunk_size=4 * 1024 * 1024):
                 for m in HEX_RE.finditer(data):
+                    literals += 1
                     hex_str = m.group(1).decode()
                     if len(hex_str) == 96:
                         key_hex, salt_hex = hex_str[:64], hex_str[64:]
@@ -55,6 +62,9 @@ def extract(ctx) -> int:
             winproc.close_handle(h)
 
     found = len(key_map) - entry
+    # 审计 §3.4：黑盒策略结束时 detailed 汇总一条（含 found==0 的情况）
+    dbg(f"[memscan] 扫描汇总: pids={len(pids)} regions={total_regions} "
+        f"字面量={literals} 命中={found} RPM失败={winproc._stats.get('rpm_fail', 0)}")
     if found:
         log(f"[memscan] 内存字面量扫描完成: +{found}")
     return found

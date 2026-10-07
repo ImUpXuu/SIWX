@@ -17,6 +17,7 @@ import logging
 import time
 from pathlib import Path
 
+from . import logger as _logger
 from . import sns
 from . import sns_cdn
 from .exporter import _safe_name
@@ -116,6 +117,10 @@ def _feed_to_dict(feed: dict, media_map: dict | None = None) -> dict:
         }
         if media_map and (feed.get("tid"), i, "") in media_map:
             item["localFile"] = media_map[(feed.get("tid"), i, "")]
+        elif media_map:
+            # 审计 §4.7：media_map 无键时导出页静默显示死图（CDN URL 常已过期）
+            _logger.detailed("sns",
+                             f"媒体未落盘 tid={feed.get('tid')} idx={i} live=False")
         if m.get("live_photo"):
             lp = m["live_photo"]
             live = {"md5": lp.get("md5"), "url": lp.get("url"),
@@ -124,6 +129,9 @@ def _feed_to_dict(feed: dict, media_map: dict | None = None) -> dict:
                     "width": lp.get("width"), "height": lp.get("height")}
             if media_map and (feed.get("tid"), i, "_live") in media_map:
                 live["localFile"] = media_map[(feed.get("tid"), i, "_live")]
+            elif media_map:
+                _logger.detailed("sns",
+                                 f"媒体未落盘 tid={feed.get('tid')} idx={i} live=True")
             item["livePhoto"] = live
         d["media"].append(item)
     return d
@@ -275,8 +283,10 @@ def download_media(feeds, media_dir: Path, cache_dir=None,
 
     def _one(task):
         tid, idx, m, suffix = task
+        # tid/idx 归属随下载链路传给 _log_media_ok（成功 detailed 带定位维度）
         r = sns_cdn.fetch_media(m.get("url"), key=m.get("key"),
-                                token=m.get("token"), cache_dir=cache_dir)
+                                token=m.get("token"), cache_dir=cache_dir,
+                                tid=tid, idx=idx)
         if not r["ok"]:
             return tid, idx, suffix, None, 0, r.get("error"), r.get("reason")
         data = sns_cdn.strip_wechat_tail(r["data"])
@@ -313,6 +323,11 @@ def download_media(feeds, media_dir: Path, cache_dir=None,
                          "reason": key, "error": err})
                     _file_log.warning("[sns-media] 导出下载失败 tid=%s idx=%s live=%s "
                                       "reason=%s err=%s", tid, idx, suffix == "_live", key, err)
+                else:
+                    # 审计 §4.7：超出 30 条上限的失败明细走 detailed（防刷爆）
+                    _logger.detailed("sns",
+                                     f"[sns-media] 导出下载失败 tid={tid} idx={idx} "
+                                     f"live={suffix == '_live'} reason={key} err={err}")
             if progress:
                 try:
                     progress(done, stat["total"], f"媒体 {done}/{stat['total']}")
@@ -541,7 +556,11 @@ def run_sns_export(db_path: Path, account: str, fmt: str = "json",
     if limit:
         feeds = feeds[:limit]
     if not feeds:
-        return {"ok": False, "error": "没有符合条件的动态"}
+        # "筛选后没有动态"不是失败：旧实现返回 ok=False，server 把它当 RuntimeError
+        # 抛出（job.ok=False），前端显示成红色的"导出失败"，用户以为程序坏了。
+        # 现在作为空结果成功返回，由 UI 明确呈现空态。
+        return {"ok": True, "empty": True, "count": 0, "file": None,
+                "error": None, "message": "没有符合条件的动态"}
 
     stamp = time.strftime("%Y%m%d_%H%M%S")
     folder = _safe_name(f"{account}_朋友圈_{stamp}")

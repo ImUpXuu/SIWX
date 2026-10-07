@@ -14,6 +14,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from siwx import logger as _log
+
 _PATH_CACHE = {}
 
 
@@ -24,6 +26,10 @@ def app_root() -> Path:
         p = Path(env_root)
         if p.is_dir():
             return p
+        # 用户显式指定的根目录无效却被静默忽略——排"产物去哪了"的第一现场。
+        # 路径过脱敏（日志页/导出时展示层处理）
+        _log.warn("paths", _log.desensitize_msg(
+            f"SIWX_ROOT 指向的目录不存在，已忽略: {env_root}"))
 
     # 2. PyInstaller 打包：exe 所在目录
     if getattr(sys, "frozen", False):
@@ -61,6 +67,11 @@ def data_dir() -> Path:
         base = (os.environ.get("LOCALAPPDATA")
                 or os.environ.get("USERPROFILE")
                 or tempfile.gettempdir())
+        if base == tempfile.gettempdir() and not (
+                os.environ.get("LOCALAPPDATA") or os.environ.get("USERPROFILE")):
+            # 极端环境兜底到 TEMP：重启即失，至少留个痕迹
+            _log.detailed("paths", "LOCALAPPDATA/USERPROFILE 均不可用，"
+                                   "数据目录兜底到系统 TEMP（重启即失）")
         return Path(base) / "stories-in-wx"
     home = Path.home()
     if sys.platform == "darwin":
@@ -97,6 +108,11 @@ def _writable_fallback(subdir: str, primary: Path) -> Path:
     except OSError:
         pass
     fallback = Path(os.environ.get("USERPROFILE", ".")) / "stories-in-wx" / subdir
+    # 主路径不可写、产物位置悄然改变——"找不到导出的文件"的根因。
+    # 注意：不要包 desensitize_msg（warn 控制台路径本就不脱敏，包了反而双重
+    # 脱敏；脱敏规则在日志页/导出的展示层统一处理）。有 _PATH_CACHE，每进程
+    # 只触发一次，不会刷屏。
+    _log.warn("paths", f"{subdir} 主路径不可写，回退: {fallback}")
     fallback.mkdir(parents=True, exist_ok=True)
     _PATH_CACHE[key] = fallback
     return fallback
@@ -108,3 +124,11 @@ def out_root() -> Path:
 
 def exports_root() -> Path:
     return _writable_fallback("exports", app_root() / "exports")
+
+
+def templates_root() -> Path:
+    """用户自定义 HTML 导出模板根目录（<SIWX_ROOT>/templates/）。
+
+    跟 exports_root 同思路：跟随 SIWX_ROOT/程序根，用户放这里同名目录
+    即覆盖内置模板；内置包在 siwx/templates/，由 html_template 解析。"""
+    return _writable_fallback("templates", app_root() / "templates")

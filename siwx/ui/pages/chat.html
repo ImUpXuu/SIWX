@@ -1,10 +1,11 @@
 <div class="chat-wrap" id="chat-wrap">
   <aside class="c-list">
     <div class="c-top">
-      <div id="c-account"></div>
       <div class="c-toolbar">
-        <input id="c-search" placeholder="搜索会话…">
-        <button id="c-refresh" title="增量同步">⟳</button>
+        <input id="c-search" placeholder="搜索会话…" aria-label="搜索会话">
+        <button id="c-refresh" title="增量同步" aria-label="增量同步">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+        </button>
       </div>
     </div>
     <div id="c-sessions"></div>
@@ -12,7 +13,7 @@
 
   <section class="c-main">
     <div class="c-head">
-      <button id="c-back">←</button>
+      <button id="c-back" aria-label="返回会话列表">←</button>
       <div class="c-titlebox">
         <b id="c-title">微信</b>
         <span id="c-sub">选择一个会话查看聊天记录</span>
@@ -22,7 +23,7 @@
         <button id="c-copy-selected" class="c-action hidden">复制所选</button>
         <button id="c-cancel-select" class="c-action hidden">取消</button>
         <button id="c-stats" class="c-action" disabled>统计</button>
-        <button id="c-export" class="c-action c-action-primary">导出</button>
+        <button id="c-export" class="c-action c-action-primary" disabled>导出</button>
       </div>
     </div>
 
@@ -31,7 +32,7 @@
         <div class="c-tip">选择一个会话查看聊天记录</div>
       </div>
       <aside class="c-timeline" id="c-timeline">
-        <button class="tl-trigger" id="c-timeline-trigger" type="button" title="按时间跳转">时间</button>
+        <button class="tl-trigger" id="c-timeline-trigger" type="button" title="按时间跳转" aria-label="打开时间轴">时间</button>
         <div class="tl-panel">
           <div class="tl-head"><b>聊天时间轴</b><span>悬停或点击月份展开</span></div>
           <div id="c-timeline-list" class="tl-list">

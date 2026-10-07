@@ -29,6 +29,18 @@ def parse_key(hex_key: str) -> bytes:
     return bytes.fromhex(h)
 
 
+def mask_key(k: str) -> str:
+    """密钥打码（6+4）。
+
+    下沉到本层（审计核查 C.4）：extract.py 导入 sqlcipher，本层的异常消息
+    若要携带打码密钥，反向 import extract 会循环导入。extract.py 改为
+    `from siwx.sqlcipher import mask_key`，`extract.mask_key` 名字保持可访问
+    （cli.py 依赖）。"""
+    if len(k) <= 10:
+        return "…"
+    return f"{k[:6]}…{k[-4:]}"
+
+
 def verify_enc_key(enc_key: bytes, page1: bytes) -> bool:
     """SQLCipher 4 page-1 HMAC 校验（恒时比较）。"""
     if len(page1) < PAGE_SZ:
@@ -116,9 +128,9 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
     - 预计算常量：CT_LEN 提到循环外
     - 进度回调降频：每 100 页回调一次
 
-    优化（v5.0.8）:
-    - CBC 链式 XOR 由「大整数 ``from_bytes``/``to_bytes``」改为 pycryptodome 的
-      C 实现 ``strxor.strxor``。原写法占单库解密耗时约 39%（``from_bytes`` 28%
+    优化（CBC 链式 XOR）:
+    - 由「大整数 ``from_bytes``/``to_bytes``」改为 pycryptodome 的 C 实现
+      ``strxor.strxor``。原写法占单库解密耗时约 39%（``from_bytes`` 28%
       + ``to_bytes`` 11%），实测内核 164 → 419 MB/s、整账号端到端 1.39x，
       输出**字节级等价**（见 ``tests/test_regressions.py::TestCryptoIntact``）。
       ``strxor`` 属于既有的 pycryptodome 依赖，未引入任何新的外部依赖。
@@ -132,18 +144,28 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
         fin = open(src, "rb", buffering=8 * 1024 * 1024)
     except OSError:
         # 同 _read_page1：唯一临时名，避免同进程并发撞名互相覆盖。
-        fd, name = tempfile.mkstemp(prefix="siwx_db_", suffix=".tmp")
+        # 审计 §3.3/核查 B1：三段失败分开抛，错误消息区分「建临时文件失败 /
+        # 复制失败 / 打开副本失败」，不再混为同一个裸 raise。
+        try:
+            fd, name = tempfile.mkstemp(prefix="siwx_db_", suffix=".tmp")
+        except OSError as e:
+            raise OSError(f"创建临时文件失败（源库 {src} 被占用且无法建临时副本）: {e}") from e
         os.close(fd)
         tmp_copy = Path(name)
         try:
             shutil.copy2(src, tmp_copy)
-            fin = open(tmp_copy, "rb", buffering=8 * 1024 * 1024)
-        except OSError:
-            # 复制/打开失败时立刻清理，否则空的 mkstemp 文件会残留在 TEMP
+        except OSError as e:
+            # 复制失败时立刻清理，否则空的 mkstemp 文件会残留在 TEMP
             # （异常会跳过下方第二个 try 的 finally）。
             tmp_copy.unlink(missing_ok=True)
             tmp_copy = None
-            raise
+            raise OSError(f"复制 {src} 到临时文件失败: {e}") from e
+        try:
+            fin = open(tmp_copy, "rb", buffering=8 * 1024 * 1024)
+        except OSError as e:
+            tmp_copy.unlink(missing_ok=True)
+            tmp_copy = None
+            raise OSError(f"打开 {src} 的临时副本失败: {e}") from e
 
     try:
         size = os.fstat(fin.fileno()).st_size
@@ -151,7 +173,11 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
             raise ValueError("文件不足一页")
         page1 = fin.read(PAGE_SZ)
         if not verify_enc_key(enc_key, page1):
-            raise ValueError("page1 HMAC 验证失败（密钥不匹配）")
+            # 上下文进异常消息（多账号场景定位是哪个库哪个密钥；严守脱敏口径）
+            raise ValueError(
+                f"page1 HMAC 验证失败（密钥不匹配） src={src.name} "
+                f"salt={page1[:SALT_SZ].hex()} key={mask_key(enc_key.hex())}"
+            )
         dst = Path(dst)
         dst.parent.mkdir(parents=True, exist_ok=True)
         total_pages = (size + PAGE_SZ - 1) // PAGE_SZ
@@ -164,7 +190,12 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
         os.close(fd)
         tmp_out = Path(_tmp_name)
 
-        with open(tmp_out, "wb", buffering=8 * 1024 * 1024) as fout:
+        # 输出临时文件创建失败（权限/磁盘满）时带上 dst 上下文（审计 §3.3:159）
+        try:
+            fout = open(tmp_out, "wb", buffering=8 * 1024 * 1024)
+        except OSError as e:
+            raise OSError(f"输出临时文件创建失败 dst={dst}: {e}") from e
+        with fout:
             aes = AES.new(enc_key, AES.MODE_ECB)
             body_len = PAGE_SZ - RESERVE_SZ  # 4016
             CT_LEN = body_len - SALT_SZ      # 4000
@@ -200,7 +231,15 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
         return total_pages
     finally:
         fin.close()
+        # 审计核查 C.5：两处 unlink 都可能因文件占用抛 OSError 而掩盖原始
+        # 解密异常，各自包 try 静默（清理失败不该顶掉真实错误）。
         if tmp_copy:
-            tmp_copy.unlink(missing_ok=True)
+            try:
+                tmp_copy.unlink(missing_ok=True)
+            except OSError:
+                pass
         if tmp_out is not None:
-            tmp_out.unlink(missing_ok=True)   # 失败路径清理半成品
+            try:
+                tmp_out.unlink(missing_ok=True)   # 失败路径清理半成品
+            except OSError:
+                pass

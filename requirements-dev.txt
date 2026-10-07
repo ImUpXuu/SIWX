@@ -1,0 +1,5 @@
+# 测试专用依赖（CI 的 test job 与本地 `python -m unittest discover -s tests` 用）。
+# 运行产品本身不需要这些；pyyaml 只服务 .github/ISSUE_TEMPLATE/*.yml 的校验测试，
+# 缺失时那 5 个测试会静默 skip —— 于是模板写坏了也没人知道。
+pyyaml>=6.0
+pytest>=8.0

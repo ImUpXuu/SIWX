@@ -10,21 +10,21 @@
       <div class="s-item">
         <b>日志模式</b>
         <span class="dim">详细模式记录所有操作步骤，便于排查问题（会增加日志量）</span>
-        <div id="s-log-level" style="width:auto;min-width:150px"></div>
+        <div class="s-ctl-dd" id="s-log-level"></div>
       </div>
       <div class="s-item">
         <b>导出脱敏日志</b>
         <span class="dim">导出时自动去除密钥/wxid/路径等敏感信息，可安全分享用于调试</span>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <div class="s-ctl">
           <label class="f-chk"><input type="checkbox" id="s-log-desensitize" checked> 脱敏</label>
-          <button class="btn" id="s-export-log">📥 导出日志</button>
+          <button class="btn" id="s-export-log">导出日志</button>
         </div>
       </div>
       <div class="s-item">
         <b>环境信息</b>
         <span class="dim">版本、运行模式、系统与架构、关键目录。提 issue 时粘贴这段内容，能大幅加快定位</span>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <button class="btn" id="s-copy-env">📋 复制环境信息</button>
+        <div class="s-ctl">
+          <button class="btn" id="s-copy-env">复制环境信息</button>
           <span class="dim" id="s-copy-env-status"></span>
         </div>
       </div>
@@ -55,26 +55,51 @@
   <div class="card s-card">
     <div class="card-head"><h2>清除缓存</h2><span class="hint">清除后下次运行会重新提取/解密</span></div>
     <div class="s-actions">
-      <div class="s-item">
+      <div class="s-item s-item-danger">
         <b>清除解密输出</b>
         <span class="dim">删除 output 目录下的明文数据库（密钥保留，重跑解密即可恢复）</span>
-        <button class="btn btn-danger" id="s-clear-output">🗑 清除解密输出</button>
+        <button class="btn btn-danger" id="s-clear-output">清除解密输出</button>
       </div>
-      <div class="s-item">
+      <div class="s-item s-item-danger">
         <b>清除密钥库</b>
         <span class="dim">删除 DPAPI 加密的密钥缓存（下次提取需微信在线重新收割）</span>
-        <button class="btn btn-danger" id="s-clear-keys">🗑 清除密钥库</button>
+        <button class="btn btn-danger" id="s-clear-keys">清除密钥库</button>
       </div>
     </div>
   </div>
 
   <div class="card s-card">
-    <div class="card-head"><h2>引导</h2><span class="hint">首次启动的配置流程，可随时重新运行</span></div>
+    <div class="card-head"><h2>数据源管理</h2><span class="hint">微信数据目录与账号维护（原「引导」的日常入口）</span></div>
     <div class="s-actions">
+      <div class="s-item s-item-block">
+        <b>已配置的数据目录</b>
+        <span class="dim">每行一个微信号；提取/解密结果有缓存，重跑秒回。重新提取前请保持微信在线。</span>
+        <div id="s-ds-accounts" class="accounts"><div class="empty">加载中…</div></div>
+        <div class="s-inline" style="margin-top:12px">
+          <button class="btn btn-sm" id="s-ds-manual-toggle">＋ 手动添加数据目录</button>
+          <button class="btn btn-sm" id="s-ds-refresh">刷新列表</button>
+        </div>
+        <div id="s-ds-manual-box" class="g-manual hidden">
+          <div class="g-manual-title">直接指定微信数据目录</div>
+          <p class="dim g-manual-hint">可填写 xwechat_files 根目录、账号目录、db_storage、其内部子目录或具体 .db 文件；根目录下有多个账号也会一起识别。<br>
+             微信内获取路径：微信设置 → 文件管理 → 打开文件夹 → 复制地址栏路径。</p>
+          <div class="g-manual-row">
+            <input id="s-ds-manual-path" class="g-input" type="text" placeholder="例如: D:\xwechat_files\wxid_xxx\db_storage">
+            <button class="btn btn-primary" id="s-ds-manual-add">验证并保存</button>
+          </div>
+          <div id="s-ds-manual-msg" class="g-manual-msg"></div>
+        </div>
+      </div>
+      <div class="s-item s-item-block" id="s-ds-run" hidden>
+        <b>提取进度</b>
+        <div class="progress" style="margin-top:8px"><div class="bar" id="s-ds-bar"></div></div>
+        <div class="console" id="s-ds-log" style="margin-top:10px"></div>
+        <div id="s-ds-result" class="g3-res"></div>
+      </div>
       <div class="s-item">
-        <b>重新运行引导</b>
-        <span class="dim">回到"欢迎 → 选号 → 提取 → 解密"的分步引导</span>
-        <button class="btn btn-primary" id="s-rerun-guide">🧭 重新运行引导</button>
+        <b>重新运行首启向导</b>
+        <span class="dim">完整重跑「同意条款 → 选号 → 提取解密」全屏向导，适合换机或排查配置问题</span>
+        <button class="btn" id="s-rerun-wizard">重新运行首启向导</button>
       </div>
     </div>
   </div>
@@ -85,6 +110,17 @@
       <span class="hint" id="s-plugins-hint">已加载插件提供的设置项</span>
     </div>
     <div id="s-plugins">加载中…</div>
+  </div>
+
+  <div class="card s-card">
+    <div class="card-head"><h2>隐私与免责声明</h2><span class="hint">条款更新后会再次要求确认</span></div>
+    <div class="s-actions">
+      <div class="s-item">
+        <b>免责声明 · 法律声明</b>
+        <span class="dim">使用本项目前请完整阅读全文；声明更新后继续使用即视为接受最新版本</span>
+        <button class="btn" id="s-view-disclaimer">查看全文</button>
+      </div>
+    </div>
   </div>
 
   <div class="card">

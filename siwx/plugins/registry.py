@@ -18,6 +18,8 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from siwx import logger as log
+
 # ── 数据结构 ────────────────────────────────────────────────────
 
 
@@ -223,6 +225,24 @@ class KeyStrategyNS(_Namespace):
 class RendererNS(_Namespace):
     kind = "renderers"
 
+    def add(self, item) -> None:
+        # 多插件声明同一 local_type 时，priority 低者被永久遮蔽——加载期留痕，
+        # 否则"插件装了却不生效"完全无从查起（审计 §6.1）
+        try:
+            new_types = set(item.local_types or [])
+            for existing in self.items:
+                overlap = new_types & set(existing.local_types or [])
+                if overlap:
+                    new_name = (item.meta.name if item.meta else "?")
+                    old_name = (existing.meta.name if existing.meta else "?")
+                    log.detailed("plugin",
+                                 f"local_type={sorted(overlap)} 渲染器被 "
+                                 f"{old_name} 独占（priority 更高），"
+                                 f"{new_name} 永不生效")
+        except Exception:
+            pass
+        super().add(item)
+
     def for_type(self, local_type) -> Optional[Renderer]:
         """按 local_type 取单赢家（priority 最高者）。"""
         best = None
@@ -240,6 +260,7 @@ class DecoratorNS(_Namespace):
         self._breaker: dict = {}          # plugin -> 熔断到期时间戳
         self._stuck: set = set()          # 已超时被放弃、仍在后台跑的线程池
         self._guard = threading.Lock()
+        self._skip_log_ts: dict = {}      # plugin -> 上次"熔断跳过"detailed 的时间
 
     def _tripped(self, plugin: str) -> bool:
         import time
@@ -255,6 +276,16 @@ class DecoratorNS(_Namespace):
         import time
         with self._guard:
             self._breaker[plugin] = time.time() + seconds
+
+    def _log_skip_throttled(self, plugin: str) -> None:
+        """熔断跳过的节流埋点：每插件 60s（一个熔断窗口）最多记一条 detailed。"""
+        import time
+        now = time.time()
+        with self._guard:
+            if now - self._skip_log_ts.get(plugin, 0) < 60:
+                return
+            self._skip_log_ts[plugin] = now
+        log.detailed("plugin", f"{plugin}.decorate 熔断中，本次调用跳过")
 
     #: 超过此时长仍未结束的装饰器线程数 → 不再新建线程（防线程泄漏）
     _MAX_STUCK = 8
@@ -272,6 +303,7 @@ class DecoratorNS(_Namespace):
         由熔断保证不会再被调用，从而最多泄漏有限个线程）。
         """
         import concurrent.futures as _cf
+        import time as _time
         from siwx import logger as log
 
         if not self.items:
@@ -282,6 +314,7 @@ class DecoratorNS(_Namespace):
                 continue
             plugin = dec.meta.name if dec.meta else (dec.name or "?")
             if self._tripped(plugin):
+                self._log_skip_throttled(plugin)
                 continue
             with self._guard:
                 if len(self._stuck) >= self._MAX_STUCK:
@@ -292,12 +325,18 @@ class DecoratorNS(_Namespace):
                     return target
             budget = min(int(dec.timeout_ms or 50), max_ms) / 1000.0
             ex = _cf.ThreadPoolExecutor(max_workers=1)
+            t0 = _time.perf_counter()
             try:
                 patch = ex.submit(dec.decorate, target, ctx).result(
                     timeout=budget)
                 ex.shutdown(wait=False)
                 if isinstance(patch, dict) and patch:
                     target.update(patch)
+                    # 热路径：只记键名不记值（值可能含消息正文），耗时一并给出
+                    ms = (_time.perf_counter() - t0) * 1000
+                    log.detailed(f"plugin:{plugin}",
+                                 f"decorate({dec.name}) 耗时={ms:.1f}ms "
+                                 f"patch_keys={sorted(patch)}")
             except _cf.TimeoutError:
                 # 不 shutdown(wait=True)：让它自己跑完，登记为"卡住线程"
                 self._mark_stuck(ex)
@@ -320,8 +359,9 @@ class DecoratorNS(_Namespace):
         # 借一个哨兵 future 感知线程池何时空闲，从而释放登记
         try:
             ex.submit(lambda: None).add_done_callback(_cleanup)
-        except Exception:
-            pass
+        except Exception as e:
+            # 哨兵提交失败 → 卡住线程永久占用名额（占满 _MAX_STUCK 后整体熔断）
+            log.detailed("plugin", f"_mark_stuck 哨兵提交失败: {e}")
 
 
 class BlueprintNS(_Namespace):

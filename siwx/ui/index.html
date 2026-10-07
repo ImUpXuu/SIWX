@@ -3,9 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="微信本地数据备份工具：密钥提取、解密、聊天查看、朋友圈浏览与多格式导出">
+<meta name="theme-color" content="#f6f6f4">
 <title>stories-in-wx</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%23111111'/%3E%3Ctext%20x='32'%20y='44'%20font-size='36'%20text-anchor='middle'%20fill='%23ffffff'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/app.css?v=2026100203">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%2307c160'/%3E%3Ctext%20x='32'%20y='44'%20font-size='36'%20text-anchor='middle'%20fill='%23ffffff'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/app.css?v=2026100623">
 </head>
 <body>
 <div class="shell">
@@ -14,10 +16,21 @@
       <span class="logo">✦</span>
       <span class="brand-name">stories</span><span class="brand-dim">-in-</span><span class="brand-name">wx</span>
     </div>
-    <!-- 内置页面用统一的 SVG 线条图标（currentColor，随选中态自动反色）；
+
+    <!-- 全局账号卡：全站唯一的微信号入口，切换对所有页面生效 -->
+    <button class="acc-card" id="acc-card" type="button" aria-haspopup="true" aria-expanded="false">
+      <span class="acc-ava"><span id="acc-initial">…</span><img id="acc-img" alt="" hidden></span>
+      <span class="acc-meta">
+        <b id="acc-name">检测中…</b>
+        <span id="acc-wxid"></span>
+      </span>
+      <span class="acc-caret">▾</span>
+    </button>
+    <div class="acc-pop" id="acc-pop" role="listbox" aria-label="切换微信号" hidden></div>
+
+    <!-- 内置页面用统一的 SVG 线条图标（currentColor，随选中态自动变色）；
          插件菜单项仍由 app.js 注入 emoji 图标 -->
     <nav class="menu" id="menu">
-      <a href="#/guide" data-page="guide"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2.1 4.9-4.9 2.1 2.1-4.9z"/></svg></span><span>引导设置</span></a>
       <a href="#/chat" data-page="chat"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h4v4l5-4h7a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1z"/></svg></span><span>聊天查看</span></a>
       <a href="#/sns" data-page="sns"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 2.8 3 15.2 0 18M12 3c-3 2.8-3 15.2 0 18"/></svg></span><span>朋友圈</span></a>
       <a href="#/stats" data-page="stats"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M7 21v-8M12 21V5M17 21V10"/></svg></span><span>聊天统计</span></a>
@@ -26,16 +39,16 @@
       <a href="#/logs" data-page="logs"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 6H21M8.5 12H21M8.5 18H21"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg></span><span>日志</span></a>
       <a href="#/settings" data-page="settings"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6h-6M9 6H3M21 12h-9M6 12H3M21 18h-3M12 18H3"/><circle cx="12" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="15" cy="18" r="2"/></svg></span><span>设置</span></a>
     </nav>
+
     <div class="side-foot">
       <div class="mini" id="side-wx">微信：检测中…</div>
-      <button id="side-disclaimer" class="mini-btn" title="免责声明">⚖</button>
-      <button id="side-theme" class="mini-btn" title="切换主题">☾</button>
+      <button id="side-theme" class="mini-btn" title="切换主题" aria-label="切换主题">☾</button>
     </div>
   </aside>
   <main id="view" class="view"></main>
 </div>
 <script src="/vendor/vue.global.prod.js?v=2026100101"></script>
-<script src="/common.js?v=2026100203"></script>
-<script src="/app.js?v=2026100203"></script>
+<script src="/common.js?v=2026100623"></script>
+<script src="/app.js?v=2026100623"></script>
 </body>
 </html>

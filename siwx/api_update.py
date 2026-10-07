@@ -30,12 +30,21 @@ def check():
 
 @bp.post("/do")
 def do_update():
-    """执行更新。"""
-    remote = request.get_json(silent=True) or {}
+    """执行更新。
+
+    安全（审计 S5，P0）：本接口不接受客户端提交的版本 manifest——旧实现把
+    POST JSON 原样当作远程 version.json 传给 run_update，下载 URL、哈希 URL
+    全由客户端提供，配合哈希校验 fail-open 即构成未鉴权 RCE 链。现在一律由
+    服务端从 VERSION_URLS 白名单域名自行拉取，客户端提交的内容仅做忽略处理。
+    """
+    if request.get_json(silent=True):
+        # 前端旧版会把 /check 拿到的 remote 原样回传；服务端一律忽略并记录
+        from siwx import logger as _log
+        _log.warn("update", "[update] 忽略客户端提交的更新 manifest（安全策略，"
+                            "更新源仅从服务端白名单域名拉取）")
+    remote = has_update()[1]  # 服务端自行拉取
     if not remote:
-        remote = has_update()[1]  # 重新拉取
-    if not remote:
-        return jsonify({"ok": False, "message": "无法获取远程版本信息"})
+        return jsonify({"ok": False, "message": "无法获取远程版本信息（服务端拉取失败）"})
     result = run_update(remote)
     return jsonify(result)
 
