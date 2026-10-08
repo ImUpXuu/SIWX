@@ -15,6 +15,8 @@
   9. 聊天页只扫 message_*.db → 漏掉 biz_message_*.db 里的会话
  10. cli --json 未生效
  11. decrypt_database 非原子写（失败会破坏已有明文库）
+ 12. cli `keys extract --db-dir` 只被 argparse 接收、从未生效（extract_all()
+     无条件全盘自动发现账号，参数被悄悄忽略）
 
 运行：
     python -m unittest discover -s tests -v
@@ -1138,6 +1140,50 @@ class TestCliJson(unittest.TestCase):
             self.assertEqual(code, 1)
         finally:
             extract.extract_all = old
+
+
+class TestCliKeysExtractDbDir(unittest.TestCase):
+    """回归 #12: `keys extract --db-dir` 此前只被 argparse 接收、从未生效 ——
+    cmd_keys_extract 无条件调用 extract_all() 让它自行全盘发现账号，
+    db_dir 被悄悄忽略。多账号环境下，这会在想定向提取某一账号时，把 LLDB
+    唯一一次的捕获窗口浪费在不需要的账号上（macOS 断点只在数据库连接新建时
+    命中一次，错过不会重来）。"""
+
+    def test_db_dir_narrows_to_single_account(self):
+        import argparse
+        from siwx import cli, extract
+        captured = {}
+        old = extract.extract_all
+
+        def fake_extract_all(**kw):
+            captured.update(kw)
+            return []
+        extract.extract_all = fake_extract_all
+        try:
+            cli.cmd_keys_extract(argparse.Namespace(
+                json=True, no_cache=False,
+                db_dir="/tmp/fake_wxid/db_storage"))
+        finally:
+            extract.extract_all = old
+        self.assertEqual(captured.get("dirs"),
+                         [("fake_wxid", "/tmp/fake_wxid/db_storage")])
+
+    def test_without_db_dir_keeps_auto_discovery(self):
+        import argparse
+        from siwx import cli, extract
+        captured = {}
+        old = extract.extract_all
+
+        def fake_extract_all(**kw):
+            captured.update(kw)
+            return []
+        extract.extract_all = fake_extract_all
+        try:
+            cli.cmd_keys_extract(argparse.Namespace(
+                json=True, no_cache=False, db_dir=None))
+        finally:
+            extract.extract_all = old
+        self.assertIsNone(captured.get("dirs"))
 
 
 # ── 10. 密码学原语未被破坏 ──────────────────────────────────────

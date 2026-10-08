@@ -20,15 +20,21 @@ def _resolve_dirs(db_dir):
 def cmd_keys_extract(args) -> int:
     # 修复：--json 此前只被 argparse 接收、从未生效（docs/cli-commands.md 已承诺
     # 该参数输出 JSON）。此分支让 stdout 只输出 JSON，便于脚本消费。
+    # 修复：--db-dir 同样只被 argparse 接收、从未生效 —— 本函数此前无条件调用
+    # extract_all() 让它自行全盘发现账号，参数被悄悄忽略；多账号环境下这会在
+    # 想定向提取某一账号时，把 LLDB 的捕获窗口浪费在不需要的账号上
+    # （macOS 下尤其致命：断点只在数据库连接新建时命中一次，窗口错过不会重来）。
+    db_dir = getattr(args, "db_dir", None)
+    dirs = _resolve_dirs(db_dir) if db_dir else None
     if getattr(args, "json", False):
         reports = extract.extract_all(log=lambda *_a, **_k: None,
-                                      use_cache=not args.no_cache)
+                                      use_cache=not args.no_cache, dirs=dirs)
         print(json.dumps(reports, ensure_ascii=False, indent=2))
         if not reports:
             return 1
         return 0 if all(r["verified"] == r["total_salts"] for r in reports) else 2
     tui.banner()
-    reports = extract.extract_all(log=tui.log, use_cache=not args.no_cache)
+    reports = extract.extract_all(log=tui.log, use_cache=not args.no_cache, dirs=dirs)
     if not reports:
         tui.log("✗ 未找到微信数据目录，请确认本机登录过微信")
         return 1

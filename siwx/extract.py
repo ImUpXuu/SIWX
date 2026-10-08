@@ -360,9 +360,14 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     return report
 
 
-def extract_all(log=print, use_cache=True):
-    """自动发现全部账号 → 缓存判定 → 收割补漏 → 逐账号提取。"""
-    dirs = _discover(log)
+def extract_all(log=print, use_cache=True, dirs=None):
+    """自动发现全部账号 → 缓存判定 → 收割补漏 → 逐账号提取。
+
+    dirs: 显式指定 [(wxid, db_dir), ...] 时跳过自动发现，只处理这些账号
+    （CLI `keys extract --db-dir` 走这条路径）；为 None 时保持原有的全盘自动扫描。
+    """
+    if dirs is None:
+        dirs = _discover(log)
     if not dirs:
         return []
     entries_by_dir = {db: collect_db_files(db) for _w, db in dirs}
