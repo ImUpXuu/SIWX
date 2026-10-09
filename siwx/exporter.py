@@ -280,6 +280,12 @@ def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
     审计 §4.1：get_image 失败时第二返回值是细粒度 last_err（attach 解密失败 /
     V2 密钥未命中 / Bubble 未知格式 / 本地无原图），直接透传，不再统一覆盖成
     "未找到源文件或解密为空"——否则"没这个文件"与"有文件解不开"分不清。
+
+    Bug 修复：成功时 info 恒为 "image/<ext>"（见 media.get_image 的 _emit），
+    原实现只认 png/gif、其余（包括 wxgf 转码失败时的原样留档、heic 格式）
+    一律落到 else 分支写成 .jpg——文件名是 .jpg，字节却是 wxgf/heic，导出
+    结果里看似"多了一张图"实则是一份打不开的损坏文件。直接从 info 取
+    真实子类型，不再猜测枚举。
     """
     try:
         body, info = media.get_image(account, md5, Path(acc_dir),
@@ -288,7 +294,7 @@ def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
                                      ts=ts or None,
                                      bubble_md5=bubble_md5 or None)
         if body:
-            ext = "png" if "png" in info else ("gif" if "gif" in info else "jpg")
+            ext = info.rsplit("/", 1)[-1] if info and "/" in info else "jpg"
             dst = Path(dst).with_suffix(f".{ext}")
             dst.write_bytes(body)
             return dst, ""

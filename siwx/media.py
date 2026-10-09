@@ -9,6 +9,7 @@
 import hashlib
 import json
 import os
+import platform
 import re
 import sqlite3
 import struct
@@ -55,6 +56,33 @@ _IMG_CACHE_MAX = 200            # 最多 200 张（约几十 MB）
 # LRU OrderedDict 的 move_to_end / popitem 并发调用会损坏内部链表
 # （最坏返回错误图片字节），Web API 多线程访问必须持锁
 _IMG_CACHE_LOCK = threading.Lock()
+
+# media_backup.py 全量备份目录的 md5 → 文件路径索引。全量导出/批量浏览
+# 时同一个备份目录会被反复查（同一张图可能被多条消息引用），每次都现场
+# rglob 六种扩展名等于把整棵目录树重新遍历一遍——实测单次查询要几秒，
+# 乘以上千张图完全扛不住。按 backup_root 路径缓存索引，构建一次、后续
+# 复用；索引只存路径，不常驻图片字节本身，内存开销可控。
+_BACKUP_INDEX: dict = {}
+_BACKUP_INDEX_LOCK = threading.Lock()
+
+
+def _backup_index_for(backup_root: Path) -> dict:
+    key = str(backup_root)
+    with _BACKUP_INDEX_LOCK:
+        idx = _BACKUP_INDEX.get(key)
+        if idx is not None:
+            return idx
+        idx = {}
+        for p in backup_root.rglob("*"):
+            if not p.is_file():
+                continue
+            name = p.name
+            if len(name) >= 32:
+                md5 = name[:32]
+                if all(c in "0123456789abcdef" for c in md5):
+                    idx.setdefault(md5, []).append(p)
+        _BACKUP_INDEX[key] = idx
+        return idx
 
 # media_key.json 的"读-改-写"线程锁（跨进程由 _save_key_cache 的唯一临时名兜）
 _KEY_CACHE_LOCK = threading.Lock()
@@ -135,6 +163,29 @@ def find_kvcomm_codes() -> list:
         r"C:/Users/*/AppData/Roaming/Tencent/xwechat/ilink/kvcomm/key_*_*.statistic",
         r"C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_*_*.statistic",
     ]
+    if platform.system() == "Darwin":
+        # macOS 的 kvcomm 落盘位置在各 WeChat 沙箱容器下，文件名格式与
+        # Windows 版一致（key_<code>_<...>.statistic），此前这里只扫了
+        # Windows 路径，macOS 上 find_kvcomm_codes() 恒返回空列表 →
+        # candidate_keys() 恒无候选 → 账号级媒体密钥永远推导不出来，
+        # 所有聊天图片/朋友圈图片都无法解密（而不仅仅是原图未下载的那部分）。
+        # 容器 bundle id 按名字包含 "wechat" 匹配而非硬编码，与
+        # discover.find_wechat_data_dirs() 的做法一致，以兼容改名/马甲包。
+        containers = Path.home() / "Library" / "Containers"
+        try:
+            entries = [e for e in containers.iterdir()
+                      if e.is_dir() and "wechat" in e.name.lower()]
+        except OSError:
+            entries = []
+        for entry in entries:
+            data = entry / "Data"
+            pats += [
+                str(data / "Documents" / "app_data" / "net" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "ilink" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "roam" / "ilink" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "radium" / "ilink" / "*" / "kvcomm" / "key_*_*.statistic"),
+                str(data / ".wxapplet" / "ilink" / "*" / "kvcomm" / "key_*_*.statistic"),
+            ]
     for pat in pats:
         for f in glob.glob(pat):
             m = re.match(r".*[\\/]key_(\d+)_", f.replace("\\", "/"))
@@ -471,6 +522,17 @@ def _finalize(body: bytes, ext: str, ctype: str):
     """
     if ext == "wxgf":
         converted = convert_wxgf(body)
+        if not converted and platform.system() == "Darwin":
+            # Windows 走 VoipEngine.dll（上面 convert_wxgf），macOS 没有对应
+            # 独立 DLL，走活体微信进程 + LLDB 调用的专属转码路径（原理见
+            # media_wxgf_macos.py 顶部说明）。需要微信正在运行且 SIP 关闭，
+            # 任一不满足就优雅返回 None，走下面"转码失败"的既有兜底，不
+            # 影响其余图片的正常展示。
+            from siwx import media_wxgf_macos
+            result = media_wxgf_macos.convert_wxgf_for_web(body, log=event)
+            if result:
+                jpeg_body, jpeg_ctype = result
+                return jpeg_body, "jpeg", jpeg_ctype
         if not converted:
             return None
         ext, ctype = _image_sig(converted) or (None, None)
@@ -555,6 +617,46 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
             if len(_IMG_CACHE) > _IMG_CACHE_MAX:
                 _IMG_CACHE.popitem(last=False)
         return body, ctype
+
+    # 复用离线全量备份（media_backup.py）已经转码好的结果，优先于现场
+    # 解密+转码：wxgf→可预览格式依赖活的微信进程 + LLDB，单张现场转码
+    # 不像批量备份那样能把 attach 开销摊到一批图片上，一张张现场转代价
+    # 高得多；全量备份往往已经批量转过一遍、结果就在磁盘上——有就直接
+    # 读，省掉重新附加微信进程的开销，也让"微信没开"时已备份过的图片
+    # 依然能看（批量导出很多会话时尤其明显：同一张图可能被多条消息
+    # 引用到，不用每次都重新转）。
+    if md5 and len(md5) == 32:
+        backup_root = acc_out_dir / "media_backup" / "images"
+        if backup_root.is_dir():
+            hits = [p for p in _backup_index_for(backup_root).get(md5, [])
+                   if p.suffix.lstrip(".") in ("jpeg", "jpg", "png", "gif", "heic", "wxgf")]
+            if hits:
+                def _rank(p: Path):
+                    n = p.name
+                    is_t = "_t_" in n or "_t." in n
+                    is_h = "_h" in n and not is_t
+                    if hq:  # 查看大图：高清优先
+                        return 0 if is_h else (2 if is_t else 1)
+                    return 2 if is_t else (1 if is_h else 0)  # 默认：主图优先
+                hits.sort(key=_rank)
+                p = hits[0]
+                ext = p.suffix.lstrip(".")
+                if ext != "wxgf":  # wxgf 是转码失败时的兜底留档，不算"已有
+                                   # 可预览结果"，让它落到下面走一遍现场转码
+                    body = p.read_bytes()
+                    if ext == "heic":
+                        # HEIC 在浏览器 <img> 里原生支持不可靠（Safari 能显示，
+                        # Chrome/Firefox 普遍不行），这里补一次轻量转码——纯
+                        # 本地 sips，不需要微信/LLDB，跟现场转码路径
+                        # （media_wxgf_macos.convert_wxgf_for_web）最后一步
+                        # 是同一个函数，保证两条路径返回同样可显示的格式。
+                        if platform.system() == "Darwin":
+                            from siwx import media_wxgf_macos
+                            jpeg = media_wxgf_macos._heic_to_jpeg(body, log=event)
+                            if jpeg:
+                                return _emit(jpeg, "jpeg")
+                        return _emit(body, "heic")  # sips 失败/非 macOS：原样返回好过没有
+                    return _emit(body, "jpeg" if ext == "jpg" else ext)
 
     # ⓪ attach 原图目录直查（按消息 XML md5 命名，不依赖 hardlink；
     #    hq=True 时优先高清 _h 版，供点击查看大图使用）
