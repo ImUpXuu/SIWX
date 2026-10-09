@@ -3721,6 +3721,32 @@ class TestMediaBackup(unittest.TestCase):
         self.assertTrue(out_file.is_file())
         self.assertEqual(out_file.read_bytes(), raw)
 
+    def test_rerun_on_readonly_source_video_does_not_fail(self):
+        """实测踩坑：微信落盘的源视频文件本身是只读的（-r--r--r--）。旧实现
+        用 shutil.copy2() 连权限位也一起拷到目标文件——第一次备份后目标
+        也变只读，第二次运行（新消息到达后重新备份）对同名目标文件再次
+        copy2() 等于覆盖写一个只读文件，当场 PermissionError（实测 1926
+        个视频里 1913 个"已备份过的"全部这样假性失败，数据其实一直都在）。
+        模拟"已存在只读目标 + 内容不变"的重复运行场景，必须直接跳过，
+        不碰权限位也不报错。"""
+        from siwx import media_backup
+        raw = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 20
+        src = self.video_root / "x.mp4"
+        src.write_bytes(raw)
+        src.chmod(0o444)  # 源文件只读，与微信实测落盘权限一致
+        dst = self.tmp / "out_videos" / "2026-01" / "x.mp4"
+        dst.parent.mkdir(parents=True)
+        dst.write_bytes(raw)
+        dst.chmod(0o444)  # 模拟第一次备份后、被 copy2() 带只读的旧产物
+
+        with self._patch_roots():
+            stats = media_backup.backup_videos(self.wxid, self.tmp / "out_videos",
+                                               log=None)
+
+        self.assertEqual(stats["failed"], 0)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(dst.read_bytes(), raw)
+
     def test_backup_all_combines_images_and_videos(self):
         from siwx import media_backup
         (self.attach_root / "a.dat").write_bytes(b"fake-jpeg-bytes")

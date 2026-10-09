@@ -147,8 +147,19 @@ def _convert_pending_wxgf(pending: list, stats: dict, log) -> None:
 
 
 def backup_videos(wxid_full: str, out_dir: Path, log=print) -> dict:
-    """复制 msg/video 下全部 .mp4（未加密）→ out_dir，保留原有目录结构。"""
-    stats = {"total": 0, "ok": 0, "failed": 0, "bytes_written": 0, "failures": []}
+    """复制 msg/video 下全部 .mp4（未加密）→ out_dir，保留原有目录结构。
+
+    Bug 修复：shutil.copy2() 连元数据一起复制，而微信自己落盘的源视频文件
+    是只读的（-r--r--r--）——第一次备份时这个只读位就跟着拷到了目标文件
+    上。重新运行备份（新消息到达后）时对已存在的同名目标文件再次
+    shutil.copy2() 等于对一个只读文件发起覆盖写，当场 PermissionError；
+    实测 1926 个视频里 1913 个（全部"已备份过的"）都这样"失败"，其实
+    数据从头到尾都在、根本没真的丢。改用 copyfile()（只拷数据不拷
+    元数据，目标文件按进程 umask 创建、天然可写）+ 目标已存在且大小
+    相同就跳过（视频内容不会变，省去整段重复 IO，也顺带避开这个坑）。
+    """
+    stats = {"total": 0, "ok": 0, "skipped": 0, "failed": 0, "bytes_written": 0,
+             "failures": []}
     root = _account_root(wxid_full)
     if root is None:
         return stats
@@ -162,10 +173,14 @@ def backup_videos(wxid_full: str, out_dir: Path, log=print) -> dict:
         try:
             rel = f.relative_to(video_root)
             dst = out_dir / rel
+            src_size = f.stat().st_size
+            if dst.is_file() and dst.stat().st_size == src_size:
+                stats["skipped"] += 1
+                continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(f, dst)
+            shutil.copyfile(f, dst)
             stats["ok"] += 1
-            stats["bytes_written"] += f.stat().st_size
+            stats["bytes_written"] += src_size
         except Exception as e:
             stats["failed"] += 1
             if len(stats["failures"]) < 50:
