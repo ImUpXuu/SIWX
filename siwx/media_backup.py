@@ -4,12 +4,12 @@ exporter.py 的导出路径以**消息**为中心：先扫消息拿到 (md5, cha
 引用，再反查磁盘文件。这条路径简洁，但任何消息解析的边界情况（跨分片
 local_id 撞号、消息体解析失败、引用信息缺失……）都可能导致个别文件漏导。
 
-本模块反过来：直接枚举 msg/attach、msg/video 下**磁盘上实际存在**的文件，
-逐个解密/复制，不要求能定位到具体消息或会话。用于"删除微信本地数据前
-先确认媒体已安全导出"这类场景——保证的是文件级 100% 覆盖，而不是消息级的
-可追溯性（丢失的是"这张图属于哪条消息"，不会丢文件本身）。
+本模块反过来：直接枚举 msg/attach、msg/video、msg/file 下**磁盘上实际
+存在**的文件，逐个解密/复制，不要求能定位到具体消息或会话。用于"删除
+微信本地数据前先确认媒体已安全导出"这类场景——保证的是文件级 100% 覆盖，
+而不是消息级的可追溯性（丢失的是"这个文件属于哪条消息"，不会丢文件本身）。
 
-两类产物：
+三类产物：
 - 图片（msg/attach/**/*.dat，V0/V1/V2 混合，见 docs/media-decryption-principles.md）
   解密后按内容类型写出；wxgf 格式（微信自研图片容器，不止用于动画表情）
   会再尝试转码为可直接预览的格式（Windows 走 media.convert_wxgf() 的
@@ -19,6 +19,8 @@ local_id 撞号、消息体解析失败、引用信息缺失……）都可能�
   保留，只是暂时不能直接预览。
 - 视频（msg/video/**/*.mp4）：实测是未加密的标准 MP4 容器（ISO Media /
   ftyp isom-iso2-avc1-mp41），直接复制，无需解密。
+- 文件消息附件（msg/file/**，任意扩展名）：实测同样未加密、原文件名
+  和扩展名原样保留在磁盘上（PDF/APK/PNG 等头部签名完好），直接复制。
 """
 import platform
 import shutil
@@ -190,8 +192,51 @@ def backup_videos(wxid_full: str, out_dir: Path, log=print) -> dict:
     return stats
 
 
+def backup_files(wxid_full: str, out_dir: Path, log=print) -> dict:
+    """复制 msg/file 下全部文件消息附件（未加密，原文件名/扩展名原样
+    保留——实测 PDF/APK/PNG 等头部签名完好）→ out_dir，保留原有目录结构。
+
+    与 backup_videos() 同一套坑、同一套修法：源文件只读
+    （-r--r--r--），用 copyfile()（不拷元数据）而非 copy2()，且目标
+    已存在且大小相同就跳过，避免重复运行时覆盖写只读目标文件炸
+    PermissionError，也省去重复 IO。.DS_Store 等 Finder 元数据文件
+    (以 "." 开头) 不是聊天附件，跳过。
+    """
+    stats = {"total": 0, "ok": 0, "skipped": 0, "failed": 0, "bytes_written": 0,
+             "failures": []}
+    root = _account_root(wxid_full)
+    if root is None:
+        return stats
+    file_root = root / "msg" / "file"
+    if not file_root.is_dir():
+        return stats
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = [f for f in file_root.rglob("*") if f.is_file() and not f.name.startswith(".")]
+    stats["total"] = len(files)
+    for i, f in enumerate(files):
+        try:
+            rel = f.relative_to(file_root)
+            dst = out_dir / rel
+            src_size = f.stat().st_size
+            if dst.is_file() and dst.stat().st_size == src_size:
+                stats["skipped"] += 1
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(f, dst)
+            stats["ok"] += 1
+            stats["bytes_written"] += src_size
+        except Exception as e:
+            stats["failed"] += 1
+            if len(stats["failures"]) < 50:
+                stats["failures"].append(f"{f.name}: {type(e).__name__}: {e}")
+        if log and (i + 1) % 200 == 0:
+            log(f"[media_backup] 文件 {i + 1}/{len(files)}")
+    return stats
+
+
 def backup_all(wxid_full: str, out_dir: Path, log=print) -> dict:
-    """images/ + videos/ 一次性全量备份，返回合并统计。"""
+    """images/ + videos/ + files/ 一次性全量备份，返回合并统计。"""
     img_stats = backup_images(wxid_full, out_dir / "images", log=log)
     vid_stats = backup_videos(wxid_full, out_dir / "videos", log=log)
-    return {"images": img_stats, "videos": vid_stats}
+    file_stats = backup_files(wxid_full, out_dir / "files", log=log)
+    return {"images": img_stats, "videos": vid_stats, "files": file_stats}

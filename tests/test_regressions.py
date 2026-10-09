@@ -3661,6 +3661,8 @@ class TestMediaBackup(unittest.TestCase):
         self.attach_root.mkdir(parents=True)
         self.video_root = self.account_root / "msg" / "video" / "2026-01"
         self.video_root.mkdir(parents=True)
+        self.file_root = self.account_root / "msg" / "file" / "2026-01"
+        self.file_root.mkdir(parents=True)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -3751,6 +3753,7 @@ class TestMediaBackup(unittest.TestCase):
         from siwx import media_backup
         (self.attach_root / "a.dat").write_bytes(b"fake-jpeg-bytes")
         (self.video_root / "x.mp4").write_bytes(b"videobytes")
+        (self.file_root / "report.pdf").write_bytes(b"%PDF-1.7 fake pdf bytes")
 
         with self._patch_roots(), \
              mock.patch("siwx.media._decrypt_any",
@@ -3759,6 +3762,61 @@ class TestMediaBackup(unittest.TestCase):
 
         self.assertEqual(report["images"]["ok_viewable"], 1)
         self.assertEqual(report["videos"]["ok"], 1)
+        self.assertEqual(report["files"]["ok"], 1)
+
+    def test_files_copied_without_decryption_keeps_original_name(self):
+        """msg/file 下的文件消息附件实测同样未加密、原文件名/扩展名原样
+        保留在磁盘上（PDF/APK/PNG 头部签名完好），直接复制即可，不经过
+        media._decrypt_any。"""
+        from siwx import media_backup
+        raw = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n" + b"\x00" * 20
+        (self.file_root / "导师管理系统使用手册(1).pdf").write_bytes(raw)
+
+        with self._patch_roots():
+            stats = media_backup.backup_files(self.wxid, self.tmp / "out_files",
+                                              log=None)
+
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["ok"], 1)
+        self.assertEqual(stats["failed"], 0)
+        out_file = self.tmp / "out_files" / "2026-01" / "导师管理系统使用手册(1).pdf"
+        self.assertTrue(out_file.is_file())
+        self.assertEqual(out_file.read_bytes(), raw)
+
+    def test_files_skips_ds_store(self):
+        from siwx import media_backup
+        (self.file_root / ".DS_Store").write_bytes(b"junk")
+        (self.file_root / "real.apk").write_bytes(b"PK\x03\x04" + b"\x00" * 10)
+
+        with self._patch_roots():
+            stats = media_backup.backup_files(self.wxid, self.tmp / "out_files",
+                                              log=None)
+
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["ok"], 1)
+        self.assertFalse((self.tmp / "out_files" / "2026-01" / ".DS_Store").exists())
+
+    def test_files_rerun_on_readonly_source_does_not_fail(self):
+        """同一只读权限位坑（见 backup_videos 的回归用例）：msg/file 下的
+        源文件也是只读的，重新运行备份时必须直接跳过已存在且内容不变的
+        目标文件，不碰权限位也不报错。"""
+        from siwx import media_backup
+        raw = b"PK\x03\x04" + b"\x00" * 20
+        src = self.file_root / "app.apk"
+        src.write_bytes(raw)
+        src.chmod(0o444)
+        dst = self.tmp / "out_files" / "2026-01" / "app.apk"
+        dst.parent.mkdir(parents=True)
+        dst.write_bytes(raw)
+        dst.chmod(0o444)
+
+        with self._patch_roots():
+            stats = media_backup.backup_files(self.wxid, self.tmp / "out_files",
+                                              log=None)
+
+        self.assertEqual(stats["failed"], 0)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(dst.read_bytes(), raw)
 
     def test_no_account_dir_returns_empty_stats_not_raises(self):
         from siwx import media_backup
