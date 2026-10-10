@@ -1,6 +1,6 @@
 {
   "version": "5.0.9",
-  "date": "2026-10-10 20:20:00",
+  "date": "2026-10-10 12:23:31",
   "notes": "## macOS 补全 + 全量媒体备份\n\n> 基于 v5.0.8 优化线（含 v5.0.7 线全部内容），本版以 macOS 缺口收尾与媒体保全为主。无破坏性变更，无需迁移。\n\n### macOS 补全\n\n- **媒体链路修复**：聊天/朋友圈图片在 macOS 上全部解不开的三处根因（kvcomm 密钥发现只有 Windows 路径、wxgf 解码只有 Windows 的 VoipEngine.dll、转码失败即丢弃）全部补齐——新增容器路径扫描、活体微信进程 + LLDB 的 wxgf 平台解码（不硬编码任何版本地址）、解码失败原始文件留档到 wxgf_archive/\n- **keys extract --db-dir 生效**：此前被静默忽略，多账号机器无法把 LLDB 一生只命中一次的断点捕获窗口留给目标账号\n- **版本前置判定**：微信 < 4.1.80 时直接给出明确结论与升级指引，不再让用户在注定 0/N 的提取里反复重试；断点命中条件放宽（KDF rounds 不符仍捕获并记录实际值）\n- **文档纠偏**：SIP 开启时 root 也无法 attach（sudo 无效）；断点只在数据库连接新建时命中；killall 优于 osascript quit\n\n### 全量媒体备份（设置页）\n\n- 按文件枚举 msg/attach、video、file，不依赖消息解析——文件级 100% 覆盖，删除微信本地数据前的保全手段\n- 图片逐个解密（wxgf 批量转码、失败留档不算失败）；视频/文件附件未加密直接复制；重跑按大小跳过\n- 网页端图片浏览优先复用备份结果，微信未运行也能看已备份的图\n\n### 导出与前端\n\n- 导出图片扩展名取自 mimetype 子类型（WebP 不再被写成 .jpg），未知类型显式失败\n- 图片失败原因结构化透传前端：区分「没下载原图 / 解密失败 / 本平台无法解码」，不再只有一种文案\n\n### 工程与隐私\n\n- 测试人设集中到 tests/fixtures.py（统一合成人设）；夹具消除 Windows 假设；吸收 5.0.8 的 3 个环境敏感测试修复\n- 文档与测试中的示例数据全部合成化，示例账号统一到同一套人设\n- 打包 datas 补入 siwx/assets 与 siwx/templates（表情素材与自定义模板随包分发）\n\n全量测试 428 通过 / 1 跳过。",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.9/stories-in-wx-v5.0.9-windows-x64.exe",
