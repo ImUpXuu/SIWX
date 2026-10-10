@@ -114,6 +114,23 @@
     const span = document.createElement('span');
     span.className = 'm-retry';
     span.textContent = '[原图未下载 · 在微信中打开该图片后点此重试]';
+    /* 后端 404 带结构化 reason（api_chat._image_fail_reason）：按原因升级
+       文案，避免「本平台无法解码」被显示成「原图未下载」导致反复重试。
+       拉取失败保持默认文案。 */
+    fetch(retrySrc)
+      .then(r => (r.status === 404 ? r.json() : null))
+      .then(d => {
+        if (!d || !d.reason) return;
+        if (d.reason === 'no_decoder_on_platform') {
+          const kept = (d.error || '').indexOf('留档') >= 0
+            ? '，原始文件已留档到输出目录 wxgf_archive/' : '';
+          span.textContent = '[微信专有 wxgf 格式 · 本平台暂无法解码' + kept +
+            ' · 重启微信后点此重试]';
+        } else if (d.reason === 'decrypt_failed') {
+          span.textContent = '[原图解密失败 · 可点此重试]';
+        }
+      })
+      .catch(() => {});
     span.addEventListener('click', () => {
       const img2 = document.createElement('img');
       img2.className = 'm-img';
