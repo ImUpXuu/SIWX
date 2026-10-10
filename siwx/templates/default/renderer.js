@@ -44,15 +44,33 @@
   function avatarColor(id) { var h = 0; for (var i = 0; i < id.length; i++) h = (h*31 + id.charCodeAt(i)) & 0x7fffffff; return 'c' + (h % 8); }
   function avaFile(un) { return avatarFiles[un] || ''; }
 
+  // XML 实体解码：raw XML 里 & 存成 &amp;，不还原的话表情 cdnurl 带
+  // 字面 &amp; 去请求 → 服务器 400 → 表情全部掉占位（导出页与控制台
+  // 的差异：控制台走真 XML 解析器自动解码，这里必须手动补）
+  function xmlDec(s) {
+    return s.replace(/&(?:amp|lt|gt|quot|apos|#x?[0-9a-fA-F]+);/g, function(e) {
+      var name = e.slice(1, -1);
+      if (name === 'amp') return '&';
+      if (name === 'lt') return '<';
+      if (name === 'gt') return '>';
+      if (name === 'quot') return '"';
+      if (name === 'apos') return "'";
+      var cp = name.charAt(0) === 'x' || name.charAt(0) === 'X'
+        ? parseInt(name.slice(1), 16) : parseInt(name.slice(1), 10);
+      return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : e;
+    });
+  }
+
   function xmlVal(raw, tag) {
     var m = (raw||'').match(new RegExp('<'+tag+'>(.*?)</'+tag+'>', 's'));
     if (!m) return '';
-    return m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim();
+    return xmlDec(m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').trim());
   }
 
+  // 旧版微信 XML 属性可能写成 attr = "value"（等号两侧带空格），一并兼容
   function xmlAttr(raw, tag, attr) {
-    var m = (raw||'').match(new RegExp('<'+tag+'\\b[^>]*?\\s'+attr+'="([^"]*)"', 's'));
-    return m ? m[1] : '';
+    var m = (raw||'').match(new RegExp('<'+tag+'\\b[^>]*?\\s'+attr+'\\s*=\\s*"([^"]*)"', 's'));
+    return m ? xmlDec(m[1]) : '';
   }
 
   // 经纬度 → slippy map 瓦片键（与导出端 wx_maps.tile_key 同算法，
