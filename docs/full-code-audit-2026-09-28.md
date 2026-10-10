@@ -409,9 +409,9 @@ my_base = account.split("_6")[0] if "_6" in account else account
 
 | 场景 | 结果 |
 |---|---|
-| `wxid_redacted_a_6409`（本机实际） | → `wxid_redacted_a` ✅ 正常 |
+| `wxid_redacted_a_9001`（本机实例，真实 uin 尾部已合成化） | → `wxid_redacted_a` ✅ 正常 |
 | `wxid_abc_7102`（uin 不以 6 开头） | → `wxid_abc_7102`（未剥离）❌ `is_me` 判定失效 |
-| `wxid_6xyz_6409`（wxid 本身含 `_6`） | → `wxid` ❌ 严重截断 |
+| `wxid_6xyz_9001`（wxid 本身含 `_6`） | → `wxid` ❌ 严重截断 |
 
 **`is_me` 失效的后果**：自己发送的消息不会被标记为「我发的」，前端会把它渲染成对方消息（头像、气泡方向、`isSend` 字段全部错误），导出产物中的 `isSend` 也会错。
 
@@ -477,7 +477,7 @@ git remote set-url origin "https://oauth2:${GITHUB_TOKEN}@github.com/${REPO}.git
 
 | 编号 | 问题 | 状态 |
 |---|---|---|
-| **D-1** | 多账号同名目录互相覆盖（本机实测：`wxid_redacted_a_6409` 在 C/D 盘各一份，6.6MB 空壳 vs 566.7MB 真实数据，共用 `output/<wxid>/`） | ✅ 已缓解（方案 B `@source` + 方案 C 冲突检测） |
+| **D-1** | 多账号同名目录互相覆盖（本机实测：`wxid_redacted_a_9001` 在 C/D 盘各一份，6.6MB 空壳 vs 566.7MB 真实数据，共用 `output/<wxid>/`） | ✅ 已缓解（方案 B `@source` + 方案 C 冲突检测） |
 | **D-2** | `sqlcipher` 临时文件用 PID 命名 → 并发 page1 错配污染密钥库（实测 8 线程正确 1/8、错配 7/8） | ✅ 已修复（`mkstemp`，修复后 8/8） |
 | **D-3** | manifest 无来源标签 | ✅ 已加 `@source` |
 | **D-4** | `media._IMG_CACHE` 无锁 | ❌ 未修复 |
