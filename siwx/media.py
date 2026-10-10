@@ -9,6 +9,7 @@
 import hashlib
 import json
 import os
+import platform
 import re
 import sqlite3
 import struct
@@ -135,6 +136,28 @@ def find_kvcomm_codes() -> list:
         r"C:/Users/*/AppData/Roaming/Tencent/xwechat/ilink/kvcomm/key_*_*.statistic",
         r"C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_*_*.statistic",
     ]
+    if platform.system() == "Darwin":
+        # macOS 的 kvcomm 落盘位置在各 WeChat 沙箱容器下，文件名格式与
+        # Windows 版一致（key_<code>_<...>.statistic）。此前只扫 Windows
+        # 路径 → macOS 上本函数恒空集 → candidate_keys() 恒无候选 →
+        # 账号级媒体密钥永远推导不出来，所有聊天/朋友圈图片都解不开
+        # （P0-1，吸收自 PR #28）。容器名按含 "wechat" 匹配而非硬编码，
+        # 与 discover.find_wechat_data_dirs() 一致，兼容改名/马甲包。
+        containers = Path.home() / "Library" / "Containers"
+        try:
+            entries = [e for e in containers.iterdir()
+                       if e.is_dir() and "wechat" in e.name.lower()]
+        except OSError:
+            entries = []
+        for entry in entries:
+            data = entry / "Data"
+            pats += [
+                str(data / "Documents" / "app_data" / "net" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "ilink" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "roam" / "ilink" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "radium" / "ilink" / "*" / "kvcomm" / "key_*_*.statistic"),
+                str(data / ".wxapplet" / "ilink" / "*" / "kvcomm" / "key_*_*.statistic"),
+            ]
     for pat in pats:
         for f in glob.glob(pat):
             m = re.match(r".*[\\/]key_(\d+)_", f.replace("\\", "/"))
@@ -471,6 +494,17 @@ def _finalize(body: bytes, ext: str, ctype: str):
     """
     if ext == "wxgf":
         converted = convert_wxgf(body)
+        if not converted and platform.system() == "Darwin":
+            # Windows 走 VoipEngine.dll（上面 convert_wxgf），macOS 没有对应
+            # 独立 DLL，走活体微信进程 + LLDB 调用的专属转码路径（原理见
+            # media_wxgf_macos.py 顶部说明）。需要微信正在运行且 SIP 关闭，
+            # 任一不满足就优雅返回 None，走"转码失败"的既有兜底，不影响
+            # 其余图片的正常展示。（P0-1，吸收自 PR #28）
+            from siwx import media_wxgf_macos
+            result = media_wxgf_macos.convert_wxgf_for_web(body, log=event)
+            if result:
+                jpeg_body, jpeg_ctype = result
+                return jpeg_body, "jpeg", jpeg_ctype
         if not converted:
             return None
         ext, ctype = _image_sig(converted) or (None, None)
@@ -543,11 +577,41 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
     last_err = "未找到文件"
     label = f"{(chat or '')[:12]}… local_id={local_id} md5={(md5 or '')[:8]}… bm={(bubble_md5 or '')[:8]}…"
 
+    # wxgf 留档键（P0-1②）：解码失败的原始 wxgf 不再直接丢弃，留档到
+    # 输出目录供用户离线转换；优先用消息 md5 命名，缺 md5 时退回会话+消息号。
+    if md5 and len(md5) == 32:
+        wxgf_key = md5
+    elif chat and local_id:
+        wxgf_key = re.sub(r"[^\w.-]", "_", f"{chat}_{local_id}")[:80]
+    else:
+        wxgf_key = None
+
+    def _archive_wxgf(key: str, body: bytes):
+        d = acc_out_dir / "wxgf_archive"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            f = d / f"{key}.wxgf"
+            if not (f.is_file() and f.stat().st_size == len(body)):
+                f.write_bytes(body)
+            return f
+        except OSError as e:
+            try:
+                _media_logger.detailed("media", f"wxgf 留档失败: {type(e).__name__}")
+            except Exception:
+                pass
+            return None
+
     def _emit(body: bytes, ext: str):
         """转码 + 缓存。转码失败返回 (None, None)，调用方落到下一级候选；
         失败结果绝不进缓存（旧实现缓存坏 wxgf 导致重试永远失败）。"""
+        nonlocal last_err
         fin = _finalize(body, ext, f"image/{ext}")
         if fin is None:
+            if ext == "wxgf":
+                f = _archive_wxgf(wxgf_key, body) if wxgf_key else None
+                last_err = (f"wxgf 转码失败（原始文件已留档: "
+                            f"wxgf_archive/{wxgf_key}.wxgf）" if f
+                            else "wxgf 转码失败")
             return None, None
         body, _ext, ctype = fin
         with _IMG_CACHE_LOCK:
@@ -578,7 +642,6 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                 r = _emit(body, ctype.split("/")[1])
                 if r[0] is not None:
                     return r
-                last_err = "wxgf 转码失败"
                 continue
             last_err = "attach 解密失败"
 
@@ -606,7 +669,6 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                         r = _emit(body, ctype.split("/")[1])
                         if r[0] is not None:
                             return r
-                        last_err = "wxgf 转码失败"
                         continue
                 last_err = "V2 密钥未命中（请确认微信已登录过该账号）"
             elif head == V1_MAGIC:
@@ -650,7 +712,6 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                         r = _emit(body, ctype.split("/")[1])
                         if r[0] is not None:
                             return r
-                        last_err = "wxgf 转码失败"
                         continue
                 last_err = "Bubble V2 密钥未命中"
             else:
