@@ -3747,5 +3747,170 @@ class TestWxgfArchiveOnDecodeFailure(TempRootCase):
             media.convert_wxgf = old_conv
 
 
+# ── 24. 全量媒体备份（media_backup，吸收自 PR #28）───────────────
+
+class TestMediaBackup(unittest.TestCase):
+    """按文件系统枚举的全量备份：不依赖消息解析，保证文件级 100% 覆盖。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_mediabackup_"))
+        self.wxid = "wxid_demo_b"
+        self.account_root = self.tmp / "xwechat_files" / self.wxid
+        (self.account_root / "cache").mkdir(parents=True)
+        self.attach_root = (self.account_root / "msg" / "attach" / "chatmd5"
+                            / "2026-01" / "Img")
+        self.attach_root.mkdir(parents=True)
+        self.video_root = self.account_root / "msg" / "video" / "2026-01"
+        self.video_root.mkdir(parents=True)
+        self.file_root = self.account_root / "msg" / "file" / "2026-01"
+        self.file_root.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _patch_roots(self):
+        return mock.patch("siwx.media._wechat_cache_roots",
+                          return_value=[self.account_root / "cache"])
+
+    def test_images_classified_by_content_type(self):
+        """可预览(jpeg) / wxgf 转码失败后原样保留 / 真失败，三种结果各自
+        正确归类，wxgf 不被误标成打不开的假 jpg。"""
+        from siwx import media_backup
+        (self.attach_root / "a.dat").write_bytes(b"fake-jpeg-bytes")
+        (self.attach_root / "b.dat").write_bytes(b"fake-wxgf-bytes")
+        (self.attach_root / "c.dat").write_bytes(b"fake-fail-bytes")
+
+        def fake_decrypt_any(data, wxid):
+            if data == b"fake-jpeg-bytes":
+                return b"\xff\xd8\xff" + b"\x00" * 10, "image/jpeg"
+            if data == b"fake-wxgf-bytes":
+                return b"wxgf" + b"\x00" * 10, "image/wxgf"
+            return None, None
+
+        with self._patch_roots(), \
+             mock.patch("siwx.media._decrypt_any", side_effect=fake_decrypt_any), \
+             mock.patch("siwx.media_backup.platform.system", return_value="Linux"), \
+             mock.patch("siwx.media.convert_wxgf", return_value=None):
+            stats = media_backup.backup_images(self.wxid, self.tmp / "out_images",
+                                               log=None)
+
+        self.assertEqual(stats["total"], 3)
+        self.assertEqual(stats["ok_viewable"], 1)
+        self.assertEqual(stats["ok_wxgf_preserved"], 1)
+        self.assertEqual(stats["failed"], 1)
+        out_dir = self.tmp / "out_images" / "chatmd5" / "2026-01" / "Img"
+        self.assertTrue((out_dir / "a.jpeg").is_file())
+        self.assertTrue((out_dir / "b.wxgf").is_file())
+        self.assertFalse((out_dir / "c.jpeg").exists())
+        self.assertFalse((out_dir / "c.wxgf").exists())
+
+    def test_videos_copied_without_decryption(self):
+        """视频实测未加密（ISO Media/MP4 容器），原样复制，不经 media._decrypt_any。"""
+        from siwx import media_backup
+        raw = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 20
+        (self.video_root / "x.mp4").write_bytes(raw)
+
+        with self._patch_roots():
+            stats = media_backup.backup_videos(self.wxid, self.tmp / "out_videos",
+                                               log=None)
+
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["ok"], 1)
+        self.assertEqual(stats["failed"], 0)
+        out_file = self.tmp / "out_videos" / "2026-01" / "x.mp4"
+        self.assertTrue(out_file.is_file())
+        self.assertEqual(out_file.read_bytes(), raw)
+
+    def test_rerun_on_readonly_source_video_does_not_fail(self):
+        """实测踩坑：微信落盘的源视频本身只读。copy2() 连权限位一起拷到
+        目标后，重跑备份对同名只读目标再 copy2() 就是 PermissionError
+        （实测 1926 个视频 1913 个这样假性失败）。必须按大小跳过。"""
+        from siwx import media_backup
+        raw = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 20
+        src = self.video_root / "x.mp4"
+        src.write_bytes(raw)
+        src.chmod(0o444)  # 源文件只读，与微信实测落盘权限一致
+        dst = self.tmp / "out_videos" / "2026-01" / "x.mp4"
+        dst.parent.mkdir(parents=True)
+        dst.write_bytes(raw)
+        dst.chmod(0o444)  # 模拟第一次备份后、被 copy2() 带只读的旧产物
+
+        with self._patch_roots():
+            stats = media_backup.backup_videos(self.wxid, self.tmp / "out_videos",
+                                               log=None)
+
+        self.assertEqual(stats["failed"], 0)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(dst.read_bytes(), raw)
+
+    def test_backup_all_combines_images_and_videos(self):
+        from siwx import media_backup
+        (self.attach_root / "a.dat").write_bytes(b"fake-jpeg-bytes")
+        (self.video_root / "x.mp4").write_bytes(b"videobytes")
+        (self.file_root / "report.pdf").write_bytes(b"%PDF-1.7 fake pdf bytes")
+
+        with self._patch_roots(), \
+             mock.patch("siwx.media._decrypt_any",
+                        return_value=(b"\xff\xd8\xff" + b"\x00" * 10, "image/jpeg")):
+            report = media_backup.backup_all(self.wxid, self.tmp / "out_all", log=None)
+
+        self.assertEqual(report["images"]["ok_viewable"], 1)
+        self.assertEqual(report["videos"]["ok"], 1)
+        self.assertEqual(report["files"]["ok"], 1)
+
+    def test_files_copied_without_decryption_keeps_original_name(self):
+        """msg/file 下的文件消息附件未加密、原文件名/扩展名原样保留在磁盘上，
+        直接复制即可，不经 media._decrypt_any。"""
+        from siwx import media_backup
+        raw = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n" + b"\x00" * 20
+        (self.file_root / "示例文档(1).pdf").write_bytes(raw)
+
+        with self._patch_roots():
+            stats = media_backup.backup_files(self.wxid, self.tmp / "out_files",
+                                              log=None)
+
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["ok"], 1)
+        self.assertTrue((self.tmp / "out_files" / "2026-01" / "示例文档(1).pdf").is_file())
+
+
+class TestMediaBackupApi(TempRootCase):
+    """/api/media/backup/* 端点：启动 → 轮询 → 目录打开的面子。"""
+
+    def setUp(self):
+        super().setUp()
+        self.acc, self.account, self.chat = make_account(self.tmp, n_texts=6)
+
+    def test_start_rejects_unknown_account(self):
+        from siwx.server import app
+        r = app.test_client().post("/api/media/backup/start",
+                                   json={"account": "wxid_nope"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_start_rejects_missing_account_param(self):
+        from siwx.server import app
+        r = app.test_client().post("/api/media/backup/start", json={})
+        self.assertEqual(r.status_code, 400)
+
+    def test_backup_job_runs_to_done(self):
+        from siwx import server
+        from unittest import mock as _mock
+        client = app = server.app.test_client()
+        # 用空目录当账号根：backup_all 三类产物都为 0，任务应干净完成
+        with _mock.patch.object(server.validate, "account_dir",
+                                return_value=self.tmp / "out" / self.account):
+            r = client.post("/api/media/backup/start", json={"account": self.account})
+            self.assertEqual(r.status_code, 200)
+            for _ in range(50):
+                st = client.get("/api/media/backup/status").get_json()
+                if not st["running"]:
+                    break
+                time.sleep(0.05)
+        self.assertTrue(st["done"])
+        self.assertTrue(st["ok"], st.get("error"))
+        self.assertIn("images", st["report"])
+        self.assertEqual(st["report"]["images"]["total"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

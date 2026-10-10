@@ -60,6 +60,32 @@ _IMG_CACHE_LOCK = threading.Lock()
 # media_key.json 的"读-改-写"线程锁（跨进程由 _save_key_cache 的唯一临时名兜）
 _KEY_CACHE_LOCK = threading.Lock()
 
+# media_backup.py 全量备份目录的 md5 → 文件路径索引。全量导出/批量浏览
+# 时同一个备份目录会被反复查（同一张图可能被多条消息引用），每次都现场
+# rglob 六种扩展名等于把整棵目录树重新遍历一遍。按 backup_root 路径缓存
+# 索引，构建一次、后续复用；索引只存路径，不常驻图片字节本身。
+_BACKUP_INDEX: dict = {}
+_BACKUP_INDEX_LOCK = threading.Lock()
+
+
+def _backup_index_for(backup_root: Path) -> dict:
+    key = str(backup_root)
+    with _BACKUP_INDEX_LOCK:
+        idx = _BACKUP_INDEX.get(key)
+        if idx is not None:
+            return idx
+        idx = {}
+        for p in backup_root.rglob("*"):
+            if not p.is_file():
+                continue
+            name = p.name
+            if len(name) >= 32:
+                md5 = name[:32]
+                if all(c in "0123456789abcdef" for c in md5):
+                    idx.setdefault(md5, []).append(p)
+        _BACKUP_INDEX[key] = idx
+        return idx
+
 # cache 根目录的进程内 memo：带 TTL，避免微信目录中途出现/消失时长期失真
 _CACHE_ROOTS_MEMO: dict = {}
 _CACHE_ROOTS_TTL = 60.0
@@ -619,6 +645,41 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
             if len(_IMG_CACHE) > _IMG_CACHE_MAX:
                 _IMG_CACHE.popitem(last=False)
         return body, ctype
+
+    # 复用离线全量备份（media_backup.py）已经转码好的结果，优先于现场
+    # 解密+转码：wxgf→可预览格式依赖活的微信进程 + LLDB，单张现场转码
+    # 不像批量备份那样能把 attach 开销摊到一批图片上；全量备份往往已经
+    # 批量转过一遍、结果就在磁盘上——有就直接读，省掉重新附加微信进程
+    # 的开销，也让"微信没开"时已备份过的图片依然能看。
+    if md5 and len(md5) == 32:
+        backup_root = acc_out_dir / "media_backup" / "images"
+        if backup_root.is_dir():
+            hits = [p for p in _backup_index_for(backup_root).get(md5, [])
+                    if p.suffix.lstrip(".") in ("jpeg", "jpg", "png", "gif", "heic", "wxgf")]
+            if hits:
+                def _rank(p: Path):
+                    n = p.name
+                    is_t = "_t_" in n or "_t." in n
+                    is_h = "_h" in n and not is_t
+                    if hq:  # 查看大图：高清优先
+                        return 0 if is_h else (2 if is_t else 1)
+                    return 2 if is_t else (1 if is_h else 0)  # 默认：主图优先
+                hits.sort(key=_rank)
+                p = hits[0]
+                ext = p.suffix.lstrip(".")
+                if ext != "wxgf":  # wxgf 是转码失败时的兜底留档，让它落到
+                                   # 下面走一遍现场转码
+                    body = p.read_bytes()
+                    if ext == "heic":
+                        # HEIC 在浏览器 <img> 里原生支持不可靠（Safari 能显示，
+                        # Chrome/Firefox 普遍不行），补一次轻量本地 sips 转码
+                        if platform.system() == "Darwin":
+                            from siwx import media_wxgf_macos
+                            jpeg = media_wxgf_macos._heic_to_jpeg(body, log=event)
+                            if jpeg:
+                                return _emit(jpeg, "jpeg")
+                        return _emit(body, "heic")  # sips 失败/非 macOS：原样返回好过没有
+                    return _emit(body, "jpeg" if ext == "jpg" else ext)
 
     # ⓪ attach 原图目录直查（按消息 XML md5 命名，不依赖 hardlink；
     #    hq=True 时优先高清 _h 版，供点击查看大图使用）

@@ -898,6 +898,84 @@ def api_job():
         })
 
 
+# ── 全量媒体备份（media_backup.py，设置页入口）───────────────────
+_backup_lock = threading.Lock()
+_backup_job = {"running": False, "done": False, "ok": False, "account": None,
+               "out_dir": None, "logs": [], "report": None, "error": None}
+
+
+def _run_media_backup(account: str, out_dir, jlog):
+    from siwx import media_backup
+    try:
+        report = media_backup.backup_all(account, out_dir, log=jlog)
+        _backup_job["report"] = report
+        _backup_job["ok"] = True
+        jlog("备份完成")
+    except Exception as e:
+        _backup_job["ok"] = False
+        _backup_job["error"] = f"{type(e).__name__}: {e}"
+        jlog(f"备份失败: {_backup_job['error']}")
+    finally:
+        _backup_job["running"] = False
+        _backup_job["done"] = True
+
+
+@app.post("/api/media/backup/start")
+def api_media_backup_start():
+    """对指定账号做文件级全量媒体备份（删除微信本地数据前的保全手段）。"""
+    data = request.get_json(silent=True) or {}
+    account = (data.get("account") or "").strip()
+    if not account:
+        return jsonify({"error": "参数缺失: account"}), 400
+    acc_dir = validate.account_dir(account, must_exist=True)
+    if acc_dir is None:
+        return jsonify({"error": "账号不存在或未解密"}), 404
+    out_dir = Path(acc_dir) / "media_backup"
+    with _backup_lock:
+        if _backup_job["running"]:
+            return jsonify({"error": "已有备份在运行"}), 409
+        _backup_job.update({"running": True, "done": False, "ok": False,
+                            "account": account, "out_dir": str(out_dir),
+                            "logs": [], "report": None, "error": None})
+
+    def jlog(msg):
+        _backup_job["logs"].append(str(msg))
+        if len(_backup_job["logs"]) > 300:
+            del _backup_job["logs"][:100]
+
+    threading.Thread(target=_run_media_backup, args=(account, out_dir, jlog),
+                     daemon=True).start()
+    return jsonify({"started": True, "out_dir": str(out_dir)})
+
+
+@app.get("/api/media/backup/status")
+def api_media_backup_status():
+    """返回全量媒体备份任务状态（供前端轮询）。"""
+    with _backup_lock:
+        return jsonify(_backup_job)
+
+
+@app.post("/api/media/backup/open")
+def api_media_backup_open():
+    """在资源管理器中打开最近一次备份的输出目录。
+
+    不接受 path 参数（杜绝目录穿越面），只打开任务自身的 out_dir——
+    它由服务端从账号输出目录推导，必然位于输出根目录内。
+    """
+    with _backup_lock:
+        out_dir = _backup_job["out_dir"]
+    if not out_dir or not Path(out_dir).is_dir():
+        return jsonify({"error": "备份目录不存在（先完成一次备份）"}), 404
+    import subprocess
+    if os.name == "nt":
+        os.startfile(out_dir)                                   # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", out_dir])
+    else:
+        subprocess.Popen(["xdg-open", out_dir])
+    return jsonify({"opened": True})
+
+
 @app.post("/api/discover/validate")
 def api_validate_path():
     """验证并保存手动输入的微信存储路径。"""

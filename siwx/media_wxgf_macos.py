@@ -438,3 +438,27 @@ def convert_wxgf_macos(data: bytes, log=print) -> bytes | None:
                 os.unlink(p)
             except OSError:
                 pass
+
+
+def convert_wxgf_batch(pairs: list, log=print, batch_size: int = 200) -> dict:
+    """批量 wxgf → HEIC（供 media_backup.py 对已备份的 .wxgf 文件重新转码）。
+
+    pairs: [(Path(wxgf文件), Path(目标heic路径)), ...]
+    一次 LLDB attach 处理一批（batch_size 张），避免每张都单独 attach/detach
+    的开销；返回 {str(in_path): {"ok": bool, "reason"/"bytes": ...}}。
+    """
+    if not pairs:
+        return {}
+    pid = find_wechat_pid()
+    if pid is None:
+        log("[media_wxgf_macos] 未检测到微信进程，跳过批量转码")
+        return {str(a): {"ok": False, "reason": "no_wechat_process"} for a, _ in pairs}
+
+    out = {}
+    for i in range(0, len(pairs), batch_size):
+        chunk = pairs[i:i + batch_size]
+        log(f"[media_wxgf_macos] 转码批次 {i + 1}-{i + len(chunk)}/{len(pairs)}")
+        res = _run_lldb_batch(pid, chunk, log=log,
+                              timeout=max(60, len(chunk) * 2))
+        out.update(res)
+    return out
