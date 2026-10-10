@@ -547,6 +547,38 @@ class TestMediaExport(TempRootCase):
         finally:
             ex.media.get_image = old
 
+    def test_webp_keeps_its_own_extension(self):
+        """PR #28 同族缺陷：按子串猜扩展名（"png" in info）会把 image/webp
+        写成 .jpg。扩展名必须取自 ctype 子类型。"""
+        from siwx import exporter as ex
+
+        old = ex.media.get_image
+        ex.media.get_image = lambda *a, **kw: (b"RIFF" + b"\x00" * 32,
+                                               "image/webp")
+        try:
+            out, reason = ex._try_decrypt(str(self.acc), self.account, self.chat,
+                                          "a" * 32, None, 1, 1_700_000_000,
+                                          self.tmp / "0000_aaaaaaaaaaaa.jpg")
+            self.assertIsNotNone(out)
+            self.assertEqual(out.suffix, ".webp")
+        finally:
+            ex.media.get_image = old
+
+    def test_unknown_ctype_fails_explicitly(self):
+        """无法识别的 ctype 显式失败，不静默落成 .jpg。"""
+        from siwx import exporter as ex
+
+        old = ex.media.get_image
+        ex.media.get_image = lambda *a, **kw: (b"\x00" * 32, "application/json")
+        try:
+            out, reason = ex._try_decrypt(str(self.acc), self.account, self.chat,
+                                          "a" * 32, None, 1, 1_700_000_000,
+                                          self.tmp / "0000_aaaaaaaaaaaa.jpg")
+            self.assertIsNone(out)
+            self.assertIn("未知媒体类型", reason)
+        finally:
+            ex.media.get_image = old
+
     def test_chat_and_ts_are_forwarded(self):
         """修复前未传 chat/ts，attach/Bubble/Thumb 三级来源全部失效。"""
         from siwx import exporter as ex
@@ -687,8 +719,11 @@ class TestStatsApi(TempRootCase):
         acc = root / "output" / account
         msg_dir = acc / "message"
         msg_dir.mkdir(parents=True, exist_ok=True)
-        # 固定基准时间，便于断言小时/月份（本地时区，用正午避开跨日边界）
-        base = 1_700_000_000
+        # 固定基准时间（本地时区正午）：任何时区下这 6 条消息的本地日期都是
+        # 2023-11-15。此前硬编码 epoch（=2023-11-15 06:13 +08:00），在 UTC 的
+        # CI 上跨到 11-14/11-15 两天，日期过滤用例把 6 条过滤成了 1 条。
+        from datetime import datetime
+        base = int(datetime(2023, 11, 15, 12, 0, 0).timestamp())
 
         def shard(name, chat, rows):
             conn = sqlite3.connect(msg_dir / name)
@@ -1162,6 +1197,45 @@ class TestCliJson(unittest.TestCase):
                 code = cli.cmd_keys_extract(
                     argparse.Namespace(json=True, no_cache=False))
             self.assertEqual(code, 1)
+        finally:
+            extract.extract_all = old
+
+    def test_db_dir_is_forwarded_not_ignored(self):
+        """--db-dir 必须透传给 extract_all（PR #27：此前被静默忽略，
+        多账号机器无法把 LLDB 断点捕获窗口留给目标账号）。"""
+        import argparse
+        from siwx import cli, extract
+        captured = {}
+        old = extract.extract_all
+        extract.extract_all = lambda **kw: captured.update(kw) or [
+            {"wxid": "wxid_x", "db_count": 1, "total_salts": 1, "verified": 1,
+             "cached": 0, "duration_ms": 1, "salts": []}]
+        tmp = Path(tempfile.mkdtemp(prefix="siwx_dbdir_"))
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = cli.cmd_keys_extract(
+                    argparse.Namespace(json=True, no_cache=False,
+                                       db_dir=str(tmp)))
+            self.assertEqual(code, 0)
+            self.assertEqual(captured.get("dirs"),
+                             [(extract.wxid_of(str(tmp)), str(tmp))])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            extract.extract_all = old
+
+    def test_db_dir_missing_returns_1(self):
+        import argparse
+        from siwx import cli, extract
+        old = extract.extract_all
+        calls = []
+        extract.extract_all = lambda **kw: calls.append(kw) or []
+        try:
+            code = cli.cmd_keys_extract(
+                argparse.Namespace(json=True, no_cache=False,
+                                   db_dir="Z:/definitely/not/here"))
+            self.assertEqual(code, 1)
+            self.assertEqual(calls, [], "无效目录不应进入提取流程")
         finally:
             extract.extract_all = old
 
@@ -1696,7 +1770,7 @@ class TestAccountConflicts(unittest.TestCase):
 
 # ── 数据安全修复：manifest 来源保护（方案 B）──────────────────
 
-class TestManifestSourceGuard(unittest.TestCase):
+class TestManifestSourceGuard(TempRootCase):
     """同名账号共用 output/<wxid>/ 时，来源变更不得静默覆盖已存在产物。
 
     核心兼容约束：旧 manifest 无 @source（升级自 v5.0.x）必须放行，
@@ -1704,12 +1778,18 @@ class TestManifestSourceGuard(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_srcguard_"))
-        from siwx import extract
+        super().setUp()
+        from siwx import extract, keystore
         from siwx import pool
         self.extract, self.pool = extract, pool
         self._bench = []
-        # 隔离密钥依赖：让 _resolve_key 必定成功，从而走到来源判定分支
+        # 密钥依赖必须自给自足（吸收上游 f160d9d）：此前依赖开发者本机真实
+        # 密钥库，干净环境（CI）里 0 密钥，用例全在 _resolve_key 处因无候选
+        # 跳过（ok=0/conflicts=0）。这里 patch keystore.load 注入 salt→key，
+        # 不写真实密钥库（上游直接 insert/save 会污染开发机密钥库）。
+        self._ks_orig = keystore.load
+        keystore.load = lambda: {"aa" * 16: {"key": "ab" * 32,
+                                             "strategy": "test", "updated": 0}}
         self._orig = (extract.parse_key, extract.verify_enc_key,
                       extract.decrypt_parallel)
         extract.parse_key = lambda k: b"\x00" * 32
@@ -1730,9 +1810,11 @@ class TestManifestSourceGuard(unittest.TestCase):
         self._bench.append(fake_parallel)
 
     def tearDown(self):
+        from siwx import keystore
         (self.extract.parse_key, self.extract.verify_enc_key,
          self.extract.decrypt_parallel) = self._orig
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        keystore.load = self._ks_orig
+        super().tearDown()
 
     def _entry(self, rel, path, size=8192):
         from siwx.sqlcipher import DbEntry
@@ -3516,6 +3598,152 @@ class TestNullConfigHardening(TempRootCase):
         r = c.get("/api/mcp/info")
         self.assertEqual(r.status_code, 200)
         self.assertIn("tools", r.get_json())
+
+
+# ── 23. macOS 支持（kvcomm 密钥发现 + wxgf 留档）─────────────────
+
+class TestFindKvcommCodesMacOS(unittest.TestCase):
+    """find_kvcomm_codes() 此前只扫 Windows 路径 (C:/Users/*/AppData/...)，
+    macOS 上恒返回空列表 → candidate_keys() 恒无候选 → 账号级媒体密钥永远
+    推导不出来 → 所有聊天/朋友圈图片解密失败（P0-1，吸收自 PR #28）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_kvcomm_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_macos_container_kvcomm_discovered(self):
+        from siwx import media
+        kv = (self.tmp / "Library" / "Containers" / "com.tencent.xinWeChat" /
+              "Data" / "Documents" / "app_data" / "net" / "kvcomm")
+        kv.mkdir(parents=True)
+        (kv / "key_3377726147_4066647381_1_1_1_3600_input.statistic").write_bytes(b"")
+        # 非数字 code 的同名兄弟文件不应被误当成 code 命中
+        (kv / "key_reportnow_1_2_3_4_5_input.statistic").write_bytes(b"")
+
+        def fake_glob(pat):
+            # 本机真实 kvcomm 文件会污染断言，只放行打中夹具目录的模式
+            return [str(f) for f in kv.glob("key_*_*.statistic")] \
+                if str(kv) in pat else []
+
+        with mock.patch("siwx.media.platform.system", return_value="Darwin"), \
+             mock.patch("siwx.media.Path.home", return_value=self.tmp), \
+             mock.patch("glob.glob", side_effect=fake_glob):
+            codes = media.find_kvcomm_codes()
+        self.assertEqual(codes, [3377726147])
+
+    def test_no_container_dir_returns_empty_not_raises(self):
+        from siwx import media
+        with mock.patch("siwx.media.platform.system", return_value="Darwin"), \
+             mock.patch("siwx.media.Path.home", return_value=self.tmp), \
+             mock.patch("glob.glob", return_value=[]):
+            self.assertEqual(media.find_kvcomm_codes(), [])
+
+    def test_windows_path_unaffected(self):
+        """非 Darwin 平台不应触碰 macOS 专属逻辑（回归保护，防止条件写反）。"""
+        from siwx import media
+        with mock.patch("siwx.media.platform.system", return_value="Windows"), \
+             mock.patch("glob.glob", return_value=[]):
+            self.assertEqual(media.find_kvcomm_codes(), [])
+
+
+class TestImageFailReason(TempRootCase):
+    """P2-7：/api/chat/media/image 的 404 必须带结构化 reason，前端据此
+    区分「没下载原图 / 解密失败 / 本平台无法解码」，不再只有一种文案。"""
+
+    def setUp(self):
+        super().setUp()
+        self.acc, self.account, self.chat = make_account(self.tmp, n_texts=6)
+
+    def test_reason_field_classifies_failures(self):
+        from siwx import media
+        from siwx.server import app
+        cases = [
+            ("未找到文件", "missing_local"),
+            ("文件不存在: x.dat", "missing_local"),
+            ("本地无原图/气泡/缩略图", "missing_local"),
+            ("wxgf 转码失败（原始文件已留档: wxgf_archive/a.wxgf）",
+             "no_decoder_on_platform"),
+            ("V2 密钥未命中（请确认微信已登录过该账号）", "decrypt_failed"),
+            ("解密产物不完整", "decrypt_failed"),
+        ]
+        old = media.get_image
+        try:
+            for err, want in cases:
+                media.get_image = lambda *a, **kw: (None, err)
+                r = app.test_client().get(
+                    f"/api/chat/media/image?account={self.account}&md5={'a' * 32}")
+                self.assertEqual(r.status_code, 404)
+                self.assertEqual(r.get_json()["reason"], want, err)
+        finally:
+            media.get_image = old
+
+
+class TestWxgfArchiveOnDecodeFailure(TempRootCase):
+    """P0-1②：wxgf 解码失败时，已解密的原始字节必须留档到输出目录
+    （wxgf_archive/）而不是直接丢弃，失败原因需带留档位置透传给用户。"""
+
+    def setUp(self):
+        super().setUp()
+        self.acc, self.account, self.chat = make_account(self.tmp, n_texts=6)
+
+    def test_decode_failure_archives_raw_wxgf(self):
+        import hashlib
+        from siwx import media
+        root = self.tmp / "acc_root"
+        (root / "cache").mkdir(parents=True)
+        attach = (root / "msg" / "attach"
+                  / hashlib.md5(self.chat.encode()).hexdigest() / "Img")
+        attach.mkdir(parents=True)
+        raw = b"wxgf" + b"\x00" * 32
+        (attach / ("d" * 32 + ".dat")).write_bytes(raw)
+
+        old_roots, old_dec, old_conv = (media._wechat_cache_roots,
+                                        media._decrypt_any, media.convert_wxgf)
+        media._wechat_cache_roots = lambda wxid: [root / "cache"]
+        media._decrypt_any = lambda data, wxid: (raw, "image/wxgf")
+        media.convert_wxgf = lambda data: None
+        try:
+            body, info = media.get_image(self.account, "d" * 32,
+                                         self.tmp / "out", chat=self.chat)
+            self.assertIsNone(body)
+            self.assertIn("留档", info)
+            archived = self.tmp / "out" / "wxgf_archive" / ("d" * 32 + ".wxgf")
+            self.assertTrue(archived.is_file())
+            self.assertEqual(archived.read_bytes(), raw)
+        finally:
+            media._wechat_cache_roots = old_roots
+            media._decrypt_any = old_dec
+            media.convert_wxgf = old_conv
+
+    def test_decode_success_does_not_archive(self):
+        """解码成功时不应产生留档文件。"""
+        import hashlib
+        from siwx import media
+        root = self.tmp / "acc_root"
+        (root / "cache").mkdir(parents=True)
+        attach = (root / "msg" / "attach"
+                  / hashlib.md5(self.chat.encode()).hexdigest() / "Img")
+        attach.mkdir(parents=True)
+        raw = b"wxgf" + b"\x00" * 32
+        (attach / ("e" * 32 + ".dat")).write_bytes(raw)
+
+        old_roots, old_dec, old_conv = (media._wechat_cache_roots,
+                                        media._decrypt_any, media.convert_wxgf)
+        media._wechat_cache_roots = lambda wxid: [root / "cache"]
+        media._decrypt_any = lambda data, wxid: (raw, "image/wxgf")
+        media.convert_wxgf = lambda data: b"\xff\xd8\xff" + b"\x00" * 40
+        try:
+            body, info = media.get_image(self.account, "e" * 32,
+                                         self.tmp / "out", chat=self.chat)
+            self.assertIsNotNone(body)
+            out_dir = self.tmp / "out" / "wxgf_archive"
+            self.assertFalse(out_dir.exists())
+        finally:
+            media._wechat_cache_roots = old_roots
+            media._decrypt_any = old_dec
+            media.convert_wxgf = old_conv
 
 
 if __name__ == "__main__":
