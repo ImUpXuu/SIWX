@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](./LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-5.0.8-success.svg)](./version.json)
+[![Version](https://img.shields.io/badge/version-5.0.9-success.svg)](./version.json)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](#平台支持)
 [![Docs](https://img.shields.io/badge/docs-siwx--docs.vercel.app-175fe0.svg)](https://siwx-docs.vercel.app)
 

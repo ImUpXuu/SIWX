@@ -560,12 +560,102 @@ export async function init() {
     }
   });
 
+  // ── 全量媒体备份（media_backup）──────────────────────
+  await initBackupCard();
   await loadLogSettings();
+}
+
+/* 全量媒体备份卡片：账号下拉 → 启动 → 轮询状态 → 结果统计。 */
+let mbPoll = null;
+
+function renderBackupResult(st) {
+  el('s-mb-status').textContent = st.ok ? '备份完成' : `备份失败：${st.error || '未知错误'}`;
+  const r = st.report;
+  if (!r) return;
+  el('s-mb-result').innerHTML = `
+    <div>图片：可预览 ${r.images?.ok_viewable ?? 0} · wxgf 留档 ${r.images?.ok_wxgf_preserved ?? 0} · 失败 ${r.images?.failed ?? 0}（共 ${r.images?.total ?? 0}）</div>
+    <div>视频：成功 ${r.videos?.ok ?? 0} · 跳过 ${r.videos?.skipped ?? 0} · 失败 ${r.videos?.failed ?? 0}（共 ${r.videos?.total ?? 0}）</div>
+    <div>文件：成功 ${r.files?.ok ?? 0} · 跳过 ${r.files?.skipped ?? 0} · 失败 ${r.files?.failed ?? 0}（共 ${r.files?.total ?? 0}）</div>`;
+  el('s-mb-open-row').classList.remove('hidden');
+}
+
+function pollBackup() {
+  if (mbPoll) clearInterval(mbPoll);
+  const logBox = el('s-mb-log');
+  logBox.classList.remove('hidden');
+  mbPoll = setInterval(async () => {
+    try {
+      const st = await fetchJSON('/api/media/backup/status');
+      logBox.textContent = (st.logs || []).slice(-12).join('\n');
+      logBox.scrollTop = logBox.scrollHeight;
+      if (!st.running) {
+        clearInterval(mbPoll);
+        mbPoll = null;
+        renderBackupResult(st);
+        el('s-mb-start').disabled = false;
+      }
+    } catch (_) { /* 轮询失败下轮再试 */ }
+  }, 1000);
+}
+
+async function initBackupCard() {
+  const sel = el('s-mb-account');
+  const startBtn = el('s-mb-start');
+  try {
+    const s = await fetchJSON('/api/status');
+    const accs = s.accounts || [];
+    sel.innerHTML = accs.length
+      ? accs.map(a => `<option value="${esc(a.wxid)}">${esc(a.wxid)}</option>`).join('')
+      : '<option value="">（无已解密账号）</option>';
+    startBtn.disabled = !accs.length;
+  } catch (e) {
+    sel.innerHTML = '<option value="">账号列表加载失败</option>';
+    startBtn.disabled = true;
+  }
+  startBtn.addEventListener('click', async () => {
+    const account = sel.value;
+    if (!account) return;
+    startBtn.disabled = true;
+    el('s-mb-result').innerHTML = '';
+    el('s-mb-open-row').classList.add('hidden');
+    el('s-mb-log').textContent = '';
+    try {
+      await fetchJSON('/api/media/backup/start', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ account }),
+      });
+      el('s-mb-status').textContent = '备份运行中…';
+      pollBackup();
+    } catch (e) {
+      el('s-mb-status').textContent = '启动失败：' + e.message;
+      startBtn.disabled = false;
+    }
+  });
+  el('s-mb-open').addEventListener('click', async () => {
+    try {
+      await fetchJSON('/api/media/backup/open', { method: 'POST' });
+    } catch (e) {
+      toast('打开失败：' + e.message, true);
+    }
+  });
+  // 页面刷新后恢复在跑任务的轮询
+  try {
+    const st = await fetchJSON('/api/media/backup/status');
+    if (st.running) {
+      el('s-mb-status').textContent = '备份运行中…';
+      startBtn.disabled = true;
+      pollBackup();
+    } else if (st.done) {
+      renderBackupResult(st);
+    }
+  } catch (_) { /* 首次无状态 */ }
 }
 
 export function destroy() {
   if (dsStop) dsStop();                    // 切页后停止在飞的提取轮询
   dsStop = null;
+  if (mbPoll) { clearInterval(mbPoll); mbPoll = null; }
   plgChoiceDrop.clear();                   // 释放已脱离 DOM 的下拉挂载引用
   if (logLevelDrop) { logLevelDrop.destroy(); logLevelDrop = null; }
 }

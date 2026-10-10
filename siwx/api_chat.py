@@ -1545,6 +1545,18 @@ def media_voice():
     })
 
 
+def _image_fail_reason(info) -> str:
+    """图片失败原因归类（P2-7）：此前一切失败坍缩成一个 404 文案，前端只有
+    「原图未下载」一种提示——macOS 上因 wxgf 无法解码而反复点重试的用户
+    永远不会生效。前端按 reason 选文案。"""
+    s = info or ""
+    if "wxgf" in s:
+        return "no_decoder_on_platform"
+    if ("未找到" in s or "不存在" in s or "为空" in s or "无原图" in s):
+        return "missing_local"
+    return "decrypt_failed"
+
+
 @bp.get("/media/image")
 def media_image():
     """按需解密单张图片：三级来源（hardlink 原图 → Bubble 气泡缓存 → Thumb 缩略图）。"""
@@ -1574,7 +1586,8 @@ def media_image():
                                  ts=ts or None, bubble_md5=bubble_md5 or None,
                                  hq=hq)
     if body is None:
-        return jsonify({"error": info}), 404
+        return jsonify({"error": info,
+                        "reason": _image_fail_reason(info)}), 404
     return Response(body, mimetype=info,
                     headers={"Cache-Control": "private, max-age=86400"})
 

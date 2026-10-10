@@ -104,6 +104,26 @@
     </div>
   </div>
 
+  <div class="card s-card">
+    <div class="card-head"><h2>全量媒体备份</h2><span class="hint">按文件枚举 msg/attach、video、file，不依赖消息解析——删除微信数据前的保全手段</span></div>
+    <div class="s-actions">
+      <div class="s-item s-item-block">
+        <b>备份目标账号</b>
+        <span class="dim">图片逐个解密（wxgf 转码失败时保留原始文件，不算失败）；视频与文件附件未加密，直接复制。产物写入该账号输出目录的 media_backup/ 下。</span>
+        <div class="s-inline" style="margin-top:8px">
+          <select id="s-mb-account" class="g-input" style="flex:1;min-width:0"></select>
+          <button class="btn btn-primary" id="s-mb-start">开始备份</button>
+        </div>
+        <div id="s-mb-status" class="dim" style="margin-top:6px"></div>
+        <div class="console hidden" id="s-mb-log" style="margin-top:10px"></div>
+        <div id="s-mb-result" class="g3-res" style="margin-top:8px"></div>
+        <div class="s-inline hidden" id="s-mb-open-row" style="margin-top:8px">
+          <button class="btn btn-sm" id="s-mb-open">打开备份目录</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="card s-card" id="s-plugins-card" hidden>
     <div class="card-head">
       <h2>插件</h2>

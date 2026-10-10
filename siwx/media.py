@@ -9,6 +9,7 @@
 import hashlib
 import json
 import os
+import platform
 import re
 import sqlite3
 import struct
@@ -58,6 +59,32 @@ _IMG_CACHE_LOCK = threading.Lock()
 
 # media_key.json 的"读-改-写"线程锁（跨进程由 _save_key_cache 的唯一临时名兜）
 _KEY_CACHE_LOCK = threading.Lock()
+
+# media_backup.py 全量备份目录的 md5 → 文件路径索引。全量导出/批量浏览
+# 时同一个备份目录会被反复查（同一张图可能被多条消息引用），每次都现场
+# rglob 六种扩展名等于把整棵目录树重新遍历一遍。按 backup_root 路径缓存
+# 索引，构建一次、后续复用；索引只存路径，不常驻图片字节本身。
+_BACKUP_INDEX: dict = {}
+_BACKUP_INDEX_LOCK = threading.Lock()
+
+
+def _backup_index_for(backup_root: Path) -> dict:
+    key = str(backup_root)
+    with _BACKUP_INDEX_LOCK:
+        idx = _BACKUP_INDEX.get(key)
+        if idx is not None:
+            return idx
+        idx = {}
+        for p in backup_root.rglob("*"):
+            if not p.is_file():
+                continue
+            name = p.name
+            if len(name) >= 32:
+                md5 = name[:32]
+                if all(c in "0123456789abcdef" for c in md5):
+                    idx.setdefault(md5, []).append(p)
+        _BACKUP_INDEX[key] = idx
+        return idx
 
 # cache 根目录的进程内 memo：带 TTL，避免微信目录中途出现/消失时长期失真
 _CACHE_ROOTS_MEMO: dict = {}
@@ -135,6 +162,28 @@ def find_kvcomm_codes() -> list:
         r"C:/Users/*/AppData/Roaming/Tencent/xwechat/ilink/kvcomm/key_*_*.statistic",
         r"C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_*_*.statistic",
     ]
+    if platform.system() == "Darwin":
+        # macOS 的 kvcomm 落盘位置在各 WeChat 沙箱容器下，文件名格式与
+        # Windows 版一致（key_<code>_<...>.statistic）。此前只扫 Windows
+        # 路径 → macOS 上本函数恒空集 → candidate_keys() 恒无候选 →
+        # 账号级媒体密钥永远推导不出来，所有聊天/朋友圈图片都解不开
+        # （P0-1，吸收自 PR #28）。容器名按含 "wechat" 匹配而非硬编码，
+        # 与 discover.find_wechat_data_dirs() 一致，兼容改名/马甲包。
+        containers = Path.home() / "Library" / "Containers"
+        try:
+            entries = [e for e in containers.iterdir()
+                       if e.is_dir() and "wechat" in e.name.lower()]
+        except OSError:
+            entries = []
+        for entry in entries:
+            data = entry / "Data"
+            pats += [
+                str(data / "Documents" / "app_data" / "net" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "ilink" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "roam" / "ilink" / "kvcomm" / "key_*_*.statistic"),
+                str(data / "Documents" / "app_data" / "radium" / "ilink" / "*" / "kvcomm" / "key_*_*.statistic"),
+                str(data / ".wxapplet" / "ilink" / "*" / "kvcomm" / "key_*_*.statistic"),
+            ]
     for pat in pats:
         for f in glob.glob(pat):
             m = re.match(r".*[\\/]key_(\d+)_", f.replace("\\", "/"))
@@ -471,6 +520,17 @@ def _finalize(body: bytes, ext: str, ctype: str):
     """
     if ext == "wxgf":
         converted = convert_wxgf(body)
+        if not converted and platform.system() == "Darwin":
+            # Windows 走 VoipEngine.dll（上面 convert_wxgf），macOS 没有对应
+            # 独立 DLL，走活体微信进程 + LLDB 调用的专属转码路径（原理见
+            # media_wxgf_macos.py 顶部说明）。需要微信正在运行且 SIP 关闭，
+            # 任一不满足就优雅返回 None，走"转码失败"的既有兜底，不影响
+            # 其余图片的正常展示。（P0-1，吸收自 PR #28）
+            from siwx import media_wxgf_macos
+            result = media_wxgf_macos.convert_wxgf_for_web(body, log=event)
+            if result:
+                jpeg_body, jpeg_ctype = result
+                return jpeg_body, "jpeg", jpeg_ctype
         if not converted:
             return None
         ext, ctype = _image_sig(converted) or (None, None)
@@ -543,11 +603,41 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
     last_err = "未找到文件"
     label = f"{(chat or '')[:12]}… local_id={local_id} md5={(md5 or '')[:8]}… bm={(bubble_md5 or '')[:8]}…"
 
+    # wxgf 留档键（P0-1②）：解码失败的原始 wxgf 不再直接丢弃，留档到
+    # 输出目录供用户离线转换；优先用消息 md5 命名，缺 md5 时退回会话+消息号。
+    if md5 and len(md5) == 32:
+        wxgf_key = md5
+    elif chat and local_id:
+        wxgf_key = re.sub(r"[^\w.-]", "_", f"{chat}_{local_id}")[:80]
+    else:
+        wxgf_key = None
+
+    def _archive_wxgf(key: str, body: bytes):
+        d = acc_out_dir / "wxgf_archive"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            f = d / f"{key}.wxgf"
+            if not (f.is_file() and f.stat().st_size == len(body)):
+                f.write_bytes(body)
+            return f
+        except OSError as e:
+            try:
+                _media_logger.detailed("media", f"wxgf 留档失败: {type(e).__name__}")
+            except Exception:
+                pass
+            return None
+
     def _emit(body: bytes, ext: str):
         """转码 + 缓存。转码失败返回 (None, None)，调用方落到下一级候选；
         失败结果绝不进缓存（旧实现缓存坏 wxgf 导致重试永远失败）。"""
+        nonlocal last_err
         fin = _finalize(body, ext, f"image/{ext}")
         if fin is None:
+            if ext == "wxgf":
+                f = _archive_wxgf(wxgf_key, body) if wxgf_key else None
+                last_err = (f"wxgf 转码失败（原始文件已留档: "
+                            f"wxgf_archive/{wxgf_key}.wxgf）" if f
+                            else "wxgf 转码失败")
             return None, None
         body, _ext, ctype = fin
         with _IMG_CACHE_LOCK:
@@ -555,6 +645,41 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
             if len(_IMG_CACHE) > _IMG_CACHE_MAX:
                 _IMG_CACHE.popitem(last=False)
         return body, ctype
+
+    # 复用离线全量备份（media_backup.py）已经转码好的结果，优先于现场
+    # 解密+转码：wxgf→可预览格式依赖活的微信进程 + LLDB，单张现场转码
+    # 不像批量备份那样能把 attach 开销摊到一批图片上；全量备份往往已经
+    # 批量转过一遍、结果就在磁盘上——有就直接读，省掉重新附加微信进程
+    # 的开销，也让"微信没开"时已备份过的图片依然能看。
+    if md5 and len(md5) == 32:
+        backup_root = acc_out_dir / "media_backup" / "images"
+        if backup_root.is_dir():
+            hits = [p for p in _backup_index_for(backup_root).get(md5, [])
+                    if p.suffix.lstrip(".") in ("jpeg", "jpg", "png", "gif", "heic", "wxgf")]
+            if hits:
+                def _rank(p: Path):
+                    n = p.name
+                    is_t = "_t_" in n or "_t." in n
+                    is_h = "_h" in n and not is_t
+                    if hq:  # 查看大图：高清优先
+                        return 0 if is_h else (2 if is_t else 1)
+                    return 2 if is_t else (1 if is_h else 0)  # 默认：主图优先
+                hits.sort(key=_rank)
+                p = hits[0]
+                ext = p.suffix.lstrip(".")
+                if ext != "wxgf":  # wxgf 是转码失败时的兜底留档，让它落到
+                                   # 下面走一遍现场转码
+                    body = p.read_bytes()
+                    if ext == "heic":
+                        # HEIC 在浏览器 <img> 里原生支持不可靠（Safari 能显示，
+                        # Chrome/Firefox 普遍不行），补一次轻量本地 sips 转码
+                        if platform.system() == "Darwin":
+                            from siwx import media_wxgf_macos
+                            jpeg = media_wxgf_macos._heic_to_jpeg(body, log=event)
+                            if jpeg:
+                                return _emit(jpeg, "jpeg")
+                        return _emit(body, "heic")  # sips 失败/非 macOS：原样返回好过没有
+                    return _emit(body, "jpeg" if ext == "jpg" else ext)
 
     # ⓪ attach 原图目录直查（按消息 XML md5 命名，不依赖 hardlink；
     #    hq=True 时优先高清 _h 版，供点击查看大图使用）
@@ -578,7 +703,6 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                 r = _emit(body, ctype.split("/")[1])
                 if r[0] is not None:
                     return r
-                last_err = "wxgf 转码失败"
                 continue
             last_err = "attach 解密失败"
 
@@ -606,7 +730,6 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                         r = _emit(body, ctype.split("/")[1])
                         if r[0] is not None:
                             return r
-                        last_err = "wxgf 转码失败"
                         continue
                 last_err = "V2 密钥未命中（请确认微信已登录过该账号）"
             elif head == V1_MAGIC:
@@ -650,7 +773,6 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                         r = _emit(body, ctype.split("/")[1])
                         if r[0] is not None:
                             return r
-                        last_err = "wxgf 转码失败"
                         continue
                 last_err = "Bubble V2 密钥未命中"
             else:

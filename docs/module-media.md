@@ -98,7 +98,7 @@ C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_<code>_*.statistic
 
 ### `clean_wxid(wxid: str) → str`
 
-**去掉账号后缀**：`wxid_demo_1234 → wxid_demo`
+**去掉账号后缀**：`wxid_demo_b_1234 → wxid_demo`
 
 ```python
 def clean_wxid(wxid: str) -> str:

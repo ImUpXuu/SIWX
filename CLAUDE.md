@@ -32,7 +32,7 @@
 
 ## 五、本项目发版清单（历史踩坑，逐项执行）
 
-1. 版本号**四处**同步：`siwx/__init__.py`、README 徽章、docs/README.md 头、`tests/test_regressions.py::TestVersionSource` 钉定的版本值——CI 不跑测试，漏了不会被拦（踩过坑）；
+1. 版本号**四处**同步：`siwx/__init__.py`、README 徽章、docs/README.md 头、`tests/test_regressions.py::TestVersionSource` 钉定的版本值——CI 的 test job（.github/workflows/release.yml，push main 与 PR 触发）会跑 pytest，此条不满足会被拦；
 2. tag 注释用 `git tag -a vX.Y.Z --cleanup=whitespace -F <notes 文件>`（默认 strip 会吃掉 Markdown 标题，踩过坑）；
 3. 发布说明按第一~三条自查后再打 tag；
 4. 一次 `git push` 只推一个 tag——多 tag 同推不触发 CI（踩过坑）。

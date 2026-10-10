@@ -288,8 +288,12 @@ def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
                                      ts=ts or None,
                                      bubble_md5=bubble_md5 or None)
         if body:
-            ext = "png" if "png" in info else ("gif" if "gif" in info else "jpg")
-            dst = Path(dst).with_suffix(f".{ext}")
+            # PR #28 同族缺陷：按子串猜扩展名会把 WebP 写成 .jpg。
+            # info 是 mimetype（media._emit 产出 image/<ext>），直接取子类型；
+            # 无法识别的类型显式失败，不静默落成 .jpg。
+            if not info or not info.startswith("image/"):
+                return None, f"未知媒体类型 {info!r}，不落盘"
+            dst = Path(dst).with_suffix(f".{info.rsplit('/', 1)[-1]}")
             dst.write_bytes(body)
             return dst, ""
         return None, info or "未找到源文件或解密为空"

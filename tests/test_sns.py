@@ -1,5 +1,4 @@
 import hashlib
-import os
 import sys
 import unittest
 from pathlib import Path
@@ -9,6 +8,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from siwx import sns, sns_cdn, sns_isaac64
+from tests._base import IsolatedRootCase
+from tests import fixtures as fx
 
 
 class TestSnsPrimitives(unittest.TestCase):
@@ -192,7 +193,7 @@ class TestSnsExport(unittest.TestCase):
         for fmt, suffix in (("json", ".json"), ("markdown", ".md"),
                             ("txt", ".txt"), ("html", ".html")):
             with self.subTest(fmt=fmt):
-                r = E.run_sns_export(self.db, "wxid_test", fmt=fmt,
+                r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt=fmt,
                                      export_root=self.tmp / "out")
                 self.assertTrue(r["ok"], r.get("error"))
                 self.assertEqual(r["count"], 2)
@@ -203,26 +204,26 @@ class TestSnsExport(unittest.TestCase):
 
     def test_export_keyword_filter(self):
         from siwx import sns_export as E
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", keyword="world")
         self.assertEqual(r["count"], 1)
 
     def test_export_author_filter(self):
         from siwx import sns_export as E
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", usernames=["wxid_a"])
         self.assertEqual(r["count"], 1)
 
     def test_export_rejects_unknown_format(self):
         from siwx import sns_export as E
-        r = E.run_sns_export(self.db, "wxid_test", fmt="yaml",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="yaml",
                              export_root=self.tmp / "out")
         self.assertFalse(r["ok"])
 
     def test_export_empty_result(self):
         """筛选后没有动态 = 空结果成功（旧契约 ok=False 会被 UI 渲染成红色"导出失败"）。"""
         from siwx import sns_export as E
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", keyword="不存在的内容")
         self.assertTrue(r["ok"])
         self.assertTrue(r["empty"])
@@ -383,42 +384,42 @@ class TestSnsCardParsing(unittest.TestCase):
 
     def test_link_card_fields(self):
         xml = self._wrap("3",
-                         "<title>今晚免费直播：细胞治疗</title>"
+                         "<title>占位直播标题甲</title>"
                          "<description>7月29日 19:30</description>"
                          "<contentUrl>https://mp.weixin.qq.com/s?__biz=abc</contentUrl>"
                          "<mediaList><media><type>2</type>"
                          "<url token='t' key='k'>http://h/mmsns/cov/0</url>"
                          "</media></mediaList>",
-                         extra="<sourceNickName>制药台</sourceNickName>")
+                         extra="<sourceNickName>占位来源甲</sourceNickName>")
         feed = sns.parse_timeline(xml)
         card = feed["card"]
         self.assertEqual(card["kind"], "link")
-        self.assertEqual(card["title"], "今晚免费直播：细胞治疗")
+        self.assertEqual(card["title"], "占位直播标题甲")
         self.assertEqual(card["description"], "7月29日 19:30")
         self.assertIn("mp.weixin.qq.com", card["content_url"])
-        self.assertEqual(card["source"], "制药台")
+        self.assertEqual(card["source"], "占位来源甲")
         self.assertEqual(card["cover_url"], "http://h/mmsns/cov/0")
 
     def test_music_card_kind_from_fields_not_type(self):
         """type 42 在早期文档里叫 finder_live，实际是音乐 —— kind 必须按字段判定。"""
         xml = self._wrap("42",
-                         "<title>让风告诉你</title><description>花玲、喵酱油</description>"
+                         "<title>占位歌曲甲</title><description>占位歌手甲、占位歌手乙</description>"
                          "<contentUrl>https://t1.kugou.com/abc</contentUrl>"
-                         "<musicShareItem><mvSingerName>花玲</mvSingerName>"
-                         "<mvAlbumName>让风告诉你</mvAlbumName>"
+                         "<musicShareItem><mvSingerName>占位歌手甲</mvSingerName>"
+                         "<mvAlbumName>占位歌曲甲</mvAlbumName>"
                          "<musicDuration>226000</musicDuration></musicShareItem>")
         card = sns.parse_timeline(xml)["card"]
         self.assertEqual(card["kind"], "music")
-        self.assertEqual(card["music"]["singer"], "花玲")
-        self.assertEqual(card["music"]["album"], "让风告诉你")
+        self.assertEqual(card["music"]["singer"], "占位歌手甲")
+        self.assertEqual(card["music"]["album"], "占位歌曲甲")
         self.assertEqual(card["music"]["duration_ms"], 226000)
 
     def test_finder_feed_card(self):
         xml = self._wrap(
             "28",
-            "<description>中考进步学员专访</description>"
+            "<description>占位视频文案甲</description>"
             "<finderFeed><objectId>14711924164078868603</objectId>"
-            "<feedType>4</feedType><nickname>高途英语小唐老师</nickname>"
+            "<feedType>4</feedType><nickname>占位主播甲</nickname>"
             "<avatar>http://wx.qlogo.cn/finderhead/abc</avatar>"
             "<mediaCount>1</mediaCount>"
             "<username>v2_060000231003b20f@finder</username>"
@@ -446,7 +447,7 @@ class TestSnsCardParsing(unittest.TestCase):
         # ⭐ 视频地址来自第二条 media（第一条没有 <url>）
         self.assertIn("encfilekey=x", card["video_url"])
         f = card["finder"]
-        self.assertEqual(f["nickname"], "高途英语小唐老师")
+        self.assertEqual(f["nickname"], "占位主播甲")
         self.assertEqual(f["media_count"], 1)
         self.assertEqual(f["medias"][0]["media_type"], 4)
         self.assertEqual(f["medias"][0]["duration_s"], 255)
@@ -456,21 +457,21 @@ class TestSnsCardParsing(unittest.TestCase):
     def test_finder_live_card(self):
         xml = self._wrap("34",
                          "<finderLive><finderLiveID>2042905931828856520</finderLiveID>"
-                         "<nickname>新华网健康</nickname>"
+                         "<nickname>占位媒体甲</nickname>"
                          "<coverUrl>https://wxapp.tc.qq.com/251/20304/stodownload?encfilekey=y</coverUrl>"
-                         "<desc>庆祝大会</desc><liveStatus>1</liveStatus>"
+                         "<desc>占位活动甲</desc><liveStatus>1</liveStatus>"
                          "<media><coverUrl>https://wxapp.tc.qq.com/251/20304/stodownload?encfilekey=y</coverUrl>"
                          "<width>1440</width><height>1920</height></media></finderLive>")
         card = sns.parse_timeline(xml)["card"]
         self.assertEqual(card["kind"], "live")
-        self.assertEqual(card["live"]["nickname"], "新华网健康")
-        self.assertEqual(card["live"]["desc"], "庆祝大会")
+        self.assertEqual(card["live"]["nickname"], "占位媒体甲")
+        self.assertEqual(card["live"]["desc"], "占位活动甲")
         self.assertEqual(card["live"]["status"], 1)
         self.assertEqual(card["cover_width"], 1440)
 
     def test_note_card(self):
         xml = self._wrap("26",
-                         "<title>小时候的端倪</title><description>note description</description>"
+                         "<title>占位笔记标题甲</title><description>note description</description>"
                          "<noteinfo><edittime>1770794672</edittime><datalist count='2'>"
                          "<dataitem datatype='1' dataid='a'><datadesc>正文第一段</datadesc></dataitem>"
                          "<dataitem datatype='2' dataid='b'><datasize>1234</datasize></dataitem>"
@@ -522,28 +523,28 @@ class TestSnsCardParsing(unittest.TestCase):
     def test_search_text_covers_card_fields(self):
         """卡片动态的 contentDesc 常为空，搜索必须能命中标题/歌手/昵称。"""
         music = sns.parse_timeline(self._wrap(
-            "42", "<title>让风告诉你</title>"
-                  "<musicShareItem><mvSingerName>花玲</mvSingerName>"
-                  "<mvAlbumName>让风告诉你</mvAlbumName></musicShareItem>"))
+            "42", "<title>占位歌曲甲</title>"
+                  "<musicShareItem><mvSingerName>占位歌手甲</mvSingerName>"
+                  "<mvAlbumName>占位歌曲甲</mvAlbumName></musicShareItem>"))
         self.assertEqual(music["content_desc"], "")
-        self.assertIn("让风告诉你", sns.search_text(music))
-        self.assertIn("花玲", sns.search_text(music))
+        self.assertIn("占位歌曲甲", sns.search_text(music))
+        self.assertIn("占位歌手甲", sns.search_text(music))
 
         finder = sns.parse_timeline(self._wrap(
-            "28", "<finderFeed><nickname>小唐老师</nickname>"
+            "28", "<finderFeed><nickname>占位主播乙</nickname>"
                   "<mediaList><media><mediaType>4</mediaType>"
                   "<coverUrl>http://h/cover</coverUrl></media></mediaList></finderFeed>"))
-        self.assertIn("小唐老师", sns.search_text(finder))
+        self.assertIn("占位主播乙", sns.search_text(finder))
 
     def test_search_text_covers_media_description_and_location(self):
         """实测 type 54 的正文只存在于 mediaList/media/description；位置也可搜。"""
         xml = self._wrap("54", "<mediaList><media><type>2</type>"
-                              "<description>我去这个入特别师</description>"
+                              "<description>占位正文甲</description>"
                               "<url>http://h/mmsns/a/0</url></media></mediaList>",
                          extra="<location latitude='31.2' longitude='121.4' poiName='外滩'/>")
         feed = sns.parse_timeline(xml)
         blob = sns.search_text(feed)
-        self.assertIn("我去这个入特别师", blob)
+        self.assertIn("占位正文甲", blob)
         self.assertIn("外滩", blob)
 
 
@@ -577,7 +578,7 @@ class TestSnsCardExport(unittest.TestCase):
         finder = ("<SnsDataItem><TimelineObject><id>2</id><username>wxid_c</username>"
                   "<createTime>1700000001</createTime><contentDesc>视频号内容</contentDesc>"
                   "<ContentObject><type>28</type><finderFeed>"
-                  "<nickname>小唐老师</nickname><mediaCount>1</mediaCount>"
+                  "<nickname>占位主播乙</nickname><mediaCount>1</mediaCount>"
                   "<mediaList><media><mediaType>4</mediaType>"
                   "<coverUrl>http://h/finder/cover</coverUrl>"
                   "<width>1080</width><height>608</height>"
@@ -590,7 +591,7 @@ class TestSnsCardExport(unittest.TestCase):
         """真实缺陷回归：卡片标题可搜（此前只搜 contentDesc）。"""
         from siwx import sns_export as E
         self._db()
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", keyword="一篇好文")
         self.assertTrue(r["ok"], r.get("error"))
         self.assertEqual(r["count"], 1)
@@ -598,15 +599,15 @@ class TestSnsCardExport(unittest.TestCase):
     def test_keyword_matches_finder_nickname(self):
         from siwx import sns_export as E
         self._db()
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
-                             export_root=self.tmp / "out", keyword="小唐老师")
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
+                             export_root=self.tmp / "out", keyword="占位主播乙")
         self.assertEqual(r["count"], 1)
 
     def test_json_card_and_comment_image(self):
         import json as _json
         from siwx import sns_export as E
         self._db()
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out")
         data = _json.loads(Path(r["file"]).read_text(encoding="utf-8"))
         posts = {p["author"]: p for p in data["posts"]}
@@ -616,25 +617,25 @@ class TestSnsCardExport(unittest.TestCase):
         self.assertEqual(link["card"]["url"], "https://mp.weixin.qq.com/s/x")
         self.assertEqual(link["location"]["name"], "外滩")
         self.assertEqual(link["comments"][0]["images"][0]["url"], "http://h/mmcomment/a/0")
-        self.assertEqual(posts["wxid_c"]["card"]["finder"]["nickname"], "小唐老师")
+        self.assertEqual(posts["wxid_c"]["card"]["finder"]["nickname"], "占位主播乙")
 
     def test_markdown_txt_html_card_blocks(self):
         from siwx import sns_export as E
         self._db()
-        md = Path(E.run_sns_export(self.db, "wxid_test", fmt="markdown",
+        md = Path(E.run_sns_export(self.db, fx.DEMO_SELF, fmt="markdown",
                                    export_root=self.tmp / "out")["file"]).read_text(encoding="utf-8")
         self.assertIn("[一篇好文](https://mp.weixin.qq.com/s/x)", md)
-        self.assertIn("📹 视频号 @小唐老师", md)
+        self.assertIn("📹 视频号 @占位主播乙", md)
         self.assertIn("📍 外滩", md)
         self.assertIn("![评论图](http://h/mmcomment/a/0)", md)
 
-        txt = Path(E.run_sns_export(self.db, "wxid_test", fmt="txt",
+        txt = Path(E.run_sns_export(self.db, fx.DEMO_SELF, fmt="txt",
                                     export_root=self.tmp / "out")["file"]).read_text(encoding="utf-8")
         self.assertIn("🔗 一篇好文", txt)
         self.assertIn("📍 外滩 中山东一路", txt)
         self.assertIn("<评论图> http://h/mmcomment/a/0", txt)
 
-        html = Path(E.run_sns_export(self.db, "wxid_test", fmt="html",
+        html = Path(E.run_sns_export(self.db, fx.DEMO_SELF, fmt="html",
                                      export_root=self.tmp / "out")["file"]).read_text(encoding="utf-8")
         self.assertIn('class="card card--link"', html)
         self.assertIn('class="card card--finder"', html)
@@ -687,31 +688,20 @@ def _make_sns_db_times(path: Path, posts):
     _make_sns_db_raw(path, posts)
 
 
-class TestSnsApi(unittest.TestCase):
-    """API 层：账号隔离、分页、边界、异步导出任务。"""
+class TestSnsApi(IsolatedRootCase):
+    """API 层：账号隔离、分页、边界、异步导出任务。
+
+    隔离统一到 tests/_base.IsolatedRootCase（此前本类只清 paths._PATH_CACHE，
+    api_chat/插件注册表的模块级单例会在 discover 全量跑时跨套件残留）。
+    """
 
     def setUp(self):
-        import tempfile
-        from siwx import paths
-        self._tmp = tempfile.TemporaryDirectory(prefix="siwx_sns_api_",
-                                                ignore_cleanup_errors=True)
-        self._old_root = os.environ.get("SIWX_ROOT")
-        os.environ["SIWX_ROOT"] = self._tmp.name
-        paths._PATH_CACHE.clear()
+        super().setUp()
         self.acc = "wxid_api_test"
-        db = Path(self._tmp.name) / "output" / self.acc / "sns" / "sns.db"
+        db = self.tmp / "output" / self.acc / "sns" / "sns.db"
         base = (1700000000 * 1000) << 23
         _make_sns_db(db, [(_to_signed64(base + 2), "wxid_a", "hello world"),
                           (_to_signed64(base + 1), "wxid_b", "第二条")])
-
-    def tearDown(self):
-        from siwx import paths
-        if self._old_root is None:
-            os.environ.pop("SIWX_ROOT", None)
-        else:
-            os.environ["SIWX_ROOT"] = self._old_root
-        paths._PATH_CACHE.clear()
-        self._tmp.cleanup()
 
     @staticmethod
     def _client():
@@ -827,7 +817,7 @@ class TestSnsApi(unittest.TestCase):
     def test_timeline_time_range_filter(self):
         """时间范围应下推成 tid 区间，并精确按秒过滤。"""
         acc = "wxid_range"
-        db = Path(self._tmp.name) / "output" / acc / "sns" / "sns.db"
+        db = self.tmp / "output" / acc / "sns" / "sns.db"
         days = [1700000000, 1700086400, 1700172800, 1700259200]      # 连续 4 天
         posts = []
         for i, ts in enumerate(days):
@@ -870,7 +860,7 @@ class TestSnsApi(unittest.TestCase):
     def test_friends_avatar_flags_and_range(self):
         """friends 返回 has_avatar / first_ts / last_ts（供头像 + 排序用）。"""
         acc = "wxid_friends"
-        acc_dir = Path(self._tmp.name) / "output" / acc
+        acc_dir = self.tmp / "output" / acc
         db = acc_dir / "sns" / "sns.db"
         t0, t1 = 1700000000, 1700086400
         posts = []
@@ -915,7 +905,7 @@ class TestSnsApi(unittest.TestCase):
     def test_timeline_keyword_matches_card_fields(self):
         """卡片标题/歌手可搜（此前只搜 contentDesc，卡片动态搜不到）。"""
         acc = "wxid_cards"
-        db = Path(self._tmp.name) / "output" / acc / "sns" / "sns.db"
+        db = self.tmp / "output" / acc / "sns" / "sns.db"
         base = (1700000000 * 1000) << 23
         link = ("<SnsDataItem><TimelineObject><id>9</id><username>wxid_a</username>"
                 "<createTime>1700000000</createTime><contentDesc></contentDesc>"
@@ -925,12 +915,12 @@ class TestSnsApi(unittest.TestCase):
         music = ("<SnsDataItem><TimelineObject><id>8</id><username>wxid_a</username>"
                  "<createTime>1700000000</createTime><contentDesc></contentDesc>"
                  "<ContentObject><type>42</type>"
-                 "<musicShareItem><mvAlbumName>让风告诉你</mvAlbumName>"
-                 "<mvSingerName>花玲</mvSingerName></musicShareItem>"
+                 "<musicShareItem><mvAlbumName>占位歌曲甲</mvAlbumName>"
+                 "<mvSingerName>占位歌手甲</mvSingerName></musicShareItem>"
                  "<mediaList/></ContentObject></TimelineObject></SnsDataItem>")
         finder = ("<SnsDataItem><TimelineObject><id>7</id><username>wxid_a</username>"
                   "<createTime>1700000000</createTime><contentDesc></contentDesc>"
-                  "<ContentObject><type>28</type><finderFeed><nickname>小唐老师</nickname>"
+                  "<ContentObject><type>28</type><finderFeed><nickname>占位主播乙</nickname>"
                   "<mediaList><media><mediaType>4</mediaType>"
                   "<coverUrl>http://h/finder/cover</coverUrl>"
                   "<url>http://h/finder/v.mp4</url>"
@@ -949,16 +939,16 @@ class TestSnsApi(unittest.TestCase):
         self.assertEqual(card["url"], "https://mp.weixin.qq.com/s/x")
         self.assertNotIn("content_url", card)
 
-        d2 = c.get(f"/api/sns/timeline?account={acc}&keyword=花玲").get_json()
+        d2 = c.get(f"/api/sns/timeline?account={acc}&keyword=占位歌手甲").get_json()
         self.assertEqual(len(d2["timeline"]), 1)
         self.assertEqual(d2["timeline"][0]["card"]["kind"], "music")
-        self.assertEqual(d2["timeline"][0]["card"]["music"]["album"], "让风告诉你")
+        self.assertEqual(d2["timeline"][0]["card"]["music"]["album"], "占位歌曲甲")
 
-        d3 = c.get(f"/api/sns/timeline?account={acc}&keyword=小唐老师").get_json()
+        d3 = c.get(f"/api/sns/timeline?account={acc}&keyword=占位主播乙").get_json()
         self.assertEqual(len(d3["timeline"]), 1)
         fc = d3["timeline"][0]["card"]
         self.assertEqual(fc["kind"], "finder")
-        self.assertEqual(fc["finder"]["nickname"], "小唐老师")
+        self.assertEqual(fc["finder"]["nickname"], "占位主播乙")
         self.assertEqual(fc["finder"]["video_url"], "http://h/finder/v.mp4")
         self.assertEqual(fc["cover"], "http://h/finder/cover")
         self.assertNotIn("cover_url", fc)
@@ -966,17 +956,17 @@ class TestSnsApi(unittest.TestCase):
         # 详情接口同样是 public 形状
         tid = d3["timeline"][0]["tid"]
         post = c.get(f"/api/sns/detail?account={acc}&tid={tid}").get_json()["post"]
-        self.assertEqual(post["card"]["finder"]["nickname"], "小唐老师")
+        self.assertEqual(post["card"]["finder"]["nickname"], "占位主播乙")
 
         # 负面用例：搜不到的词仍应为空
         d4 = c.get(f"/api/sns/timeline?account={acc}&keyword=不存在").get_json()
         self.assertEqual(len(d4["timeline"]), 0)
 
 
-class TestSnsCdnDiagnosis(unittest.TestCase):
+class TestSnsCdnDiagnosis(IsolatedRootCase):
     """CDN 拉不下来时：原因要对、要有日志、要看得见。
 
-    背景（本机 5684 条真实库实测，2026-09-30）：
+    背景（5684 条规模的样本库实测，2026-09-30）：
     * 视频 media 写成 ``<url key="0">`` + ``<enc key="929615230">``，
       旧实现把 ``"0"`` 当真密钥 → 密文 XOR 成乱码 → **100% 视频拉不下来**；
     * 视频域名上失败后又被后续 qpic 域名的 400 覆盖，报错方向全错；
@@ -1112,73 +1102,44 @@ class TestSnsCdnDiagnosis(unittest.TestCase):
                          "mp4")
 
     def test_api_media_rejects_external_and_exposes_reason(self):
-        import tempfile
+        """SIWX_ROOT 由 IsolatedRootCase 统一隔离到临时目录。"""
         import urllib.error
-        from siwx import paths
-        old = os.environ.get("SIWX_ROOT")
-        tmp = tempfile.TemporaryDirectory(prefix="siwx_sns_media_",
-                                          ignore_cleanup_errors=True)
-        os.environ["SIWX_ROOT"] = tmp.name
-        paths._PATH_CACHE.clear()
+        from siwx.server import app
+        c = app.test_client()
+        r = c.get("/api/sns/media?url=https://b23.tv/abc")
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.get_json()["reason"], "not-cdn")
+
+        # 404 的图：响应体要带原因，前端据此提示
+        def fake_fetch(url, timeout=15.0, ctx=None):
+            raise urllib.error.HTTPError(url, 404, "x", {}, None)
+
+        old_fetch = sns_cdn.fetch
+        sns_cdn.fetch = fake_fetch
         try:
-            from siwx.server import app
-            c = app.test_client()
-            r = c.get("/api/sns/media?url=https://b23.tv/abc")
-            self.assertEqual(r.status_code, 400)
-            self.assertEqual(r.get_json()["reason"], "not-cdn")
-
-            # 404 的图：响应体要带原因，前端据此提示
-            def fake_fetch(url, timeout=15.0, ctx=None):
-                raise urllib.error.HTTPError(url, 404, "x", {}, None)
-
-            old_fetch = sns_cdn.fetch
-            sns_cdn.fetch = fake_fetch
-            try:
-                r2 = c.get("/api/sns/media?url=" +
-                           "https%3A%2F%2Fshmmsns.qpic.cn%2Fmmsns%2Fa%2F0%3Ftoken%3Dt"
-                           "&key=1&account=x")
-            finally:
-                sns_cdn.fetch = old_fetch
-            self.assertEqual(r2.status_code, 404)
-            body = r2.get_json()
-            self.assertEqual(body["reason"], "http-404")
-            self.assertEqual(body["hosts_tried"], 3)
+            r2 = c.get("/api/sns/media?url=" +
+                       "https%3A%2F%2Fshmmsns.qpic.cn%2Fmmsns%2Fa%2F0%3Ftoken%3Dt"
+                       "&key=1&account=x")
         finally:
-            if old is None:
-                os.environ.pop("SIWX_ROOT", None)
-            else:
-                os.environ["SIWX_ROOT"] = old
-            paths._PATH_CACHE.clear()
-            tmp.cleanup()
+            sns_cdn.fetch = old_fetch
+        self.assertEqual(r2.status_code, 404)
+        body = r2.get_json()
+        self.assertEqual(body["reason"], "http-404")
+        self.assertEqual(body["hosts_tried"], 3)
 
 
-class TestSnsMcp(unittest.TestCase):
+class TestSnsMcp(IsolatedRootCase):
     """MCP 层：直接调用 mcp_server 的 SNS 工具处理函数（不经 HTTP）。"""
 
     def setUp(self):
-        import tempfile
-        from siwx import paths
-        self._tmp = tempfile.TemporaryDirectory(prefix="siwx_sns_mcp_",
-                                                ignore_cleanup_errors=True)
-        self._old_root = os.environ.get("SIWX_ROOT")
-        os.environ["SIWX_ROOT"] = self._tmp.name
-        paths._PATH_CACHE.clear()
+        super().setUp()
         self.acc = "wxid_mcp_test"
-        db = Path(self._tmp.name) / "output" / self.acc / "sns" / "sns.db"
+        db = self.tmp / "output" / self.acc / "sns" / "sns.db"
         base = (1700000000 * 1000) << 23
         _make_sns_db(db, [(_to_signed64(base + 2), "wxid_a", "hello world"),
                           (_to_signed64(base + 1), "wxid_b", "第二条动态"),
                           (_to_signed64(base + 3), "wxid_a", "第三条 hello again")])
         self.base = base
-
-    def tearDown(self):
-        from siwx import paths
-        if self._old_root is None:
-            os.environ.pop("SIWX_ROOT", None)
-        else:
-            os.environ["SIWX_ROOT"] = self._old_root
-        paths._PATH_CACHE.clear()
-        self._tmp.cleanup()
 
     def _tool(self, name, args):
         import json as _json
@@ -1246,7 +1207,7 @@ class TestSnsMcp(unittest.TestCase):
         import json as _json
         # 用带评论/点赞的库（复用 TestSnsInteraction 的 _EMOJI_XML）
         from siwx import paths
-        db = (Path(self._tmp.name) / "output" / "wxid_mcp_detail" / "sns" / "sns.db")
+        db = (self.tmp / "output" / "wxid_mcp_detail" / "sns" / "sns.db")
         base = (1700000000 * 1000) << 23
         _make_sns_db_raw(db, [(_to_signed64(base + 9), "wxid_a", _EMOJI_XML)])
         old_acc = self.acc

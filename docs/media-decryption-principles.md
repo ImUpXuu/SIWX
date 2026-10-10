@@ -100,12 +100,12 @@ C:\Users\<user>\AppData\Roaming\Tencent\WeChat\<n>\kvcomm\key_<code>_<...>.stati
 
 ```python
 def clean_wxid(wxid: str) -> str:
-    """去掉账号后缀：wxid_demo_1234 -> wxid_demo"""
+    """去掉账号后缀：wxid_demo_b_1234 -> wxid_demo"""
     parts = wxid.split('_')
     return '_'.join(parts[:2]) if wxid.startswith('wxid_') and len(parts) >= 3 else wxid
 
 code  = 123456789                       # 来自 kvcomm 文件名
-wxid  = clean_wxid('wxid_demo_1234')
+wxid  = clean_wxid('wxid_demo_b_1234')
 
 aes_key = MD5(f"{code}{wxid}").hexdigest()[:16].encode()   # 16 个 ASCII 字节 = AES-128 密钥
 xor_key = code & 0xFF                                      # 单字节 XOR（0xC9 为常见兜底值）

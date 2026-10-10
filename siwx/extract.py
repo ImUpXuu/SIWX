@@ -238,6 +238,13 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
         log("  1. 微信未登录 — 请先启动并登录微信")
         log("  2. 微信版本不支持 — 需要 WeChat 4.1.x (Windows) 或 4.1.80+ (macOS)")
         log("  3. 密钥已过期 — 尝试在微信中重新打开聊天后重跑")
+        if platform.system() == "Darwin":
+            # PR #27/#30：断点只在数据库连接新建时命中，且 SIP 开启时 root 也
+            # 无法 attach——这两个成因不点破，用户会反复重试而永不生效。
+            log("  4. macOS 断点窗口只在微信新建数据库连接时打开 — 完整退出")
+            log("     微信（建议 killall WeChat）后重开，并立即重跑本命令")
+            log("  5. SIP 未关闭 — 开启时 root 也无法 attach，必须 csrutil disable")
+            log("     （详见 MACOS_SUPPORT.md 注意事项）")
         from siwx.discover import find_wechat_pids
         if not find_wechat_pids():
             log("[extract] ⚠ 未检测到微信进程！请先启动微信")
@@ -438,10 +445,16 @@ def _collect_entries_by_dir(dirs) -> dict:
     return entries_by_dir
 
 
-def extract_all(log=print, use_cache=True):
-    """自动发现全部账号 → 缓存判定 → 收割补漏 → 逐账号提取。"""
+def extract_all(log=print, use_cache=True, dirs=None):
+    """自动发现全部账号 → 缓存判定 → 收割补漏 → 逐账号提取。
+
+    dirs: [(wxid, db_dir)]，显式指定账号目录（CLI --db-dir）时跳过自动发现；
+    None 保持全盘自动发现，行为不变。LLDB 等断点型策略一生只命中一次，
+    多账号机器必须能用它把捕获窗口留给目标账号。
+    """
     log = _slog.ensure_dual(log, "extract")
-    dirs = _discover(log)
+    if dirs is None:
+        dirs = _discover(log)
     if not dirs:
         return []
     entries_by_dir = _collect_entries_by_dir(dirs)

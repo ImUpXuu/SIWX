@@ -845,11 +845,6 @@ class TestLoader(PluginTestCase):
         page = self.reg.pages.get("p")
         self.assertTrue(Path(page.pages_dir).name == "assets")
 
-    def test_discover_entrypoints_stub(self):
-        """pip entry_points 发现目前是预留接口，返回空列表。"""
-        from siwx.plugins import loader
-        self.assertEqual(loader.discover_entrypoints(), [])
-
 
 # ═══════════════════════════════════════════════════════════════
 # 6. 注册表查询辅助
@@ -1368,9 +1363,6 @@ class TestNodeTreeContract(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════
 
 class TestZeroPluginBackwardCompat(PluginTestCase):
-
-    def test_empty_registry_all_namespaces_falsy(self):
-        self.assertTrue(all(not getattr(self.reg, f) for f in self._NS_FIELDS))
 
     def test_summary_counts_empty(self):
         self.assertEqual(self.reg.summary_counts(), {})

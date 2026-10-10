@@ -2,7 +2,7 @@
 
 > 目的：把朋友圈功能**已完成 / 未完成**的边界一次性写清，让你后续接入时不用重新踩坑。
 > 配套文档：`module-sns.md`（模块详解）、`sns-implementation-guide.md`（推进记录）、`sns-research-2026-09-29.md`（实验原始数据）。
-> 数据来源：本机 `output/wxid_redacted_a_6409/sns/sns.db`（5684 条动态）实测统计。
+> 数据来源：本机 `output/wxid_redacted_a_9001/sns/sns.db`（5684 条动态）实测统计。
 
 ---
 
@@ -87,7 +87,7 @@ PARSE_FAIL      17 条
 
 | 字段 | 路径 | 含义 |
 |---|---|---|
-| 视频号 ID | `.//finderUsername` | 如 `25984981814268412@openim` |
+| 视频号 ID | `.//finderUsername` | 如 `25900000000000001@openim` |
 | 昵称 | `.//finderNickname` | 视频号显示名 |
 | feed ID | `.//feedId` | 视频唯一 ID |
 | 视频 | `<finderFeed><mediaList>` | **独立**的视频媒体，路径与主图 mediaList 不同 |
