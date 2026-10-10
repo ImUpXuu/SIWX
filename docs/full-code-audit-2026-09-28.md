@@ -410,19 +410,19 @@ my_base = account.split("_6")[0] if "_6" in account else account
 | 场景 | 结果 |
 |---|---|
 | `wxid_redacted_a_9001`（本机实例，真实 uin 尾部已合成化） | → `wxid_redacted_a` ✅ 正常 |
-| `wxid_abc_7102`（uin 不以 6 开头） | → `wxid_abc_7102`（未剥离）❌ `is_me` 判定失效 |
+| `wxid_abc_9003`（uin 不以 6 开头） | → `wxid_abc_9003`（未剥离）❌ `is_me` 判定失效 |
 | `wxid_6xyz_9001`（wxid 本身含 `_6`） | → `wxid` ❌ 严重截断 |
 
 **`is_me` 失效的后果**：自己发送的消息不会被标记为「我发的」，前端会把它渲染成对方消息（头像、气泡方向、`isSend` 字段全部错误），导出产物中的 `isSend` 也会错。
 
 **为什么这是真实缺陷而非理论风险**：项目**已经存在**更通用的实现，却未被复用：
 
-| 位置 | 规则 | `wxid_owner_1234` 结果 |
+| 位置 | 规则 | `wxid_demo_b_1234` 结果 |
 |---|---|---|
-| `media.py:73` `clean_wxid()` | 前缀 `wxid_` 且 ≥3 段 → 取前两段 | `wxid_owner` ✅ |
-| `strategies/mmkv.py:22` `clean_wxid()` | 同上 | `wxid_owner` ✅ |
-| `ui/pages/chat.js:157` `ownerUsername()` | `/_\d+$/` 剥离尾部数字 | `wxid_owner` ✅ |
-| **`api_chat.py` / `export_stream.py` 的 `is_me`** | **`split("_6")[0]`** | **`wxid_owner_1234`** ❌ |
+| `media.py:73` `clean_wxid()` | 前缀 `wxid_` 且 ≥3 段 → 取前两段 | `wxid_demo_b` ✅ |
+| `strategies/mmkv.py:22` `clean_wxid()` | 同上 | `wxid_demo_b` ✅ |
+| `ui/pages/chat.js:157` `ownerUsername()` | `/_\d+$/` 剥离尾部数字 | `wxid_demo_b` ✅ |
+| **`api_chat.py` / `export_stream.py` 的 `is_me`** | **`split("_6")[0]`** | **`wxid_demo_b_1234`** ❌ |
 
 `api_chat.py:858-861` 的头像分支**已经**调用 `media.clean_wxid(account)` —— 说明作者明确知道目录名需要还原，但**只在头像路径做了**，消息归属路径漏掉了。
 
