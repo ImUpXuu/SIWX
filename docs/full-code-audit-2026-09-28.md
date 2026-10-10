@@ -417,12 +417,12 @@ my_base = account.split("_6")[0] if "_6" in account else account
 
 **为什么这是真实缺陷而非理论风险**：项目**已经存在**更通用的实现，却未被复用：
 
-| 位置 | 规则 | `wxid_demo_b_1234` 结果 |
+| 位置 | 规则 | `wxid_contact_1234` 结果 |
 |---|---|---|
-| `media.py:73` `clean_wxid()` | 前缀 `wxid_` 且 ≥3 段 → 取前两段 | `wxid_demo_b` ✅ |
-| `strategies/mmkv.py:22` `clean_wxid()` | 同上 | `wxid_demo_b` ✅ |
-| `ui/pages/chat.js:157` `ownerUsername()` | `/_\d+$/` 剥离尾部数字 | `wxid_demo_b` ✅ |
-| **`api_chat.py` / `export_stream.py` 的 `is_me`** | **`split("_6")[0]`** | **`wxid_demo_b_1234`** ❌ |
+| `media.py:73` `clean_wxid()` | 前缀 `wxid_` 且 ≥3 段 → 取前两段 | `wxid_contact` ✅ |
+| `strategies/mmkv.py:22` `clean_wxid()` | 同上 | `wxid_contact` ✅ |
+| `ui/pages/chat.js:157` `ownerUsername()` | `/_\d+$/` 剥离尾部数字 | `wxid_contact` ✅ |
+| **`api_chat.py` / `export_stream.py` 的 `is_me`** | **`split("_6")[0]`** | **`wxid_contact_1234`** ❌ |
 
 `api_chat.py:858-861` 的头像分支**已经**调用 `media.clean_wxid(account)` —— 说明作者明确知道目录名需要还原，但**只在头像路径做了**，消息归属路径漏掉了。
 
