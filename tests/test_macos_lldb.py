@@ -379,5 +379,63 @@ class RealLldbApiTest(unittest.TestCase):
                          "SBValueList.GetRegisterByName 不存在，旧代码依赖它必然失败")
 
 
+class VersionGateTest(unittest.TestCase):
+    """P1-4（issue #30）：macOS 微信版本前置判定——<4.1.80 直接给明确结论，
+    不再让用户在注定 0/N 的 attach 循环里反复重试。"""
+
+    def _ctx(self):
+        logs = []
+        return {"page1_by_salt": {}, "key_map": {}, "attrib": {},
+                "log": logs.append, "dbg": logs.append}, logs
+
+    def test_version_tuple(self):
+        from siwx.strategies.macos_lldb import _version_tuple
+        self.assertEqual(_version_tuple("4.1.80"), (4, 1, 80))
+        self.assertEqual(_version_tuple("4.1.80.17"), (4, 1, 80))
+        self.assertLess(_version_tuple("4.0.3"), (4, 1, 80))
+        self.assertGreaterEqual(_version_tuple("4.2.0"), (4, 1, 80))
+
+    def test_below_4180_short_circuits_before_lldb(self):
+        from unittest import mock
+        from siwx.strategies import macos_lldb
+        ctx, logs = self._ctx()
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(macos_lldb, "_wechat_bundle_version",
+                               return_value="4.0.3"), \
+             mock.patch.object(macos_lldb.subprocess, "run",
+                               side_effect=AssertionError("版本拦截前不应触达 lldb")):
+            rc = macos_lldb.extract(ctx)
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("低于 4.1.80" in m for m in logs))
+
+    def test_unknown_version_does_not_block(self):
+        """非标准安装路径读不到版本号时只 debug 记录，不拦路。"""
+        from unittest import mock
+        from siwx.strategies import macos_lldb
+        ctx, logs = self._ctx()
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(macos_lldb, "_wechat_bundle_version",
+                               return_value=None), \
+             mock.patch.object(macos_lldb.subprocess, "run",
+                               side_effect=FileNotFoundError()):
+            rc = macos_lldb.extract(ctx)
+        self.assertEqual(rc, 0)
+        self.assertFalse(any("低于 4.1.80" in m for m in logs))
+
+    def test_current_version_proceeds_to_lldb_check(self):
+        from unittest import mock
+        from siwx.strategies import macos_lldb
+        ctx, logs = self._ctx()
+        with mock.patch.object(sys, "platform", "darwin"), \
+             mock.patch.object(macos_lldb, "_wechat_bundle_version",
+                               return_value="4.1.82"), \
+             mock.patch.object(macos_lldb.subprocess, "run",
+                               side_effect=FileNotFoundError()):
+            rc = macos_lldb.extract(ctx)
+        self.assertEqual(rc, 0)
+        self.assertTrue(any("微信版本: 4.1.82" in m for m in logs))
+        self.assertTrue(any("lldb 未安装" in m for m in logs))
+
+
 if __name__ == "__main__":
     unittest.main()
