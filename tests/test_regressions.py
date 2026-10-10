@@ -2097,16 +2097,16 @@ class TestOwnerBase(TempRootCase):
     """is_me 依赖"从账号目录名 wxid_xxx_<uin> 推断本人原始 wxid"。
     原实现 split("_6")[0] 赌 uin 以 6 开头、且是任意子串匹配：
     uin 不以 6 开头时 is_me 全灭；wxid 本体含 6 开头段（如
-    wxid_6abc_6409）时直接得到 "wxid"。也不能改用 media.clean_wxid()
+    wxid_6abc_6001）时直接得到 "wxid"。也不能改用 media.clean_wxid()
     ——它对 wxid_a_b_1234 会切错，且语义被 MMKV 密钥派生依赖。"""
 
     def test_owner_base_matrix(self):
         from siwx.api_chat import owner_base
         cases = [
-            ("wxid_abc_6409", "wxid_abc"),      # 常规：uin 以 6 开头
+            ("wxid_abc_6001", "wxid_abc"),      # 常规：uin 以 6 开头
             ("wxid_abc_123456", "wxid_abc"),    # uin 不以 6 开头（旧实现切错）
             ("wxid_a_b_1234", "wxid_a_b"),      # wxid 本体含下划线
-            ("wxid_6abc_6409", "wxid_6abc"),    # wxid 本体含 6 开头段
+            ("wxid_6abc_6001", "wxid_6abc"),    # wxid 本体含 6 开头段
             ("my_custom_id", "my_custom_id"),   # 自定义账号 ID（无数字后缀）
             ("wxid_abc", "wxid_abc"),           # 无 uin 后缀
             ("", ""),
@@ -3025,7 +3025,7 @@ class TestHtmlMapsEndToEnd(TempRootCase):
 # ── 29. 本人身份判定（微信4.x 设备后缀账号名）+ 正向翻页 ────────
 
 class TestSelfIdentity(TempRootCase):
-    """is_me 判定：账号目录名带十六进制设备后缀（wxid_xxx_d29b）时，
+    """is_me 判定：账号目录名带十六进制设备后缀（wxid_xxx_d901）时，
     本人消息（发送者为不带后缀的原始 wxid）不得被错判为对方。
     实测案例：743 条本人文本落左侧、15 条通话错落右侧。"""
 
