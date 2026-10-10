@@ -409,6 +409,75 @@ class TestExport(TempRootCase):
         self.assertTrue(all(Path(f).is_file() for f in sess["files"]))
 
 
+# ── 5.1 动画表情导出：CDN 下载兜底 + 渲染器 XML 实体解码 ─────────
+
+class TestStickerExport(TempRootCase):
+    """47 消息本地缓存解不开（微信私有封装），导出端按 cdnurl 下载兜底；
+    渲染器侧 raw XML 的 &amp; 必须解码，否则表情 URL 带 &amp; 请求 → 400。"""
+
+    GIF = b"GIF89a" + b"\x00" * 16
+
+    def test_collect_metadata_gathers_sticker_urls(self):
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        db = acc / "message" / "message_0.db"
+        conn = sqlite3.connect(db)
+        raw = ('<msg><emoji md5="a" cdnurl="http://wxapp.tc.qq.com/x?m=1&amp;filekey=2" '
+               'width="240" height="240" /></msg>').encode("utf-8")
+        conn.execute("INSERT INTO " + _msg_table(chat) +
+                     " VALUES (13, 1013, 47, 1700000012, 0, 1, ?, NULL)", (raw,))
+        conn.commit(); conn.close()
+        from siwx.exporter import _collect_metadata
+        res = _collect_metadata(acc, chat, None, None, account, None)
+        stickers = res[6]
+        self.assertEqual(len(stickers), 1)
+        md5, bm, lid, ts, url = stickers[0]
+        self.assertEqual((lid, ts), (13, 1700000012))
+        # Python 端解析已把 &amp; 还原为 &；渲染器侧同样要解码（模板已含 xmlDec）
+        self.assertEqual(url, "http://wxapp.tc.qq.com/x?m=1&filekey=2")
+
+    def test_sticker_download_fallback(self):
+        from siwx.exporter import _export_sticker_media, _media_key
+        stickers = [
+            ("a" * 32, "", 1, 1700000001, "http://wxapp.tc.qq.com/s1"),
+            ("b" * 32, "", 2, 1700000002, "http://wxapp.tc.qq.com/s2"),
+            ("c" * 32, "", 3, 1700000003, "http://evil.example.com/s3"),
+        ]
+        media_map = {_media_key("b" * 32, "", 2, 1700000002): "media/already.jpg"}
+
+        def fake_fetch(spec, timeout=None, **kw):
+            self.assertEqual(spec["url"], "http://wxapp.tc.qq.com/s1")
+            return {"ok": True, "data": self.GIF, "ext": "gif"}
+
+        dest = self.tmp / "media"
+        with mock.patch.object(exporter.sns_cdn, "fetch_emoji", fake_fetch):
+            ok = _export_sticker_media(dest, stickers, media_map)
+        self.assertEqual(ok, 1)
+        f = dest / ("emoji_0000_" + "a" * 12 + ".gif")
+        self.assertTrue(f.is_file())
+        self.assertEqual(f.read_bytes(), self.GIF)
+        # 白名单外域名跳过、已有媒体的跳过
+        self.assertEqual(len(list(dest.iterdir())), 1)
+        self.assertNotIn(_media_key("c" * 32, "", 3, 1700000003), media_map)
+
+    def test_sticker_download_failure_recorded(self):
+        from siwx.exporter import _export_sticker_media
+        stickers = [("d" * 32, "", 4, 1700000004, "http://wxapp.tc.qq.com/s4")]
+        with mock.patch.object(exporter.sns_cdn, "fetch_emoji",
+                               lambda spec, **kw: {"ok": False, "error": "下载失败"}):
+            ok = _export_sticker_media(self.tmp / "media", stickers, {})
+        self.assertEqual(ok, 0)
+        self.assertFalse((self.tmp / "media").exists() and
+                         any((self.tmp / "media").iterdir()))
+
+    def test_renderer_decodes_xml_entities(self):
+        """渲染器 xmlAttr/xmlVal 必须解码实体并容忍 'attr = value' 空格格式。"""
+        tpl = (Path("siwx") / "templates" / "default" / "renderer.js") \
+            .read_text(encoding="utf-8")
+        self.assertIn("function xmlDec", tpl)
+        self.assertIn("\\\\s*=\\\\s*", tpl)
+        self.assertIn("xmlDec(m[1])", tpl)
+
+
 # ── 6. 媒体：扩展名 + chat/ts 透传 ──────────────────────────────
 
 class TestVoiceMedia(TempRootCase):

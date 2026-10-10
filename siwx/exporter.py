@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from siwx import logger, media, voice
+from siwx import logger, media, sns_cdn, voice
 from siwx import paths as _paths
 from siwx.api_chat import (
     COMPOSITE_49_LABELS, FALLBACK_LABEL, _contact_names, has_refermsg,
@@ -111,6 +111,7 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
     senders = set()
     images = []       # (md5, bubble_md5, localId, ts) 引用
     voices = []       # (localId, serverId, ts) 引用
+    stickers = []     # (md5, bubble_md5, localId, ts, cdnurl) 引用
     count = 0
     first_ts = last_ts = 0
     for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
@@ -125,7 +126,12 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
                            msg["localId"], ts))
         if msg.get("localType") == 34:
             voices.append((msg["localId"], msg.get("platformMessageId") or "", ts))
-    return count, first_ts, last_ts, senders, images, voices
+        if msg.get("localType") == 47:
+            url = (msg.get("sticker") or {}).get("url") or ""
+            if url:
+                stickers.append((msg.get("md5"), msg.get("bubbleMd5"),
+                                 msg["localId"], ts, url))
+    return count, first_ts, last_ts, senders, images, voices, stickers
 
 
 def _media_key(md5, bubble_md5, local_id, ts) -> tuple:
@@ -343,6 +349,46 @@ def _try_export_voice(acc_dir, chat, local_id, svr_id, ts, dst_base):
         return None, f"{type(e).__name__}: {e}"
 
 
+# 本地 Emoticon 缓存是微信私有封装解不开（api_chat.py /media/sticker 同结论），
+# 本地图片管线解不出 47 消息时按消息 XML 的 cdnurl 下载明文表情落盘。
+# 校验口径与 /media/sticker 一致：域名白名单 + 大小上限 + 图像签名。
+_STICKER_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _export_sticker_media(dest, stickers, media_map, progress=None):
+    """CDN 下载兜底导出动画表情，写好的映射并入 media_map。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    todo = [(md5, bm, lid, ts, url) for md5, bm, lid, ts, url in stickers
+            if url and sns_cdn.is_wechat_cdn(url)
+            and _media_key(md5, bm, lid, ts) not in media_map]
+    if not todo:
+        return 0
+    failures = []
+    ok = 0
+    for i, (md5, bm, lid, ts, url) in enumerate(todo):
+        try:
+            r = sns_cdn.fetch_emoji({"url": url}, timeout=15.0)
+        except Exception as e:  # noqa: BLE001
+            r = {"ok": False, "data": None, "ext": None,
+                 "error": f"{type(e).__name__}: {e}"}
+        if r.get("ok") and r.get("data") and len(r["data"]) <= _STICKER_MAX_BYTES:
+            dst = dest / f"emoji_{i:04d}_{(md5 or 'stk')[:12]}.{r['ext']}"
+            try:
+                dst.write_bytes(r["data"])
+                media_map[_media_key(md5, bm, lid, ts)] = f"media/{dst.name}"
+                ok += 1
+            except OSError as e:
+                failures.append((md5 or bm or "", lid, ts,
+                                 f"{type(e).__name__}: {e}"))
+        else:
+            failures.append((md5 or bm or "", lid, ts,
+                             r.get("error") or "表情下载失败"))
+        if (i + 1) % 10 == 0 and progress:
+            progress(0, f"表情 {i + 1}/{len(todo)}")
+    _log_media_failures("表情", failures, len(todo))
+    return ok
+
+
 class _ExportStats:
     """导出完整性统计（审计 G2）：解析成功/兜底计数、媒体回填计数。
 
@@ -426,12 +472,13 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
     # ── 第一遍：轻量采集元数据 ─────────────────────────────
     progress(3, "扫描消息元数据…")
-    count, first_ts, last_ts, senders, images, voices = _collect_metadata(
+    count, first_ts, last_ts, senders, images, voices, stickers = _collect_metadata(
         acc_out_dir, chat, start_ts, end_ts, account, names)
     progress(10, f"共 {count} 条消息，{len(images)} 张图片，{len(voices)} 条语音")
     logger.detailed(
         "export",
         f"扫描: msgs={count} images={len(images)} voices={len(voices)} "
+        f"stickers={len(stickers)} "
         f"senders={len(senders)} range=[{first_ts},{last_ts}]")
 
     display = display or names.get(chat, chat) or chat
@@ -464,11 +511,12 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         stats_ava = len(avatar_map)
         progress(30, f"头像 {stats_ava}/{len(senders)}")
 
-    # ── 媒体（图片并行解密，语音优先转 WAV）────────────────────────
+    # ── 媒体（图片并行解密，语音优先转 WAV，表情 CDN 下载兜底）──────────
     stats_media = 0
     stats_voice = 0
+    stats_sticker = 0
     media_map = {}
-    if (want_media and images) or (want_voice and voices):
+    if (want_media and (images or stickers)) or (want_voice and voices):
         media_dest = export_dir / "media"
         img_total = len(images) if want_media else 0
         voice_total = len(voices) if want_voice else 0
@@ -484,12 +532,18 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                                             media_dest, progress)
             media_map.update(voice_map)
             stats_voice = len(voice_map)
+        if want_media and stickers:
+            progress(65, f"下载表情（{len(stickers)} 个）…")
+            stats_sticker = _export_sticker_media(media_dest, stickers,
+                                                  media_map, progress)
         progress(70, f"媒体处理完成: 图片 {stats_media}/{img_total}，"
-                     f"语音 {stats_voice}/{voice_total}")
+                     f"语音 {stats_voice}/{voice_total}，"
+                     f"表情 {stats_sticker}/{len(stickers) if want_media else 0}")
         logger.detailed(
             "export",
             f"媒体完成 img={stats_media}/{img_total} "
-            f"voice={stats_voice}/{voice_total}")
+            f"voice={stats_voice}/{voice_total} "
+            f"sticker={stats_sticker}/{len(stickers) if want_media else 0}")
 
     # ── 第二遍：流式写出（fmt 可传列表，一次写出多种格式）──
     # 扫描/头像/媒体只做一次；每种格式各自重放 message_stream（DB 重查
@@ -575,6 +629,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             "images_ok": stats_media,
             "voices_requested": len(voices) if want_voice else 0,
             "voices_ok": stats_voice,
+            "stickers_requested": len(stickers) if want_media else 0,
+            "stickers_ok": stats_sticker,
         },
         "avatar_count": stats_ava,
     }
