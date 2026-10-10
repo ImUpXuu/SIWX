@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
 
 from siwx import sns, sns_cdn, sns_isaac64
 from tests._base import IsolatedRootCase
+from tests import fixtures as fx
 
 
 class TestSnsPrimitives(unittest.TestCase):
@@ -192,7 +193,7 @@ class TestSnsExport(unittest.TestCase):
         for fmt, suffix in (("json", ".json"), ("markdown", ".md"),
                             ("txt", ".txt"), ("html", ".html")):
             with self.subTest(fmt=fmt):
-                r = E.run_sns_export(self.db, "wxid_test", fmt=fmt,
+                r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt=fmt,
                                      export_root=self.tmp / "out")
                 self.assertTrue(r["ok"], r.get("error"))
                 self.assertEqual(r["count"], 2)
@@ -203,26 +204,26 @@ class TestSnsExport(unittest.TestCase):
 
     def test_export_keyword_filter(self):
         from siwx import sns_export as E
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", keyword="world")
         self.assertEqual(r["count"], 1)
 
     def test_export_author_filter(self):
         from siwx import sns_export as E
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", usernames=["wxid_a"])
         self.assertEqual(r["count"], 1)
 
     def test_export_rejects_unknown_format(self):
         from siwx import sns_export as E
-        r = E.run_sns_export(self.db, "wxid_test", fmt="yaml",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="yaml",
                              export_root=self.tmp / "out")
         self.assertFalse(r["ok"])
 
     def test_export_empty_result(self):
         """筛选后没有动态 = 空结果成功（旧契约 ok=False 会被 UI 渲染成红色"导出失败"）。"""
         from siwx import sns_export as E
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", keyword="不存在的内容")
         self.assertTrue(r["ok"])
         self.assertTrue(r["empty"])
@@ -590,7 +591,7 @@ class TestSnsCardExport(unittest.TestCase):
         """真实缺陷回归：卡片标题可搜（此前只搜 contentDesc）。"""
         from siwx import sns_export as E
         self._db()
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", keyword="一篇好文")
         self.assertTrue(r["ok"], r.get("error"))
         self.assertEqual(r["count"], 1)
@@ -598,7 +599,7 @@ class TestSnsCardExport(unittest.TestCase):
     def test_keyword_matches_finder_nickname(self):
         from siwx import sns_export as E
         self._db()
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out", keyword="占位主播乙")
         self.assertEqual(r["count"], 1)
 
@@ -606,7 +607,7 @@ class TestSnsCardExport(unittest.TestCase):
         import json as _json
         from siwx import sns_export as E
         self._db()
-        r = E.run_sns_export(self.db, "wxid_test", fmt="json",
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="json",
                              export_root=self.tmp / "out")
         data = _json.loads(Path(r["file"]).read_text(encoding="utf-8"))
         posts = {p["author"]: p for p in data["posts"]}
@@ -621,20 +622,20 @@ class TestSnsCardExport(unittest.TestCase):
     def test_markdown_txt_html_card_blocks(self):
         from siwx import sns_export as E
         self._db()
-        md = Path(E.run_sns_export(self.db, "wxid_test", fmt="markdown",
+        md = Path(E.run_sns_export(self.db, fx.DEMO_SELF, fmt="markdown",
                                    export_root=self.tmp / "out")["file"]).read_text(encoding="utf-8")
         self.assertIn("[一篇好文](https://mp.weixin.qq.com/s/x)", md)
         self.assertIn("📹 视频号 @占位主播乙", md)
         self.assertIn("📍 外滩", md)
         self.assertIn("![评论图](http://h/mmcomment/a/0)", md)
 
-        txt = Path(E.run_sns_export(self.db, "wxid_test", fmt="txt",
+        txt = Path(E.run_sns_export(self.db, fx.DEMO_SELF, fmt="txt",
                                     export_root=self.tmp / "out")["file"]).read_text(encoding="utf-8")
         self.assertIn("🔗 一篇好文", txt)
         self.assertIn("📍 外滩 中山东一路", txt)
         self.assertIn("<评论图> http://h/mmcomment/a/0", txt)
 
-        html = Path(E.run_sns_export(self.db, "wxid_test", fmt="html",
+        html = Path(E.run_sns_export(self.db, fx.DEMO_SELF, fmt="html",
                                      export_root=self.tmp / "out")["file"]).read_text(encoding="utf-8")
         self.assertIn('class="card card--link"', html)
         self.assertIn('class="card card--finder"', html)

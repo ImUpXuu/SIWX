@@ -43,6 +43,7 @@ os.environ["SIWX_NO_PLUGINS"] = "1"
 from siwx import api_chat, exporter
 from siwx.exporter import _safe_name
 from tests._base import IsolatedRootCase
+from tests import fixtures as fx
 
 
 # ── 合成数据构造 ────────────────────────────────────────────────
@@ -90,7 +91,7 @@ def make_empty_shard(path: Path):
     return path
 
 
-def make_account(root: Path, account="wxid_test", chat="wxid_friend",
+def make_account(root: Path, account=fx.DEMO_SELF, chat=fx.DEMO_IDS[0],
                  n_texts=12, include_images=False):
     """构造一个最小可用的解密产物目录。"""
     acc = root / "output" / account
@@ -106,7 +107,7 @@ def make_account(root: Path, account="wxid_test", chat="wxid_friend",
     c = sqlite3.connect(acc / "contact" / "contact.db")
     c.execute("CREATE TABLE contact (username TEXT, remark TEXT, "
               "nick_name TEXT, alias TEXT)")
-    c.execute("INSERT INTO contact VALUES (?,?,?,?)", (chat, "测试好友", "", ""))
+    c.execute("INSERT INTO contact VALUES (?,?,?,?)", (chat, "联系人B", "", ""))
     c.commit()
     c.close()
 
@@ -138,8 +139,8 @@ class TestSafeName(unittest.TestCase):
 
     def test_keeps_contact_name(self):
         # 修复前：任何输入都返回 "_"
-        self.assertEqual(_safe_name("示例班级群（占位）"), "示例班级群（占位）")
-        self.assertEqual(_safe_name("示例老师甲"), "示例老师甲")
+        self.assertEqual(_safe_name("群聊A（占位）"), "群聊A（占位）")
+        self.assertEqual(_safe_name("联系人C"), "联系人C")
         self.assertEqual(_safe_name("文件传输助手"), "文件传输助手")
 
     def test_replaces_illegal_chars(self):
@@ -270,7 +271,7 @@ class TestMessageStream(TempRootCase):
         ts = [m["createTime"] for m in msgs]
         self.assertEqual(ts, sorted(ts), "必须按时间正序")
         self.assertEqual(msgs[0]["content"], "第 0 条消息")
-        self.assertEqual(msgs[0]["senderDisplayName"], "测试好友")
+        self.assertEqual(msgs[0]["senderDisplayName"], "联系人B")
 
     def test_count_matches_stream(self):
         acc, account, chat = make_account(self.tmp, n_texts=7)
@@ -627,7 +628,7 @@ class TestMediaExport(TempRootCase):
         try:
             ex.voice.transcode_voice = lambda data, target="wav": (
                 b"RIFFxxxxWAVEfmt ", {"format": "wav", "mimetype": "audio/wav", "ext": "wav", "engine": "fake"})
-            res = ex.run_export(self.acc, self.account, self.chat, "测试好友",
+            res = ex.run_export(self.acc, self.account, self.chat, "联系人B",
                                 fmt="html", want_media=False, want_voice=True,
                                 want_avatars=False,
                                 export_root=self.tmp / "exports", pack="none")
@@ -647,7 +648,7 @@ class TestMediaExport(TempRootCase):
                 b"RIFFxxxxWAVEfmt ", {"format": "wav", "mimetype": "audio/wav", "ext": "wav", "engine": "fake"})
             for fmt in ("json", "html", "txt", "csv", "markdown", "toml", "sqlite", "xlsx"):
                 with self.subTest(fmt=fmt):
-                    res = ex.run_export(self.acc, self.account, self.chat, "测试好友",
+                    res = ex.run_export(self.acc, self.account, self.chat, "联系人B",
                                         fmt=fmt, want_media=False, want_voice=True,
                                         want_avatars=False, export_root=self.tmp / "voice_formats",
                                         folder_name=f"voice_{fmt}", pack="none")
@@ -714,7 +715,7 @@ class TestStatsApi(TempRootCase):
     """聊天统计：跨分片聚合、类型分布、时间维度、缓存与过滤。"""
 
     @staticmethod
-    def _make_stats_account(root: Path, account="wxid_stats"):
+    def _make_stats_account(root: Path, account="wxid_demo_a"):
         """构造含多分片、多类型、多发送者的统计样本。"""
         acc = root / "output" / account
         msg_dir = acc / "message"
@@ -741,13 +742,13 @@ class TestStatsApi(TempRootCase):
             conn.close()
 
         # 分片 0：文本 + 图片，发送者 1
-        shard("message_0.db", "wxid_a",
+        shard("message_0.db", "wxid_demo_b",
               [(1, base, 1), (1, base + 3600, 1), (3, base + 7200, 1)])
         # 分片 1：表情 + 语音，发送者 2
-        shard("message_1.db", "wxid_b",
+        shard("message_1.db", "wxid_demo_c",
               [(47, base + 100, 2), (34, base + 200, 2)])
         # 分片 2：系统消息 + 一年前的文本
-        shard("message_2.db", "wxid_c",
+        shard("message_2.db", "wxid_demo_d",
               [(10000, base + 300, 0), (1, base - 400 * 86400, 1)])
 
         # 三个不同会话 → chat_count 应为 3；联系人库用于验证排行显示昵称。
@@ -756,11 +757,11 @@ class TestStatsApi(TempRootCase):
         c.execute("CREATE TABLE contact (username TEXT, remark TEXT, nick_name TEXT, "
                   "alias TEXT, verify_flag INTEGER)")
         c.executemany("INSERT INTO contact VALUES (?,?,?,?,?)", [
-            ("wxid_a", "好友A", "", "", 0),
-            ("wxid_b", "", "好友B", "", 0),
-            ("wxid_c", "", "好友C", "", 0),
-            ("gh_news", "", "公众号", "news_alias", 1053),
-            ("group@chatroom", "", "群聊", "", 0),
+            ("wxid_demo_b", "联系人B", "", "", 0),
+            ("wxid_demo_c", "", "联系人C", "", 0),
+            ("wxid_demo_d", "", "联系人D", "", 0),
+            ("gh_demo01", "", "公众号A", "news_alias", 1053),
+            ("demogroup01@chatroom", "", "群聊A", "", 0),
         ])
         c.commit()
         c.close()
@@ -769,7 +770,7 @@ class TestStatsApi(TempRootCase):
     def test_overview_totals_and_types(self):
         self._make_stats_account(self.tmp)
         from siwx.server import app
-        r = app.test_client().get("/api/stats/overview?account=wxid_stats")
+        r = app.test_client().get("/api/stats/overview?account=wxid_demo_a")
         self.assertEqual(r.status_code, 200)
         d = r.get_json()
         self.assertEqual(d["total"], 7)
@@ -788,7 +789,7 @@ class TestStatsApi(TempRootCase):
     def test_hour_and_weekday_histograms(self):
         self._make_stats_account(self.tmp)
         from siwx.server import app
-        d = app.test_client().get("/api/stats/overview?account=wxid_stats").get_json()
+        d = app.test_client().get("/api/stats/overview?account=wxid_demo_a").get_json()
         self.assertEqual(len(d["by_hour"]), 24)
         self.assertEqual(len(d["by_weekday"]), 7)
         # 直方图总量应等于消息总数（每条消息恰好落进一个小格）
@@ -798,7 +799,7 @@ class TestStatsApi(TempRootCase):
     def test_month_series_spans_multiple_months(self):
         self._make_stats_account(self.tmp)
         from siwx.server import app
-        d = app.test_client().get("/api/stats/overview?account=wxid_stats").get_json()
+        d = app.test_client().get("/api/stats/overview?account=wxid_demo_a").get_json()
         # 样本含一年前的消息 → 至少两个不同月份
         self.assertGreaterEqual(len(d["by_month"]), 2)
         self.assertEqual(sum(m["count"] for m in d["by_month"]), d["total"])
@@ -821,28 +822,28 @@ class TestStatsApi(TempRootCase):
             conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (chat,))
             conn.commit()
             conn.close()
-        add_shard("message_3.db", "group@chatroom", 20)
-        add_shard("message_4.db", "gh_news", 30)
+        add_shard("message_3.db", "demogroup01@chatroom", 20)
+        add_shard("message_4.db", "gh_demo01", 30)
 
         from siwx import stats
         stats.clear_cache()
         from siwx.server import app
-        d = app.test_client().get("/api/stats/overview?account=wxid_stats&refresh=1").get_json()
+        d = app.test_client().get("/api/stats/overview?account=wxid_demo_a&refresh=1").get_json()
         top = {s["wxid"]: s for s in d["top_senders"]}
-        self.assertNotIn("group@chatroom", top)
-        self.assertNotIn("gh_news", top)
+        self.assertNotIn("demogroup01@chatroom", top)
+        self.assertNotIn("gh_demo01", top)
         # 排行按私聊会话聚合，且展示联系人备注/昵称。
-        self.assertEqual(top["wxid_a"]["count"], 3)
-        self.assertEqual(top["wxid_a"]["name"], "好友A")
-        self.assertEqual(top["wxid_b"]["name"], "好友B")
+        self.assertEqual(top["wxid_demo_b"]["count"], 3)
+        self.assertEqual(top["wxid_demo_b"]["name"], "联系人B")
+        self.assertEqual(top["wxid_demo_c"]["name"], "联系人C")
 
     def test_date_filter_narrows_all_statistics(self):
         self._make_stats_account(self.tmp)
         from siwx.server import app
         c = app.test_client()
-        full = c.get("/api/stats/overview?account=wxid_stats").get_json()
+        full = c.get("/api/stats/overview?account=wxid_demo_a").get_json()
         filtered = c.get(
-            "/api/stats/overview?account=wxid_stats&start=2023-11-15&end=2023-11-15"
+            "/api/stats/overview?account=wxid_demo_a&start=2023-11-15&end=2023-11-15"
         ).get_json()
         # 样本里 6 条在 2023-11-15，1 条在 400 天前；过滤应影响整页指标。
         self.assertEqual(full["total"], 7)
@@ -853,8 +854,8 @@ class TestStatsApi(TempRootCase):
         groups = {g["label"]: g["count"] for g in filtered["type_groups"]}
         self.assertEqual(groups.get("文本"), 2)
         top = {s["wxid"]: s["count"] for s in filtered["top_senders"]}
-        # wxid_c 在当天只有 1 条系统消息；一年前那条文本不应混进范围内。
-        self.assertEqual(top.get("wxid_c"), 1)
+        # wxid_demo_d 在当天只有 1 条系统消息；一年前那条文本不应混进范围内。
+        self.assertEqual(top.get("wxid_demo_d"), 1)
 
     def test_cache_hit_after_first_compute(self):
         acc, account = self._make_stats_account(self.tmp)
@@ -896,7 +897,7 @@ class TestStatsApi(TempRootCase):
         from siwx.server import app
         d = app.test_client().get("/api/stats/accounts").get_json()
         names = [a["wxid"] for a in d["accounts"]]
-        self.assertIn("wxid_stats", names)
+        self.assertIn("wxid_demo_a", names)
         self.assertNotIn("wxid_no_msg", names)
 
     def test_overview_requires_account(self):
@@ -911,7 +912,7 @@ class TestStatsApi(TempRootCase):
     def test_refresh_endpoint_recomputes(self):
         self._make_stats_account(self.tmp)
         from siwx.server import app
-        r = app.test_client().post("/api/stats/refresh", json={"account": "wxid_stats"})
+        r = app.test_client().post("/api/stats/refresh", json={"account": "wxid_demo_a"})
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.get_json()["ok"])
         self.assertEqual(r.get_json()["total"], 7)
@@ -1837,10 +1838,10 @@ class TestManifestSourceGuard(TempRootCase):
 
         # 模拟 v5.0.2 的 manifest：只有业务键，没有 @source
         self.pool.save_manifest(out, {
-            "contact\\contact.db": {"size": 1, "mtime": 1, "pages": 1,
+            os.path.join("contact", "contact.db"): {"size": 1, "mtime": 1, "pages": 1,
                                     "key": "ab" * 32}})
 
-        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        entries = [self._entry(os.path.join("contact", "contact.db"), d / "contact" / "contact.db")]
         rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
                                       entries=entries, use_cache=True)
         self.assertEqual(rep["conflicts"], 0, "升级用户不应被拦截")
@@ -1857,7 +1858,7 @@ class TestManifestSourceGuard(TempRootCase):
         self.pool.save_manifest(out, {
             self.extract.SOURCE_FIELD: str(c.resolve()).casefold()})
 
-        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        entries = [self._entry(os.path.join("contact", "contact.db"), d / "contact" / "contact.db")]
         rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
                                       entries=entries, use_cache=True)
         self.assertEqual(rep["conflicts"], 1)
@@ -1874,7 +1875,7 @@ class TestManifestSourceGuard(TempRootCase):
         self.pool.save_manifest(out, {
             self.extract.SOURCE_FIELD: str(d.resolve()).casefold()})
 
-        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        entries = [self._entry(os.path.join("contact", "contact.db"), d / "contact" / "contact.db")]
         rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
                                       entries=entries, use_cache=True)
         self.assertEqual(rep["conflicts"], 0)
@@ -1886,7 +1887,7 @@ class TestManifestSourceGuard(TempRootCase):
         out = self.tmp / "out" / "wxid_t"
         (out / "contact").mkdir(parents=True, exist_ok=True)
 
-        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        entries = [self._entry(os.path.join("contact", "contact.db"), d / "contact" / "contact.db")]
         self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
                                 entries=entries, use_cache=True)
         m = self.pool.load_manifest(out)
@@ -1901,7 +1902,7 @@ class TestManifestSourceGuard(TempRootCase):
         self.pool.save_manifest(out, {
             self.extract.SOURCE_FIELD: str(c.resolve()).casefold()})
 
-        entries = [self._entry("contact\\contact.db", d / "contact" / "contact.db")]
+        entries = [self._entry(os.path.join("contact", "contact.db"), d / "contact" / "contact.db")]
         rep = self.extract.decrypt_dir(str(d), str(out), log=lambda m: None,
                                       entries=entries, use_cache=True)
         self.assertEqual(rep["conflicts"], 0)
@@ -1912,12 +1913,12 @@ class TestManifestSourceGuard(TempRootCase):
         out = self.tmp / "out" / "wxid_t"
         out.mkdir(parents=True)
         self.pool.save_manifest(out, {
-            "contact\\contact.db": {"size": 1, "mtime": 1, "pages": 1,
+            os.path.join("contact", "contact.db"): {"size": 1, "mtime": 1, "pages": 1,
                                     "key": "ab" * 32},
             self.extract.SOURCE_FIELD: "d:\\x"})
         m = self.pool.load_manifest(out)
         self.assertEqual(len(m), 2)
-        self.assertIn("contact\\contact.db", m)
+        self.assertIn(os.path.join("contact", "contact.db"), m)
         self.assertEqual(m.get(self.extract.SOURCE_FIELD), "d:\\x")
 
     def test_report_includes_conflicts_count(self):
@@ -2080,12 +2081,12 @@ class TestZipPackFileDeadLink(TempRootCase):
     def test_zip_pack_file_is_none_and_zip_exists(self):
         acc, account, chat = make_account(self.tmp)
         from siwx.exporter import run_export
-        res = run_export(acc, account, chat, "测试好友", "json",
+        res = run_export(acc, account, chat, "联系人B", "json",
                          export_root=self.tmp / "exports", pack="zip")
         self.assertIsNone(res["file"], "zip 打包删除目录后 file 不应再指向死路径")
         self.assertTrue(Path(res["zip"]).is_file())
         # 不打包时 file 正常返回
-        res2 = run_export(acc, account, chat, "测试好友", "json",
+        res2 = run_export(acc, account, chat, "联系人B", "json",
                           export_root=self.tmp / "exports", pack="none")
         self.assertTrue(Path(res2["file"]).is_file())
 
@@ -2117,7 +2118,7 @@ class TestOwnerBase(TempRootCase):
     def test_is_me_uses_owner_base(self):
         # uin 不以 6 开头的账号目录，自己发的消息 is_me / isSend 必须正确
         acc, account, chat = make_account(self.tmp, account="wxid_me_123456",
-                                          chat="wxid_friend")
+                                          chat="wxid_demo_b")
         db = acc / "message" / "message_0.db"
         t = _msg_table(chat)
         conn = sqlite3.connect(db)
@@ -2794,15 +2795,15 @@ class TestHtmlFacesEndToEnd(TempRootCase):
     """全链路：分片里带 [表情名] 的真实导出，WX_FACES 只含用到的表情。"""
 
     def test_export_embeds_used_faces(self):
-        acc = self.tmp / "output" / "wxid_test"
+        acc = self.tmp / "output" / fx.DEMO_SELF
         msg_dir = acc / "message"
-        make_shard(msg_dir / "message_0.db", "wxid_friend",
+        make_shard(msg_dir / "message_0.db", "wxid_demo_b",
                    ["带表情[微笑]", "再一个[旺柴]"])
         make_empty_shard(msg_dir / "media_0.db")
         make_empty_shard(msg_dir / "message_fts.db")
         self._make_contact_session(acc)
         from siwx.exporter import run_export
-        res = run_export(acc, "wxid_test", "wxid_friend", "测试会话", "html",
+        res = run_export(acc, fx.DEMO_SELF, "wxid_demo_b", "测试会话", "html",
                          want_media=False, want_avatars=False,
                          export_root=self.tmp / "exports", pack="folder")
         html = Path(res["file"]).read_text(encoding="utf-8")
@@ -2822,7 +2823,7 @@ class TestHtmlFacesEndToEnd(TempRootCase):
         c.execute("CREATE TABLE contact (username TEXT, remark TEXT, "
                   "nick_name TEXT, alias TEXT)")
         c.execute("INSERT INTO contact VALUES (?,?,?,?)",
-                  ("wxid_friend", "测试好友", "", ""))
+                  ("wxid_demo_b", "联系人B", "", ""))
         c.commit()
         c.close()
         (acc / "session").mkdir(parents=True, exist_ok=True)
@@ -2830,7 +2831,7 @@ class TestHtmlFacesEndToEnd(TempRootCase):
         s.execute("CREATE TABLE SessionTable (username TEXT, summary TEXT, "
                   "sort_timestamp INTEGER)")
         s.execute("INSERT INTO SessionTable VALUES (?,?,?)",
-                  ("wxid_friend", "预览", 1_700_000_010))
+                  ("wxid_demo_b", "预览", 1_700_000_010))
         s.commit()
         s.close()
 
@@ -2962,12 +2963,12 @@ class TestHtmlMapsEndToEnd(TempRootCase):
     """全链路：真实导出 → 位置消息命中的瓦片注入 WX_MAPS；离线回退文字卡。"""
 
     def _make_account_with_location(self):
-        acc = self.tmp / "output" / "wxid_test"
+        acc = self.tmp / "output" / fx.DEMO_SELF
         msg_dir = acc / "message"
-        make_shard(msg_dir / "message_0.db", "wxid_friend",
+        make_shard(msg_dir / "message_0.db", "wxid_demo_b",
                    ["到达附近了[微笑]"])
         conn = sqlite3.connect(msg_dir / "message_0.db")
-        t = _msg_table("wxid_friend")
+        t = _msg_table("wxid_demo_b")
         conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
                      (2, 1001, 48, 1_700_000_001, 0, 1,
                       LOCATION_RAW.encode("utf-8"), None))
@@ -2980,7 +2981,7 @@ class TestHtmlMapsEndToEnd(TempRootCase):
 
     def _run_export(self, acc):
         from siwx.exporter import run_export
-        return run_export(acc, "wxid_test", "wxid_friend", "测试会话", "html",
+        return run_export(acc, fx.DEMO_SELF, "wxid_demo_b", "测试会话", "html",
                           want_media=False, want_avatars=False,
                           export_root=self.tmp / "exports", pack="folder")
 
@@ -3029,8 +3030,8 @@ class TestSelfIdentity(TempRootCase):
     实测案例：743 条本人文本落左侧、15 条通话错落右侧。"""
 
     def _make_hex_account(self, contacts):
-        """账号目录名 wxid_abc_d29b；contacts 是放进 contact 表的 username 列表。"""
-        acc = self.tmp / "output" / "wxid_abc_d29b"
+        """账号目录名 wxid_abc_d901；contacts 是放进 contact 表的 username 列表。"""
+        acc = self.tmp / "output" / "wxid_abc_d901"
         if acc.exists():
             shutil.rmtree(acc)
         msg_dir = acc / "message"
@@ -3051,7 +3052,7 @@ class TestSelfIdentity(TempRootCase):
             create_time INTEGER, origin_source INTEGER, real_sender_id INTEGER,
             message_content BLOB, packed_info_data BLOB)""")
         conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
-        for i, u in enumerate((chat, "wxid_abc", "wxid_abc_d29b"), start=1):
+        for i, u in enumerate((chat, "wxid_abc", "wxid_abc_d901"), start=1):
             conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (?,?)",
                          (i, u))
         for i, (ts, rsid) in enumerate([(1_700_000_001, 2),   # 本人（原始 wxid）
@@ -3068,7 +3069,7 @@ class TestSelfIdentity(TempRootCase):
         acc, chat = self._make_hex_account(["wxid_abc", "wxid_peer"])
         from siwx.export_stream import message_stream
         msgs = list(message_stream(acc, chat, None, None,
-                                   "wxid_abc_d29b", None))
+                                   "wxid_abc_d901", None))
         self.assertEqual([(m["isSend"], m["senderUsername"]) for m in msgs],
                          [(1, "wxid_abc"),      # 原始 wxid → 本人
                           (0, "wxid_peer"),     # 对方不受影响
@@ -3081,19 +3082,19 @@ class TestSelfIdentity(TempRootCase):
         """剥十六进制后缀必须有联系人佐证：目录名与 base 都存在 → 不剥。"""
         from siwx.api_chat import self_ids_for
         acc, _chat = self._make_hex_account(["wxid_abc", "wxid_peer"])
-        preferred, ids = self_ids_for(acc, "wxid_abc_d29b")
+        preferred, ids = self_ids_for(acc, "wxid_abc_d901")
         self.assertEqual(preferred, "wxid_abc")
-        self.assertEqual(set(ids), {"wxid_abc", "wxid_abc_d29b"})
+        self.assertEqual(set(ids), {"wxid_abc", "wxid_abc_d901"})
         # 完整目录名也是联系人（罕见但可能是真实 wxid）→ 不剥离
-        acc2, _ = self._make_hex_account(["wxid_abc", "wxid_abc_d29b"])
-        preferred2, ids2 = self_ids_for(acc2, "wxid_abc_d29b")
-        self.assertEqual(preferred2, "wxid_abc_d29b")
-        self.assertEqual(set(ids2), {"wxid_abc_d29b"})
+        acc2, _ = self._make_hex_account(["wxid_abc", "wxid_abc_d901"])
+        preferred2, ids2 = self_ids_for(acc2, "wxid_abc_d901")
+        self.assertEqual(preferred2, "wxid_abc_d901")
+        self.assertEqual(set(ids2), {"wxid_abc_d901"})
         # 联系人表里谁都不存在 → 维持旧行为（不剥离）
         acc3, _ = self._make_hex_account([])
-        preferred3, ids3 = self_ids_for(acc3, "wxid_abc_d29b")
-        self.assertEqual(preferred3, "wxid_abc_d29b")
-        self.assertEqual(set(ids3), {"wxid_abc_d29b"})
+        preferred3, ids3 = self_ids_for(acc3, "wxid_abc_d901")
+        self.assertEqual(preferred3, "wxid_abc_d901")
+        self.assertEqual(set(ids3), {"wxid_abc_d901"})
 
     def test_web_chat_page_renders_record(self):
         """网页端聊天页与导出 HTML 同口径：合并转发逐条展开，不再单行预览。"""
@@ -3527,7 +3528,7 @@ class TestAuditFixes20261006(TempRootCase):
         """<id>*.dat 会命中 91_… 等同目录兄弟文件，必须带下划线边界与 ts。"""
         from siwx import media
         root = self.tmp / "cache"
-        target = hashlib.md5(b"wxid_friend").hexdigest()
+        target = hashlib.md5(b"wxid_demo_b").hexdigest()
         d = root / "2025-01" / "Message" / target / "Bubble"
         d.mkdir(parents=True, exist_ok=True)
         (d / "9_1700000000_b.dat").write_bytes(b"x")
@@ -3536,7 +3537,7 @@ class TestAuditFixes20261006(TempRootCase):
         media._CACHE_ROOTS_MEMO.clear()
         try:
             media._wechat_cache_roots = lambda _wxid: [root]
-            got = media.bubble_paths("wxid_friend", "wxid_friend", 9, 1_700_000_000)
+            got = media.bubble_paths("wxid_demo_b", "wxid_demo_b", 9, 1_700_000_000)
         finally:
             media._wechat_cache_roots = old_find
             media._CACHE_ROOTS_MEMO.clear()
