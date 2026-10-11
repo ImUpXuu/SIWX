@@ -27,6 +27,25 @@
       </div>
     </div>
 
+    <div class="c-filter" id="c-filter">
+      <div class="c-filter-row">
+        <input id="c-msg-q" placeholder="搜索聊天记录…" aria-label="搜索聊天记录">
+        <button id="c-msg-search" class="c-action" type="button">搜索</button>
+        <button id="c-filter-exit" class="c-action hidden" type="button">退出筛选</button>
+      </div>
+      <div class="c-chips" id="c-kind-chips">
+        <button class="chip on" data-kind="" type="button">全部</button>
+        <button class="chip" data-kind="text" type="button">文本</button>
+        <button class="chip" data-kind="image" type="button">图片</button>
+        <button class="chip" data-kind="video" type="button">视频</button>
+        <button class="chip" data-kind="voice" type="button">语音</button>
+        <button class="chip" data-kind="sticker" type="button">表情</button>
+        <button class="chip" data-kind="link" type="button">链接/文件</button>
+        <button class="chip" data-kind="system" type="button">系统</button>
+      </div>
+      <div class="c-filter-info hidden" id="c-filter-info"></div>
+    </div>
+
     <div class="c-body">
       <div id="c-msgs">
         <div class="c-tip">选择一个会话查看聊天记录</div>

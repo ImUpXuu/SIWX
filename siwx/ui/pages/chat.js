@@ -25,6 +25,11 @@ let selectionMode = false;
 let selectedKeys = new Set();
 let rangeAnchorKey = null;
 let bottomFollow = null;
+// ── 聊天内搜索/筛选（微信式查找聊天内容）──
+let filterActive = false;   // 任一筛选条件生效即进入筛选模式：列表只显示匹配消息
+let filterQ = '';           // 关键词（大小写不敏感）
+let filterKind = '';        // 类型筛选：''=全部
+let filterTotal = 0;        // 最近一次筛选的匹配总数（服务端精确返回）
 // 头像 404 标记：失败过的头像不再反复请求（几百会话 = 几百次请求的风暴源）
 const avaFailed = new Set();
 
@@ -231,6 +236,14 @@ async function init() {
       }
     }
   });
+
+  el('c-msgs').addEventListener('click', (ev) => {
+    if (!filterActive || selectionMode) return;
+    const hit = ev.target.closest('.m-row');
+    if (!hit || ev.target.closest('button, a, img, .m-copy')) return;
+    jumpToTs(Number(hit.dataset.ts) || 0, hit.dataset.key || '');
+  });
+  bindFilterBar();
 
   await loadFaces();
   await loadSessions();
@@ -446,7 +459,9 @@ async function loadMessages(fresh, opts = {}) {
     (beforeId ? `&before_id=${beforeId}` : '') +
     (after ? `&after=${after}` : '') +
     (afterId ? `&after_id=${afterId}` : '') +
-    `&limit=${limit}`;
+    `&limit=${limit}` +
+    (filterActive ? `&q=${encodeURIComponent(filterQ)}` : '') +
+    (filterActive && filterKind ? `&kind=${encodeURIComponent(filterKind)}` : '');
   const data = await fetchJSON(url);
   if (gone() || seq !== loadSeq || s !== currentChat) return false;   // 过期响应，丢弃
   const box = el('c-msgs');
@@ -455,7 +470,12 @@ async function loadMessages(fresh, opts = {}) {
     selectedKeys.clear();
     rangeAnchorKey = null;
     loadedMessages = data.messages.slice();
-    box.innerHTML = renderMessageList(loadedMessages) || '<div class="c-empty">这个会话没有消息</div>';
+    if (data.filtered) filterTotal = data.total || 0;
+    const emptyText = filterActive
+      ? '没有匹配的消息<br><span class="c-empty-sub">换个关键词或类型，退出筛选看全部</span>'
+      : '这个会话没有消息';
+    box.innerHTML = renderMessageList(loadedMessages) || `<div class="c-empty">${emptyText}</div>`;
+    if (filterActive) highlightMatches(box);
     if (opts.stick) {
       startBottomFollow(box);
       jumpToBottom(box);
@@ -523,6 +543,124 @@ async function loadNewer() {
   } finally {
     document.getElementById('newer-tip')?.remove();
     loading = false;
+  }
+}
+
+// ── 聊天内搜索/筛选（微信式）────────────────────────────
+// 关键词 + 类型双条件，任一生效即进入筛选模式；点结果气泡退出筛选，
+// 跳回该消息的原文上下文（服务端游标定位，目标必在窗口内）。
+function bindFilterBar() {
+  const qInput = el('c-msg-q');
+  if (!qInput) return;
+  const apply = () => {
+    filterQ = qInput.value.trim();
+    if (filterQ || filterKind) { filterActive = true; runFilteredLoad(); }
+    else exitFilter(true);
+  };
+  qInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); apply(); }
+    if (e.key === 'Escape') exitFilter(true);
+  });
+  el('c-msg-search').addEventListener('click', apply);
+  el('c-filter-exit').addEventListener('click', () => exitFilter(true));
+  el('c-kind-chips').addEventListener('click', (e) => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    el('c-kind-chips').querySelectorAll('.chip').forEach(n => n.classList.remove('on'));
+    chip.classList.add('on');
+    filterKind = chip.dataset.kind || '';
+    filterQ = el('c-msg-q').value.trim();
+    if (filterQ || filterKind) { filterActive = true; runFilteredLoad(); }
+    else exitFilter(true);
+  });
+}
+
+function runFilteredLoad() {
+  el('c-filter-exit').classList.remove('hidden');
+  updateFilterInfo();
+  el('c-msgs').innerHTML = '<div class="c-loading">搜索中…</div>';
+  loadMessages(true).catch((e) => {
+    toast('搜索失败: ' + (e.message || e), true);
+  });
+}
+
+function exitFilter(reload) {
+  filterActive = false;
+  filterQ = '';
+  filterKind = '';
+  el('c-msg-q').value = '';
+  el('c-filter-exit').classList.add('hidden');
+  el('c-filter-info').classList.add('hidden');
+  el('c-kind-chips').querySelectorAll('.chip').forEach(n =>
+    n.classList.toggle('on', !n.dataset.kind));
+  if (reload && currentChat) {
+    loadMessages(true, { stick: true }).catch(() => {});
+  }
+}
+
+function updateFilterInfo() {
+  const info = el('c-filter-info');
+  if (!filterActive) { info.classList.add('hidden'); return; }
+  const parts = [];
+  if (filterQ) parts.push(`“${esc(filterQ)}”`);
+  if (filterKind) {
+    const chip = el('c-kind-chips').querySelector(`.chip[data-kind="${filterKind}"]`);
+    if (chip) parts.push(chip.textContent);
+  }
+  info.innerHTML = `找到 <b>${filterTotal}</b> 条匹配（${parts.join(' · ') || '全部'}）` +
+    ' · 点击消息查看上下文';
+  info.classList.remove('hidden');
+}
+
+function highlightMatches(box) {
+  if (!filterQ) return;
+  const qLow = filterQ.toLowerCase();
+  const walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT);
+  const targets = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode;
+    if (n.parentElement.closest('.m-copy, .m-time-chip, .c-newer, button, a, script, style')) continue;
+    if (n.nodeValue && n.nodeValue.toLowerCase().includes(qLow)) targets.push(n);
+  }
+  for (const n of targets) {
+    const frag = document.createDocumentFragment();
+    let rest = n.nodeValue;
+    let idx = rest.toLowerCase().indexOf(qLow);
+    while (idx !== -1) {
+      if (idx) frag.append(rest.slice(0, idx));
+      const mark = document.createElement('mark');
+      mark.className = 'm-hit';
+      mark.textContent = rest.slice(idx, idx + filterQ.length);
+      frag.append(mark);
+      rest = rest.slice(idx + filterQ.length);
+      idx = rest.toLowerCase().indexOf(qLow);
+    }
+    if (rest) frag.append(rest);
+    n.replaceWith(frag);
+  }
+}
+
+async function jumpToTs(ts, key) {
+  // 退出筛选并回到该消息上下文：加载 ts 之前的窗口（目标必在窗口内），
+  // 再按 data-key 定位滚动 + 高亮闪烁；窗口之后的消息走"加载之后的消息"
+  filterActive = false;
+  filterQ = '';
+  filterKind = '';
+  el('c-msg-q').value = '';
+  el('c-filter-exit').classList.add('hidden');
+  el('c-filter-info').classList.add('hidden');
+  el('c-kind-chips').querySelectorAll('.chip').forEach(n =>
+    n.classList.toggle('on', !n.dataset.kind));
+  const ok = await loadMessages(true, { before: ts + 1, limit: 80 });
+  if (!ok) return;
+  const box = el('c-msgs');
+  const target = (key && box.querySelector(`.m-row[data-key="${CSS.escape(key)}"]`))
+    || [...box.querySelectorAll('.m-row')].reverse()
+      .find(n => (Number(n.dataset.ts) || 0) <= ts);
+  if (target) {
+    target.scrollIntoView({ block: 'center' });
+    target.classList.add('m-flash');
+    setTimeout(() => target.classList.remove('m-flash'), 1800);
   }
 }
 

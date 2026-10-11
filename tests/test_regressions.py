@@ -3302,6 +3302,166 @@ class TestSelfIdentity(TempRootCase):
         self.assertFalse(r4["has_more"])
 
 
+# ── 聊天内搜索/筛选（微信式）────────────────────────────────
+
+class TestChatMessageFilter(TempRootCase):
+    """/api/chat/messages 的 q/kind/start/end 筛选。
+
+    message_content 可能是 zstd 压缩 BLOB，SQL LIKE 对压缩行失明——
+    关键词匹配必须在 Python 层解码后做；本类用压缩+明文混合样本验证
+    完整性、精确总数、类型/日期过滤与游标分页语义。"""
+
+    def _seed(self):
+        """在 make_account 的会话里铺多类型样本 + 1 条 zstd 压缩文本。"""
+        acc, account, chat = make_account(self.tmp, n_texts=0)
+        conn = sqlite3.connect(acc / "message" / "message_0.db")
+        t = _msg_table(chat)
+        base = 1_700_000_000
+        rows = [
+            (1, 1, base, "普通的第 1 条"),
+            (2, 1, base + 10, "开会啦，会议纪要在群里"),
+            (3, 3, base + 20, ""),                       # 图片
+            (4, 34, base + 30, ""),                      # 语音
+            (5, 43, base + 40, ""),                      # 视频
+            (6, 47, base + 50, ""),                      # 表情
+            (7, 49, base + 60, "<msg><title>周报链接</title></msg>"),
+            (8, 10000, base + 70, "有人进了群"),
+            (9, 1, base + 80, "第二场会议纪要已同步"),
+            (11, 1, base + 100, "Project Phoenix kickoff"),
+        ]
+        for lid, ltype, ts, content in rows:
+            conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
+                         (lid, 1000 + lid, ltype, ts, 0, 1,
+                          content.encode("utf-8"), None))
+        # zstd 压缩行：SQL LIKE 不可见，只有 Python 解码路径能搜到；
+        # 时间戳放到次日（+25h），日期过滤两侧都可测
+        try:
+            import zstandard
+            comp = zstandard.ZstdCompressor().compress(
+                "这份机密文件请查收".encode("utf-8"))
+            conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
+                         (10, 1009, 1, base + 90000, 0, 1, comp, None))
+        except ImportError:
+            pass
+        conn.commit()
+        conn.close()
+        from datetime import datetime
+        self.day = datetime.fromtimestamp(base).strftime("%Y-%m-%d")
+        self.late_day = datetime.fromtimestamp(base + 90000).strftime("%Y-%m-%d")
+        return acc, account, chat
+
+    def _get(self, account, chat, query=""):
+        from siwx.server import app
+        return app.test_client().get(
+            f"/api/chat/messages?account={account}&chat={chat}{query}").get_json()
+
+    def test_keyword_search_total_and_content(self):
+        acc, account, chat = self._seed()
+        r = self._get(account, chat, "&q=%E4%BC%9A%E8%AE%AE%E7%BA%AA%E8%A6%81")
+        self.assertTrue(r["filtered"])
+        self.assertEqual(r["total"], 2)
+        self.assertEqual(len(r["messages"]), 2)
+        self.assertTrue(all("会议纪要" in m["text"] for m in r["messages"]))
+        self.assertFalse(r["has_more"])
+        self.assertFalse(r["has_newer"])
+        # 英文关键词大小写不敏感
+        r2 = self._get(account, chat, "&q=phoenix")
+        self.assertEqual(r2["total"], 1)
+        self.assertIn("Phoenix", r2["messages"][0]["text"])
+
+    def test_keyword_search_finds_zstd_row(self):
+        acc, account, chat = self._seed()
+        r = self._get(account, chat, "&q=%E6%9C%BA%E5%AF%86")
+        self.assertEqual(r["total"], 1)
+        self.assertIn("机密", r["messages"][0]["text"])
+
+    def test_kind_cursor_paging_semantics(self):
+        """筛选模式游标分页与普通分页同语义：不重不漏、total 稳定。"""
+        acc, account, chat = self._seed()
+        base = "/api/chat/messages?account=%s&chat=%s" % (account, chat)
+        from siwx.server import app
+        c = app.test_client()
+        r1 = c.get(f"{base}&kind=text&limit=2").get_json()
+        self.assertEqual(r1["total"], 5)           # 3 条明文 + 英文行 + 压缩行
+        self.assertEqual(len(r1["messages"]), 2)
+        self.assertTrue(r1["has_more"])
+        self.assertFalse(r1["has_newer"])          # 打开会话 = 最新匹配窗口
+        # 反向翻页：total 不变，翻到最旧后 has_more=False，游标不重不漏
+        seen, cur = [m["id"] for m in r1["messages"]], r1["messages"][0]
+        while True:
+            r = c.get(f"{base}&kind=text&limit=2"
+                      f"&before={cur['ts']}&before_id={cur['id']}").get_json()
+            if not r["messages"]:
+                break
+            seen.extend(m["id"] for m in r["messages"])
+            self.assertEqual(r["total"], r1["total"])
+            cur = r["messages"][0]
+            if not r["has_more"]:
+                break
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(len(seen), 5)
+        # 正向：after 游标从最旧处继续 → 有更新的匹配
+        r2 = c.get(f"{base}&kind=text&limit=2"
+                   f"&after={cur['ts']}&after_id={cur['id']}").get_json()
+        self.assertTrue(r2["messages"])
+        self.assertTrue(r2["has_newer"])
+
+    def test_kind_filter_maps_to_type_groups(self):
+        acc, account, chat = self._seed()
+        for kind, ltype in (("image", 3), ("voice", 34), ("video", 43),
+                            ("sticker", 47), ("link", 49), ("system", 10000)):
+            r = self._get(account, chat, f"&kind={kind}")
+            self.assertEqual(r["total"], 1, kind)
+            self.assertEqual(r["messages"][0]["type"], ltype, kind)
+        # 文本 = 3 条明文 + 英文行 + 压缩行
+        r = self._get(account, chat, "&kind=text")
+        self.assertEqual(r["total"], 5)
+        # 非法 kind → 400
+        from siwx.server import app
+        resp = app.test_client().get(
+            f"/api/chat/messages?account={account}&chat={chat}&kind=bogus")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_date_range_filter(self):
+        acc, account, chat = self._seed()
+        r = self._get(account, chat, f"&start={self.day}&end={self.day}")
+        self.assertEqual(r["total"], 10)     # 首日样本 10 条（压缩行在次日）
+        r2 = self._get(account, chat, f"&start={self.late_day}")
+        self.assertEqual(r2["total"], 1)     # 次日只有压缩行
+        # 非法日期 → 400
+        from siwx.server import app
+        resp = app.test_client().get(
+            f"/api/chat/messages?account={account}&chat={chat}&start=abc")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_too_long_keyword_rejected(self):
+        acc, account, chat = self._seed()
+        from siwx.server import app
+        resp = app.test_client().get(
+            f"/api/chat/messages?account={account}&chat={chat}&q={'x' * 201}")
+        self.assertEqual(resp.status_code, 400)
+
+    def test_unfiltered_response_keeps_legacy_shape(self):
+        acc, account, chat = self._seed()
+        r = self._get(account, chat, "&limit=3")
+        self.assertNotIn("filtered", r)
+        self.assertNotIn("total", r)
+        self.assertEqual(len(r["messages"]), 3)
+
+    def test_web_chat_page_has_search_ui(self):
+        """前端接线齐全：搜索框、类型 chips、高亮与上下文跳转。"""
+        js = (ROOT / "siwx" / "ui" / "pages" / "chat.js").read_text(encoding="utf-8")
+        html_ = (ROOT / "siwx" / "ui" / "pages" / "chat.html").read_text(encoding="utf-8")
+        for token in ("c-msg-q", "c-kind-chips", "highlightMatches", "jumpToTs",
+                      "runFilteredLoad", "exitFilter"):
+            self.assertIn(token, js)
+        self.assertIn('data-kind="image"', html_)
+        self.assertIn('id="c-filter"', html_)
+        # 缓存指纹必须刷新，否则升级后浏览器仍用旧 UI（本地指纹线，非上游值）
+        appjs = (ROOT / "siwx" / "ui" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("2026101103", appjs)
+
+
 # ── 30. HTML 模板可替换框架 + 合并转发/转文字渲染 ───────────────
 
 class TestHtmlTemplateFramework(TempRootCase):

@@ -10,7 +10,7 @@
  */
 (function () {
   const PAGES_BUILTIN = ['chat', 'sns', 'stats', 'export', 'mcp', 'logs', 'settings'];
-  const UI_VERSION = '2026101102';
+  const UI_VERSION = '2026101103';
   // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
   const DISCLAIMER_VERSION = '20260925';
 
