@@ -1010,6 +1010,16 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
                              template=template,
                              progress=sub)
             ok_n += 1
+            files_out = list(res.get("files") or [])
+            if res.get("file"):
+                files_out.append(res["file"])
+            # 产物总大小：报告里给个数，前端就能标"哪个会话拖慢/撑大了导出"
+            size_bytes = 0
+            for f in files_out:
+                try:
+                    size_bytes += Path(f).stat().st_size
+                except OSError:
+                    pass
             results.append({"chat": chat, "display": display or chat,
                             "message_count": res.get("message_count", 0),
                             "media_count": res.get("media_count", 0),
@@ -1017,7 +1027,9 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
                             "voice_count": res.get("voice_count", 0),
                             "avatar_count": res.get("avatar_count", 0),
                             "file": res.get("file"),
-                            "files": res.get("files", [])})
+                            "files": res.get("files", []),
+                            "size_bytes": size_bytes,
+                            "duration_ms": res.get("duration_ms", 0)})
             progress(endp, f"[{i + 1}/{n}] ✔ {display or chat} ({res.get('message_count', 0)} 条)")
         except Exception as e:
             logger.error("export",
@@ -1037,8 +1049,15 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
         progress(98, f"zip 完成: {Path(zip_path).stat().st_size / 1048576:.1f} MB")
 
     progress(100, "导出完成")
+    zip_size = None
+    if zip_path:
+        try:
+            zip_size = Path(zip_path).stat().st_size
+        except OSError:
+            zip_size = None
     return {
         "total_dir": str(total_dir), "zip": zip_path, "zips": zips,
+        "zip_size": zip_size,
         "pack": pack, "format": fmt, "sessions": results, "ok_count": ok_n,
         "message_count": sum(r.get("message_count", 0) for r in results),
         "media_count": sum(r.get("media_count", 0) for r in results),

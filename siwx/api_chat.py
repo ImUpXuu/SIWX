@@ -475,6 +475,17 @@ def _fmt(ltype: int, text: str) -> str:
         return text or "[引用]"
     if t in (10000, 10002):
         return _fmt_sysmsg(text) or "[系统消息]"
+    if t == 42:
+        # 名片：新版是属性式 <msg nickname="…" sign="…" province="…" city="…"/>
+        # （自闭合、无子元素），旧版才是 <nickname> 子元素。只找子元素会把
+        # 名片打成光杆 "[名片]"（实测 2026-09 名片全漏）。两种形态都试。
+        m = re.search(r"<nickname>(.*?)</nickname>", text, re.S) \
+            or re.search(r'<msg\b[^>]*?\bnickname\s*=\s*"([^"]*)"', text)
+        if m:
+            nick = html.unescape(_xml_text(m.group(1)) or m.group(1)).strip()
+            if nick:
+                return f"[名片] {nick}"
+        return FALLBACK_LABEL[42]
     if t == 49:
         if has_refermsg(text):
             # 引用消息（外层 49、内层 57）：与 t==57 同口径，只取回复文本，
@@ -866,7 +877,11 @@ def _parse_finder_feed(text: str):
         return None
 
     def _tag(tag):
-        m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", text, re.S)
+        # 开标签名必须止于空白或 `>`，且不能自闭合：`<nickname[^>]*>` 会把
+        # `<nicknameFlag/>`、带属性自闭合的 `<nickname … />`（findernamecard
+        # 名片形态实测存在）误当开标签，捕获组一路吞到 <finderFeed> 深处
+        # 真正的 </nickname>，整段 XML 进入展示字段（昵称位显示裸 XML）。
+        m = re.search(rf"<{tag}(?:\s[^>]*?)?(?<!/)>(.*?)</{tag}>", text, re.S)
         if not m:
             return None
         # 字段常带 CDATA 包装（实测同一会话两种形态并存），先剥壳再转义
@@ -1436,13 +1451,12 @@ def avatar():
             # 输出目录名通常是 wxid_xxx_6409 这类带后缀的账号目录，而头像库里的
             # 本人 username 是原始 wxid_xxx。给“自己的头像”做一次兼容回退。
             if username == account:
-                clean = media.clean_wxid(account)
-                if clean not in candidates:
-                    candidates.append(clean)
-                if "_" in account:
-                    short = account.rsplit("_", 1)[0]
-                    if short not in candidates:
-                        candidates.append(short)
+                # 输出目录名 = <真实username>_<4位hex>；媒体模块的
+                # wxid_key_variants 已统一处理 wxid_ 前缀与自定义微信号两种
+                # 形态（自定义 ID 此前 rsplit 回退漏网 → 本人头像 404）。
+                for cand in media.wxid_key_variants(account):
+                    if cand not in candidates:
+                        candidates.append(cand)
             row = None
             for u in candidates:
                 row = conn.execute(

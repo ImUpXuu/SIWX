@@ -255,13 +255,18 @@
       }
       return html + '</div></div>';
     }
-    // 名片：rawContent <nickname>/<province>/<city>/<desc>/<sign>
+    // 名片：旧版是 <nickname>/<province>/<city>/<desc>/<sign> 子元素；
+    // 新版（实测 2026-09）是自闭合属性式 <msg nickname="…" sign="…" …/>，
+    // 只找子元素会把名片打成光杆"[名片]"——两种形态都试。
     if (t === 42) {
-      var cnick = xmlVal(raw, 'nickname') || content.replace(/^\[名片\]\s*/, '') || '个人名片';
+      var cnick = xmlVal(raw, 'nickname') || xmlAttr(raw, 'msg', 'nickname')
+                  || content.replace(/^\[名片\]\s*/, '') || '个人名片';
       var csub = [];
-      var cprov = (xmlVal(raw, 'province') + ' ' + xmlVal(raw, 'city')).trim();
+      var cprov = ((xmlVal(raw, 'province') || xmlAttr(raw, 'msg', 'province')) + ' '
+                   + (xmlVal(raw, 'city') || xmlAttr(raw, 'msg', 'city'))).trim();
       if (cprov) csub.push(cprov);
-      var csign = xmlVal(raw, 'desc') || xmlVal(raw, 'sign');
+      var csign = xmlVal(raw, 'desc') || xmlVal(raw, 'sign')
+                  || xmlAttr(raw, 'msg', 'desc') || xmlAttr(raw, 'msg', 'sign');
       if (csign) csub.push(csign.length > 40 ? csign.substring(0, 40) + '…' : csign);
       return '<div class="wx-card"><div class="wx-card-left">👤</div><div class="wx-card-right"><div class="wx-card-title">'+esc(cnick)+'</div><div class="wx-card-sub">'+esc(csub.join(' · ') || '个人名片')+'</div></div></div>';
     }

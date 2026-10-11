@@ -3,8 +3,19 @@
     <div class="card-head"><h2>运行日志</h2>
       <span class="hint"><span id="log-mode">粗略模式</span> · <span id="log-count">0 条</span></span></div>
     <div class="log-actions">
+      <select id="log-filter" class="log-filter" aria-label="按级别筛选">
+        <option value="">全部级别</option>
+        <option value="ERROR">仅错误</option>
+        <option value="WARN">仅警告</option>
+        <option value="INFO">仅信息</option>
+        <option value="DEBUG">仅调试</option>
+      </select>
+      <input id="log-text" class="log-filter" placeholder="文本搜索…" aria-label="文本搜索">
       <button id="log-pause" class="btn" aria-pressed="false">暂停</button>
       <button id="log-clear" class="btn">清空</button>
+      <button id="log-copy" class="btn">复制日志</button>
+      <a id="log-download" class="btn" href="/api/logs/export" download>下载</a>
+      <label class="chk"><input type="checkbox" id="log-ts"> 时间戳</label>
       <label class="chk"><input type="checkbox" id="log-auto" checked> 自动滚动</label>
     </div>
     <div id="log-box" class="console" role="log" aria-live="off"></div>

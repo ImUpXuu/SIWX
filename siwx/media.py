@@ -153,12 +153,33 @@ def clean_wxid(wxid: str) -> str:
     return wxid
 
 
+def wxid_key_variants(wxid_full: str) -> list:
+    """媒体密钥派生用的账号名候选（去重保序）。
+
+    WeChat 4.x 数据目录名是 `<username>_<4位hex>`（如 wxid_demo_d29b、
+    alias_9d93），密钥按真实 username 派生。wxid_ 前缀账号由 clean_wxid
+    剥前两段即可；自定义微信号（alias_9d93 这类）此前不做任何清洗，
+    按目录名派生必然错号 → 该账号全部图片 V2 解密失败。这里统一给出
+    [clean, 剥尾部4位hex, 原样] 三个候选，多试一个 md5 的代价远小于漏。
+    """
+    out = [clean_wxid(wxid_full)]
+    m = re.match(r"^(.+)_[0-9a-f]{4}$", wxid_full)
+    if m and m.group(1) not in out:
+        out.append(m.group(1))
+    if wxid_full not in out:
+        out.append(wxid_full)
+    return out
+
+
 def find_kvcomm_codes() -> list:
     """扫全部 kvcomm 目录提取 code。"""
     import glob
     codes = set()
+    # net_1/net_2 等多网络配置文件目录与 net/ 平级，各账号的 code 可能
+    # 落在不同 net* 下（实测一账号 code 只在 net_1/kvcomm → 此前恒扫不到，
+    # 该账号全部图片解不开）。
     pats = [
-        r"C:/Users/*/AppData/Roaming/Tencent/xwechat/net/kvcomm/key_*_*.statistic",
+        r"C:/Users/*/AppData/Roaming/Tencent/xwechat/net*/kvcomm/key_*_*.statistic",
         r"C:/Users/*/AppData/Roaming/Tencent/xwechat/ilink/kvcomm/key_*_*.statistic",
         r"C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_*_*.statistic",
     ]
@@ -346,20 +367,24 @@ def decrypt_v2_body(data: bytes, aes_key: bytes, xor_key: int):
 
 
 def candidate_keys(wxid_full: str):
-    """生成候选 (aes_key, xor_key)：持久缓存优先，其次 kvcomm 派生。"""
-    wx_clean = clean_wxid(wxid_full)
+    """生成候选 (aes_key, xor_key)：持久缓存优先，其次 kvcomm 派生。
+
+    派生账号名用 wxid_key_variants()：目录名 `<username>_<4hex>` 的自定义
+    微信号账号按原样派生必错号（见该函数注释），多一个候选只是多一次 md5。
+    """
     out = []
-    cache = _load_key_cache().get(wx_clean)
+    cache = _load_key_cache().get(clean_wxid(wxid_full))
     if cache:
         try:
             out.append((bytes.fromhex(cache["aes"]), int(cache["xor"], 16)))
         except (KeyError, ValueError):
             try:
-                _media_logger.detailed("media", f"缓存密钥格式非法 wx={wx_clean}")
+                _media_logger.detailed(
+                    "media", f"缓存密钥格式非法 wx={clean_wxid(wxid_full)}")
             except Exception:
                 pass
     for code in find_kvcomm_codes():
-        for wx in (wx_clean, wxid_full):
+        for wx in wxid_key_variants(wxid_full):
             aes = hashlib.md5(f"{code}{wx}".encode()).hexdigest()[:16].encode()
             out.append((aes, code & 0xFF))
     # 去重保序
@@ -475,32 +500,48 @@ def bubble_paths(wxid_full: str, chat: str, local_id: int, ts: int,
 
 
 def thumb_paths(wxid_full: str, chat: str, local_id: int, ts: int):
-    """明文缩略图：cache/<月>/Message/<md5(chat)>/Thumb/{local_id}_*"""
+    """明文缩略图：cache/<月>/Message/<md5(chat)>/Thumb/{local_id}_{ts}_thumb.jpg
+
+    命名实测统一为 {local_id}_{ts}_thumb.jpg，与 bubble_paths 同理必须带 ts：
+    消息按月分库、local_id 每月重排，同会话不同年份会撞号（实测 local_id=45
+    同时是 2020-03 的图片消息与 2025-09 的视频号消息）。裸 {local_id}_* 会把
+    别的年份消息的缩略图配到本消息上——原图早已清理时三级来源只剩这里，
+    错图会静默顶替正确结果；缺图好过错图，ts 缺失才退回裸前缀。
+    """
     target = hashlib.md5(chat.encode()).hexdigest()
+    pat = f"{local_id}_{ts}_*" if ts else f"{local_id}_*"
     out = []
     for cache_root in _wechat_cache_roots(wxid_full):
-        for f in cache_root.glob(f"*/Message/{target}/Thumb/{local_id}_*"):
+        for f in cache_root.glob(f"*/Message/{target}/Thumb/{pat}"):
             if f.is_file():
                 out.append(f)
     return out
 
 
-def attach_paths(wxid_full: str, chat: str, xml_md5: str):
+def attach_paths(wxid_full: str, chat: str, xml_md5: str,
+                 bubble_md5: str = None):
     """按消息 XML md5 直查原图目录：msg/attach/{md5(chat)}/**/Img/<md5>*.dat。
 
     返回按质量排序的候选：聊天显示版(.dat) → 高清(_h.dat) → 缩略(_t.dat)。
     （目录名 = md5(会话username)，与 hardlink 表解耦，覆盖其缺记录的情况。）
+
+    实测 WeChat 4.x 的 attach 文件名取自消息 packed_info 的 md5（气泡 md5），
+    与消息 XML 里的 md5 属性不是同一个值；两个前缀都要试，否则缩略图
+    明明就在 attach 目录下也永远匹配不上（三级来源全空的实测根因）。
     """
-    if not xml_md5 or len(xml_md5) != 32:
+    prefixes = [m for m in (xml_md5, bubble_md5)
+                if m and len(m) == 32]
+    if not prefixes:
         return []
     target = hashlib.md5(chat.encode()).hexdigest()
     out = []
     for cache_root in _wechat_cache_roots(wxid_full):
         attach_root = cache_root.parent / "msg" / "attach" / target
         if attach_root.is_dir():
-            for f in attach_root.rglob(f"{xml_md5}*.dat"):
-                if f.is_file():
-                    out.append(f)
+            for prefix in prefixes:
+                for f in attach_root.rglob(f"{prefix}*.dat"):
+                    if f.is_file():
+                        out.append(f)
     def _rank(p: Path):
         n = p.name
         if "_t.dat" in n: return 2
@@ -681,10 +722,10 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                         return _emit(body, "heic")  # sips 失败/非 macOS：原样返回好过没有
                     return _emit(body, "jpeg" if ext == "jpg" else ext)
 
-    # ⓪ attach 原图目录直查（按消息 XML md5 命名，不依赖 hardlink；
-    #    hq=True 时优先高清 _h 版，供点击查看大图使用）
-    if chat and md5 and len(md5) == 32:
-        cands = attach_paths(wxid, chat, md5)
+    # ⓪ attach 原图目录直查（按消息 XML md5 / packed_info md5 命名，不依赖
+    #    hardlink；hq=True 时优先高清 _h 版，供点击查看大图使用）
+    if chat and (md5 and len(md5) == 32 or bubble_md5 and len(bubble_md5) == 32):
+        cands = attach_paths(wxid, chat, md5, bubble_md5=bubble_md5)
         if hq:
             cands = sorted(cands, key=lambda p: (0 if "_h" in p.name else 1))
         if not cands:

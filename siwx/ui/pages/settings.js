@@ -319,13 +319,23 @@ async function loadDatasources() {
       box.innerHTML = '<div class="empty">未发现数据目录 —— 可用下方「手动添加数据目录」指定</div>';
       return;
     }
-    box.innerHTML = accs.map((a, i) => `
+    box.innerHTML = accs.map((a, i) => {
+      const initials = esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase());
+      // 真实头像优先（head_image.db 本人头像，端点内含带后缀目录名回退），
+      // 加载失败移除 img 露出底下的首字母占位。
+      const ava = `/api/chat/avatar?account=${encodeURIComponent(a.wxid)}&username=${encodeURIComponent(a.wxid)}`;
+      return `
       <div class="acc" data-i="${i}">
-        <div class="avatar">${esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
+        <div class="avatar">
+          <img class="acc-ava-img" src="${ava}" alt="" loading="lazy"
+               onerror="this.remove()">
+          <span>${initials}</span>
+        </div>
         <div class="acc-main"><b>${esc(a.wxid)}</b><span>${a.db_count || '?'} 个数据库</span></div>
         ${dsBadge(a.keys_cached, a.total_salts)}
         <button class="btn btn-sm" data-ds-run="${i}">重新提取</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     box.querySelectorAll('[data-ds-run]').forEach(btn => {
       btn.addEventListener('click', () => runExtract(accs[Number(btn.dataset.dsRun)], btn));
     });

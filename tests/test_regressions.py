@@ -408,6 +408,47 @@ class TestExport(TempRootCase):
         self.assertEqual(len(sess["files"]), 2)
         self.assertTrue(all(Path(f).is_file() for f in sess["files"]))
 
+    def test_multi_report_includes_size_duration_and_zip_size(self):
+        """报告逐会话带产物大小与耗时；整体 zip 带大小（前端结果面板展示用）。"""
+        acc, account, chat = self.acc, self.account, self.chat
+        res = exporter.run_export_multi(
+            acc, account, [{"chat": chat, "display": self.display}],
+            fmt="json", want_media=False, want_avatars=False,
+            export_root=self.tmp / "multi_report", pack="single")
+        sess = res["sessions"][0]
+        self.assertGreater(sess["size_bytes"], 0)
+        self.assertGreaterEqual(sess["duration_ms"], 0)
+        self.assertTrue(res["zip"])
+        self.assertGreater(res["zip_size"], 0)
+
+
+# ── 4.1 /api/job 结构化进度 ─────────────────────────────────────
+
+class TestJobProgressApi(TempRootCase):
+    """/api/job 除日志外还暴露结构化 progress 字段，前端不再从日志
+    文本里正则抠百分比（日志归日志、进度归进度）。"""
+
+    def test_job_status_includes_progress_field(self):
+        from siwx.server import app, _job
+        _job.update({"progress": {"pct": 42, "msg": "[2/5] 解密图片…"}})
+        try:
+            d = app.test_client().get("/api/job").get_json()
+        finally:
+            _job.update({"progress": {"pct": 0, "msg": ""}})
+        self.assertEqual(d["progress"]["pct"], 42)
+        self.assertEqual(d["progress"]["msg"], "[2/5] 解密图片…")
+
+    def test_job_progress_defaults_when_missing(self):
+        """老状态残留缺 progress 键时兜底返回零进度，前端拿到的形状恒定。"""
+        from siwx.server import app, _job
+        saved = _job.pop("progress", None)
+        try:
+            d = app.test_client().get("/api/job").get_json()
+        finally:
+            if saved is not None:
+                _job["progress"] = saved
+        self.assertEqual(d["progress"], {"pct": 0, "msg": ""})
+
 
 # ── 5.1 动画表情导出：CDN 下载兜底 + 渲染器 XML 实体解码 ─────────
 
@@ -2602,6 +2643,64 @@ class TestRecordinfoParsing(unittest.TestCase):
         self.assertIsNotNone(record)
 
 
+class TestFinderFeedParsing(unittest.TestCase):
+    """appmsg type=51 视频号卡片：findernamecard（转发名片）里带属性/自闭合
+    形态的 <nickname … /> 曾被 `<nickname[^>]*>` 前缀误当开标签，捕获组一路
+    吞到 <finderFeed> 深处真正的 </nickname>，整段 XML 进入展示字段——
+    聊天页"视频号 · "后面显示裸 XML。开标签必须止于空白或 `>` 且非自闭合。"""
+
+    # 合成结构：名片段的自闭合 nickname 在前，finderFeed 段的真昵称在后
+    XML = ('<msg><appmsg type="51"><title>当前版本不支持展示该内容</title>'
+           '<findernamecard>'
+           '<nickname alias="1" />'
+           '<avatar /><auth_job /><ecSource /><username />'
+           '</findernamecard>'
+           '<finderFeed>'
+           '<mediaList><media><mediaType>4</mediaType></media></mediaList>'
+           '<nickname>合成频道名</nickname>'
+           '<desc><![CDATA[合成视频描述]]></desc>'
+           '<duration>75</duration>'
+           '<objectNonceId>nonce_synthetic</objectNonceId>'
+           '</finderFeed>'
+           '</appmsg></msg>')
+
+    def test_nickname_not_polluted_by_self_closing_namecard_tag(self):
+        from siwx.api_chat import _parse_finder_feed
+        meta = _parse_finder_feed(self.XML)
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta["nickname"], "合成频道名")
+        self.assertNotIn("<", meta["nickname"])
+        self.assertEqual(meta["desc"], "合成视频描述")
+        self.assertEqual(meta["duration"], 75)
+        self.assertEqual(meta["nonce"], "nonce_synthetic")
+
+    def test_nickname_with_attributes_still_parses(self):
+        """带属性的常规开标签（<nickname flag="2">名</nickname>）不受影响。"""
+        from siwx.api_chat import _parse_finder_feed
+        xml = ('<finderFeed><nickname flag="2">属性形态频道</nickname>'
+               '<desc>d</desc></finderFeed>')
+        self.assertEqual(_parse_finder_feed(xml)["nickname"], "属性形态频道")
+
+    def test_self_closing_alone_yields_empty_not_xml(self):
+        """只有自闭合 nickname、无真 </nickname> 时取不到就是空串，不吐 XML。"""
+        from siwx.api_chat import _parse_finder_feed
+        xml = '<finderFeed><nickname alias="1" /><avatar /><desc>d</desc></finderFeed>'
+        meta = _parse_finder_feed(xml)
+        self.assertEqual(meta["nickname"], "")
+
+    def test_parse_quote_or_link_channels_kind(self):
+        from siwx.api_chat import parse_quote_or_link, message_kind
+        quote, link, record, channels = parse_quote_or_link(49, self.XML)
+        self.assertIsNone(quote)
+        self.assertIsNone(link)
+        self.assertIsNone(record)
+        self.assertEqual(channels["nickname"], "合成频道名")
+        self.assertEqual(message_kind(49, quote, link, channels), "channels")
+        # content 文案取 finderFeed 的描述首行，而不是被污染的昵称
+        from siwx.api_chat import _fmt
+        self.assertEqual(_fmt(49, self.XML), "[视频号] 合成视频描述")
+
+
 # ── 23. S6/S1：密钥不落盘 + 更新链 fail-closed ─────────────────
 
 class TestManifestKeyStrip(unittest.TestCase):
@@ -3979,6 +4078,56 @@ class TestMediaBackupApi(TempRootCase):
         self.assertTrue(st["ok"], st.get("error"))
         self.assertIn("images", st["report"])
         self.assertEqual(st["report"]["images"]["total"], 0)
+
+
+# ── Thumb 缩略图必须带 ts 限定（local_id 跨年撞号 → 错图顶替） ──────
+
+class TestThumbTsGuard(TempRootCase):
+    """cache Thumb 命名实测统一为 {local_id}_{ts}_thumb.jpg，但消息按月分库、
+    local_id 每月重排：同会话不同年份会撞号（真实事故：local_id=45 同时是
+    2020-03 的图片消息与 2025-09 的视频号消息）。旧实现裸 {local_id}_* 在
+    原图三级来源全部清理后，把 2025 年视频号封面静默配给了 2020 年的图片
+    消息（错图比缺图严重）。与 bubble_paths 同族缺陷，同修。"""
+
+    WRONG_TS = 1_752_000_000   # 另一年那条撞号消息的 ts
+    RIGHT_TS = 1_583_000_000   # 本消息 ts
+
+    def setUp(self):
+        super().setUp()
+        from siwx import media
+        self.media = media
+        chat = "wxid_test_friend"
+        self.chat = chat
+        self.cache = self.tmp / "cache"
+        thumb_dir = (self.cache / "2099-01" / "Message" /
+                     hashlib.md5(chat.encode()).hexdigest() / "Thumb")
+        thumb_dir.mkdir(parents=True)
+        self.wrong = thumb_dir / f"45_{self.WRONG_TS}_thumb.jpg"
+        self.right = thumb_dir / f"45_{self.RIGHT_TS}_thumb.jpg"
+        # 内容随意：thumb_paths 只做文件级匹配
+        self.wrong.write_bytes(b"\xff\xd8\xffwrong")
+        self.right.write_bytes(b"\xff\xd8\xffright")
+        ro = mock.patch.object(media, "_wechat_cache_roots",
+                               return_value=[self.cache])
+        ro.start()
+        self.addCleanup(ro.stop)
+
+    def test_same_local_id_other_year_is_not_matched(self):
+        """local_id 撞号：只允许命中同 ts 的缩略图。"""
+        got = self.media.thumb_paths("wxid_test_me", self.chat, 45, self.RIGHT_TS)
+        self.assertEqual([p.name for p in got], [self.right.name])
+
+    def test_missing_thumb_never_falls_back_to_wrong_year(self):
+        """本消息缩略图不存在时返回空——宁缺勿错，不许拿别年消息的顶替。"""
+        self.right.unlink()
+        got = self.media.thumb_paths("wxid_test_me", self.chat, 45, self.RIGHT_TS)
+        self.assertEqual(got, [])
+
+    def test_ts_missing_keeps_bare_prefix_fallback(self):
+        """ts 缺失（无法消歧）维持旧裸前缀行为，与 bubble_paths 对齐。"""
+        got = self.media.thumb_paths("wxid_test_me", self.chat, 45, None)
+        self.assertEqual(sorted(p.name for p in got),
+                         sorted([self.wrong.name, self.right.name]))
 
 
 if __name__ == "__main__":

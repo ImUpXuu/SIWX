@@ -1,6 +1,7 @@
 """Web 控制台：Flask 壳 —— 页面路由 + 任务槽；业务 API 在 api_*.py 模块化蓝图中。"""
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -156,7 +157,8 @@ _register_plugin_blueprints(app)
 # ── 全局状态（必须在路由和错误处理之前定义）──────────────────────
 _lock = threading.Lock()
 _job = {"running": False, "mode": None, "done": False, "ok": False,
-        "logs": [], "report": None, "error": None}
+        "logs": [], "report": None, "error": None,
+        "progress": {"pct": 0, "msg": ""}}
 _LOG_RING: list = []          # 环形日志缓冲（供日志页展示）
 _LOG_RING_MAX = 2000
 
@@ -411,6 +413,13 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                  f"打包={data.get('pack', 'folder')}")
             if start_ts:
                 _log(f"[export] 时间范围: {start} ~ {end or '现在'}")
+            def _export_progress(pct, msg):
+                # 进度同时走两条通道：结构化 progress（前端直接读字段，不再
+                # 从日志文本里正则抠百分比）+ 任务日志（留痕与旧前端兼容）
+                with _lock:
+                    _job["progress"] = {"pct": int(pct), "msg": str(msg or "")}
+                _log(f"[export] {pct}% {msg or ''}")
+
             res = exporter.run_export_multi(
                 acc_dir, data.get("account"), chats,
                 fmt=data.get("format", "json"),
@@ -422,7 +431,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 export_root=_paths.exports_root(),
                 pack=data.get("pack", "folder"),
                 template=data.get("template"),
-                progress=lambda pct, msg: _log(f"[export] {pct}% {msg}"))
+                progress=_export_progress)
             _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
                  f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"
                  f"耗时 {res.get('duration_ms', 0)}ms")
@@ -489,7 +498,12 @@ def index():
     links = _plugin_theme_links()
     if links:
         page = page.replace("</head>", f"{links}\n</head>", 1)
-    return Response(page, mimetype="text/html")
+    # 首页壳无版本号指纹（JS/CSS 才有 ?v=），必须禁缓存：否则浏览器
+    # 拿旧壳配新脚本，页面 ID 对不上 → init 里 addEventListener(null)
+    # 这类"偶现"脚本报错。
+    resp = Response(page, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def _plugin_theme_links() -> str:
@@ -671,7 +685,8 @@ def run():
             log.warn("server", "任务被拒绝: 已有任务在运行")
             return jsonify({"error": "已有任务在运行"}), 409
         _job.update({"running": True, "mode": data.get("mode", ""), "done": False,
-                     "ok": False, "logs": [], "report": None, "error": None})
+                     "ok": False, "logs": [], "report": None, "error": None,
+                     "progress": {"pct": 0, "msg": ""}})
     jid = _next_job_id()
     log.detailed("server", f"[{jid}] job 状态: running=True "
                            f"mode={data.get('mode', '')} done=False")
@@ -772,6 +787,28 @@ def _log_item_text(item) -> str:
     return str(item[3] if len(item) >= 4 else item[1])
 
 
+_FILE_LINE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?\s*\[(\w+)\]\s*siwx:\s*(.*)$",
+    re.DOTALL)
+
+
+def _dedup_key(item) -> tuple:
+    """跨轨归一化去重键（秒级时间 + 模块 + 消息正文）。
+
+    同一条日志会同时出现在 siwx.log 文件轨（"… [DEBUG] siwx: [模块] 正文"）
+    与结构化轨（[ts, level, module, 正文]）。旧键 = (毫秒时间戳, 原始文本)，
+    两轨前缀与毫秒永远不同 → 去重恒失效，详细模式下日志页每条成对出现。
+    文件轨剥掉前缀后与结构化轨按 (秒, "[模块] 正文") 对齐。
+    """
+    if len(item) >= 4:
+        return (int((item[0] or 0) // 1000), f"[{item[2]}] {item[3]}")
+    text = str(item[1] or "")
+    m = _FILE_LINE_RE.match(text)
+    if m:
+        return (int((item[0] or 0) // 1000), m.group(2))
+    return (int((item[0] or 0) // 1000), text)
+
+
 def _desensitize_item(item):
     """对单条日志条目的文本部分脱敏。
 
@@ -814,7 +851,7 @@ def _merged_logs(limit: int, *, desensitize: bool = True,
             continue
         if end_ts and (item[0] or 0) > end_ts:
             continue
-        key = (item[0], text)
+        key = _dedup_key(item)
         if key in seen:
             continue
         seen.add(key)
@@ -847,6 +884,30 @@ def api_logs():
         return jsonify({"error": "limit 参数无效（必须是整数）"}), 400
     merged = _merged_logs(limit)
     return jsonify({"logs": merged[-limit:], "level": log.get_level().value})
+
+
+@app.post("/api/logs/client")
+def api_log_client():
+    """前端 JS 异常上报：window.onerror/unhandledrejection 钩子回传，
+    写入结构化日志轨，日志页/文件日志直接可见（定位偶发页面脚本报错）。
+
+    字段全部来自浏览器运行时，按不可信输入处理：截断 + 去敏后再落盘。
+    """
+    data = request.get_json(silent=True) or {}
+    msg = str(data.get("message") or "")[:500]
+    if not msg:
+        return jsonify({"ok": False, "error": "message 为空"}), 400
+    parts = [msg]
+    src = str(data.get("source") or "")[:300]
+    if src:
+        loc = f"{data.get('line', '?')}:{data.get('col', '?')}"
+        parts.append(f"{src}@{loc}")
+    stack = str(data.get("stack") or "")[:2000]
+    if stack:
+        parts.append(stack)
+    kind = str(data.get("kind") or "error")[:20]
+    log.warn("ui", f"[前端{kind}] {log.desensitize_msg(' | '.join(parts))}")
+    return jsonify({"ok": True})
 
 
 @app.get("/api/logs/settings")
@@ -885,7 +946,7 @@ def api_log_export():
 
 @app.get("/api/job")
 def api_job():
-    """返回当前任务状态（供前端轮询）。"""
+    """返回当前任务状态（供前端轮询）。progress 为结构化进度，日志归日志。"""
     with _lock:
         return jsonify({
             "running": _job["running"],
@@ -895,6 +956,7 @@ def api_job():
             "logs": _job["logs"],
             "report": _job["report"],
             "error": _job["error"],
+            "progress": _job.get("progress") or {"pct": 0, "msg": ""},
         })
 
 

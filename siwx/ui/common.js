@@ -230,11 +230,13 @@
     return `<${tag}${attrs}>${body}</${tag}>`;
   }
 
-  /** 复制文本到剪贴板；非安全上下文回退到 execCommand。返回是否成功。 */
+  /** 复制文本到剪贴板；非安全上下文或权限被拒时回退到 execCommand。返回是否成功。 */
   async function copyText(text) {
     if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (e) { /* 无用户激活/权限被拒：走下面的兜底 */ }
     }
     const ta = document.createElement('textarea');
     ta.value = text;
