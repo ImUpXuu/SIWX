@@ -5,6 +5,7 @@ v1 能力：会话列表（session.db ∪ Msg_ 表统计）、消息分页、
 zstd 解压、类型映射、发送者解析（前缀 / real_sender_id / origin_source）。
 后续富文本（图片/语音实体）在此扩展。
 """
+import bisect
 import hashlib
 import html
 import os
@@ -13,6 +14,7 @@ import sqlite3
 import threading
 from collections import OrderedDict
 from contextlib import closing
+from datetime import datetime as _dt
 from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, current_app as _current_app, \
@@ -37,6 +39,27 @@ _SESSION_CACHE: dict = {}
 _SHARD_LOCK = threading.Lock()
 _CACHE_LOCK = threading.Lock()
 _HOLDER_SESSIONS = {"brandsessionholder", "brandservicesessionholder", "@placeholder_foldgroup"}
+
+# ── 聊天内搜索/筛选 ────────────────────────────────────────────
+# message_content 可能是 zstd 压缩 BLOB，SQL LIKE 会漏掉全部压缩行——
+# 关键词匹配必须在 Python 层解码后做。解码按 (库, 签名, 表名) 缓存，
+# 逐行 zstd 解码的成本摊到第一次查询，之后同分片的搜索/翻页纯内存扫描。
+_DECODED_CACHE: "OrderedDict[tuple, list]" = OrderedDict()
+_DECODED_CACHE_LOCK = threading.Lock()
+_DECODED_CACHE_MAX_SHARDS = 12   # 有界 LRU：大库全文缓存最多留 12 个分片
+
+# 前端筛选 kind → SQL 层可判定的 local_type 集合（& 0xFFFF 后的值）。
+# 引用/合并转发等富文本卡片归入 link 组——它们的判定要解析 XML，
+# SQL 层只按类型族粗筛，细粒度留给前端。
+_KIND_TYPES = {
+    "text": (1,),
+    "image": (3,),
+    "voice": (34,),
+    "video": (43,),
+    "sticker": (47,),
+    "link": (48, 49, 50, 51, 57),
+    "system": (10000, 10002),
+}
 
 
 def _dir_signature(msg_dir: Path):
@@ -1104,6 +1127,154 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
     return msgs
 
 
+def _decoded_rows(db: Path, table: str) -> list:
+    """分片解码缓存：文本行按 (库, 文件签名, 表名) 缓存，搜索零重复解码。
+
+    message_content 可能是 zstd 压缩 BLOB，SQL LIKE 对压缩行完全失明，
+    关键词匹配必须在 Python 层解码后做；把逐行解码的成本摊到第一次
+    查询，之后同分片的搜索/翻页是纯内存扫描。有界 LRU 防大库吃穿内存。
+    行形状: (ts, local_id, server_id, t, origin, rsid, text, packed, smap)。
+    """
+    try:
+        st = db.stat()
+        sig = (str(db), st.st_mtime_ns, st.st_size, table)
+    except OSError:
+        sig = (str(db), 0, 0, table)
+    with _DECODED_CACHE_LOCK:
+        hit = _DECODED_CACHE.get(sig)
+        if hit is not None:
+            _DECODED_CACHE.move_to_end(sig)
+            return hit
+    rows = []
+    conn = sqlite3.connect(db)
+    try:
+        smap = _sender_map(conn)
+        for r in conn.execute(
+                f"SELECT local_id, server_id, local_type, create_time, "
+                f"origin_source, real_sender_id, message_content, "
+                f"packed_info_data FROM [{table}]"):
+            ts = r[3] or 0
+            rows.append((ts, r[0] or 0, r[1], r[2] & 0xFFFF, r[4], r[5],
+                         _decode_content(r[6]), r[7], smap))
+        rows.sort(key=lambda x: (x[0], x[1]))
+    except sqlite3.Error:
+        rows = []
+    finally:
+        conn.close()
+    with _DECODED_CACHE_LOCK:
+        _DECODED_CACHE[sig] = rows
+        _DECODED_CACHE.move_to_end(sig)
+        while len(_DECODED_CACHE) > _DECODED_CACHE_MAX_SHARDS:
+            _DECODED_CACHE.popitem(last=False)
+    return rows
+
+
+def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
+                     smap, names, my_base, self_ids, is_group, chat) -> dict:
+    """单条消息行 → 前端气泡形状。/messages 的富化逻辑，普通分页与筛选
+    搜索两条路径共用；text 必须已经过 _decode_content。"""
+    sender_wxid = ""
+    m = SENDER_PREFIX_RE.match(text[:100]) if text else None
+    if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
+              or m.group(1).endswith("@chatroom")):
+        sender_wxid = m.group(1)
+        text = text[m.end():]
+    if not sender_wxid and rsid:
+        sender_wxid = smap.get(int(rsid), "")
+    if not is_group:
+        if sender_wxid and sender_wxid != chat:
+            pass
+        elif origin == 1:
+            sender_wxid = my_base
+        else:
+            sender_wxid = chat
+    if is_group and not sender_wxid and origin == 1:
+        sender_wxid = my_base
+    is_me = sender_wxid in self_ids
+    # 本人发送者归一到展示用 wxid：设备后缀变体不在联系人表，
+    # 不归一的话 sender_name/头像落不到本人身上
+    if is_me and sender_wxid != my_base and sender_wxid not in names \
+            and my_base in names:
+        sender_wxid = my_base
+    if is_group and not is_me and sender_wxid == chat:
+        sender_wxid = ""
+
+    md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
+    quote, link, record, channels = parse_quote_or_link(t, text, local_id=local_id, ts=ts)
+    kind = message_kind(t, quote, link, channels)
+    return {
+        "id": local_id, "platformMessageId": str(server_id or ""),
+        "ts": ts or 0, "type": t, "kind": kind,
+        "sender_wxid": sender_wxid,
+        "sender_name": names.get(sender_wxid, sender_wxid) if sender_wxid
+        else (names.get(chat, chat) if not is_group else ""),
+        "is_me": bool(is_me), "md5": md5, "bubble_md5": bubble_md5,
+        "voice": voice_meta, "sticker": sticker, "channels": channels,
+        "quote": quote, "link": link, "record": record,
+        "text": _fmt(t, text) if t != 1 else text,
+    }
+
+
+_INF = float("inf")
+
+
+def _filtered_messages_response(acc, account, chat, table, names, my_base,
+                                self_ids, is_group, q, kind, start_ts, end_ts,
+                                before, before_id, after, after_id, limit):
+    """筛选/搜索模式：Python 层匹配 + 内存游标分页。
+
+    类型与日期在缓存行上过滤，关键词大小写不敏感；总数精确返回，
+    游标语义与普通分页一致（before=更早窗口、after=更晚窗口）。"""
+    q_low = q.lower() if q else ""
+    type_set = _KIND_TYPES.get(kind, ()) if kind else ()
+    matches = []
+    for db in shards_for(acc, chat):
+        for (ts, local_id, server_id, t, origin, rsid, text, packed, smap) \
+                in _decoded_rows(db, table):
+            if type_set and t not in type_set:
+                continue
+            if start_ts and ts < start_ts:
+                continue
+            if end_ts and ts > end_ts:
+                continue
+            if q_low and q_low not in text.lower():
+                continue
+            matches.append((ts, local_id, server_id, t, origin, rsid,
+                            text, packed, smap))
+    matches.sort(key=lambda m: (m[0], m[1]))
+    total = len(matches)
+    keys = [(m[0], m[1]) for m in matches]
+    forward = bool(after)
+    if forward:
+        lo = (bisect.bisect_right(keys, (after, after_id)) if after_id
+              else bisect.bisect_right(keys, (after, _INF)))
+        page = matches[lo:lo + limit]
+        has_more = lo + limit < total     # after 模式：has_more = 还有更新的
+        has_newer = has_more
+    else:
+        if before:
+            hi = (bisect.bisect_left(keys, (before, before_id)) if before_id
+                  else bisect.bisect_left(keys, (before,)))
+        else:
+            hi = total
+        start = max(0, hi - limit)
+        page = matches[start:hi]
+        has_more = start > 0
+        has_newer = hi < total
+    msgs = [_enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text,
+                             packed, smap, names, my_base, self_ids, is_group,
+                             chat)
+            for (ts, local_id, server_id, t, origin, rsid, text, packed, smap)
+            in page]
+    display = names.get(chat, chat)
+    _log(f"[msg] 筛选返回 {len(msgs)}/{total} 条, q={'有' if q else '无'}, "
+         f"kind={kind or '全部'}, has_more={has_more}, has_newer={has_newer}")
+    return jsonify({"account": account, "chat": chat, "display": display,
+                    "is_group": is_group, "owner": my_base,
+                    "messages": msgs, "has_more": has_more,
+                    "has_newer": has_newer, "filtered": True, "total": total})
+
+
 @bp.get("/messages")
 def messages():
     """分页加载聊天消息：SQL LIMIT/OFFSET，不载入全部消息。"""
@@ -1142,6 +1313,33 @@ def messages():
     is_group = chat.endswith("@chatroom")
     _log(f"[msg] 查询消息: account={account}, chat={chat}, table={table}, "
          f"before={before}, before_id={before_id}, after={after}, limit={limit}")
+
+    # ── 聊天内搜索/筛选（微信式）：q=关键词 kind=类型 start/end=日期 ──
+    q = (request.args.get("q") or "").strip()
+    kind = (request.args.get("kind") or "").strip()
+    start_d = (request.args.get("start") or "").strip()
+    end_d = (request.args.get("end") or "").strip()
+    if len(q) > 200:
+        return jsonify({"error": "q 参数过长（≤200 字符）"}), 400
+    if kind and kind not in _KIND_TYPES:
+        return jsonify({"error": f"kind 参数无效: {kind}"}), 400
+
+    def _day_ts(s, end=False):
+        try:
+            base = _dt.strptime(s, "%Y-%m-%d")
+        except ValueError:
+            return None
+        return int(base.timestamp()) + (86399 if end else 0)
+
+    start_ts = _day_ts(start_d) if start_d else None
+    end_ts = _day_ts(end_d, end=True) if end_d else None
+    if (start_d and start_ts is None) or (end_d and end_ts is None):
+        return jsonify({"error": "start/end 参数无效（格式 YYYY-MM-DD）"}), 400
+    if q or kind or start_ts or end_ts:
+        return _filtered_messages_response(
+            acc, account, chat, table, names, my_base, self_ids, is_group,
+            q, kind, start_ts, end_ts,
+            before, before_id, after, after_id, limit)
 
     # 用分片索引只打开真正含该会话的分片（原来是把十几个库全扫一遍）。
     # 反向取最新的 limit 条（DESC），正向取最早的 limit 条（ASC）。
@@ -1218,50 +1416,10 @@ def messages():
 
     msgs = []
     for (local_id, server_id, ltype, ts, origin, rsid, content, packed), smap in page:
-        text = _decode_content(content)
-        sender_wxid = ""
-        m = SENDER_PREFIX_RE.match(text[:100]) if text else None
-        if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
-                  or m.group(1).endswith("@chatroom")):
-            sender_wxid = m.group(1)
-            text = text[m.end():]
-        if not sender_wxid and rsid:
-            sender_wxid = smap.get(int(rsid), "")
-        if not is_group:
-            if sender_wxid and sender_wxid != chat:
-                pass
-            elif origin == 1:
-                sender_wxid = my_base
-            else:
-                sender_wxid = chat
-        if is_group and not sender_wxid and origin == 1:
-            sender_wxid = my_base
-        is_me = sender_wxid in self_ids
-        # 本人发送者归一到展示用 wxid：设备后缀变体不在联系人表，
-        # 不归一的话 sender_name/头像落不到本人身上
-        if is_me and sender_wxid != my_base and sender_wxid not in names \
-                and my_base in names:
-            sender_wxid = my_base
-        if is_group and not is_me and sender_wxid == chat:
-            sender_wxid = ""
-
-        t = ltype & 0xFFFF
-        md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
-
-        quote, link, record, channels = parse_quote_or_link(t, text, local_id=local_id, ts=ts)
-        kind = message_kind(t, quote, link, channels)
-
-        msgs.append({
-            "id": local_id, "platformMessageId": str(server_id or ""),
-            "ts": ts or 0, "type": t, "kind": kind,
-            "sender_wxid": sender_wxid,
-            "sender_name": names.get(sender_wxid, sender_wxid) if sender_wxid
-            else (names.get(chat, chat) if not is_group else ""),
-            "is_me": bool(is_me), "md5": md5, "bubble_md5": bubble_md5,
-            "voice": voice_meta, "sticker": sticker, "channels": channels,
-            "quote": quote, "link": link, "record": record,
-            "text": _fmt(ltype, text) if t != 1 else text,
-        })
+        msgs.append(_enrich_chat_row(
+            local_id, server_id, ltype & 0xFFFF, ts, origin, rsid,
+            _decode_content(content), packed, smap,
+            names, my_base, self_ids, is_group, chat))
 
     # ── 插件层（无插件时零开销）──────────────────────────────
     if msgs and _plugins.has_message_hooks():
