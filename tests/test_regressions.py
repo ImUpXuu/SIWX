@@ -40,7 +40,7 @@ if str(ROOT) not in sys.path:
 # 故在导入 siwx 之前强制零插件模式；插件自身的测试见 tests/test_plugins.py。
 os.environ["SIWX_NO_PLUGINS"] = "1"
 
-from siwx import api_chat, exporter
+from siwx import api_chat, exporter, media
 from siwx.exporter import _safe_name
 from tests._base import IsolatedRootCase
 from tests import fixtures as fx
@@ -3809,6 +3809,49 @@ class TestFindKvcommCodesMacOS(unittest.TestCase):
             self.assertEqual(media.find_kvcomm_codes(), [])
 
 
+class TestMediaExportExtensionFromInfo(TempRootCase):
+    """_try_decrypt() 原实现只认 info 里有没有 "png"/"gif" 子串，其余
+    （wxgf 转码失败的原样留档、heic）一律落 else 写成 .jpg——文件名是
+    .jpg，字节却是别的格式，导出结果里是一份打不开的损坏文件。"""
+
+    def setUp(self):
+        super().setUp()
+        self.acc, self.account, self.chat = make_account(self.tmp, n_texts=6)
+
+    def _run_with_fake_image(self, body: bytes, ctype: str):
+        from siwx import exporter as ex
+
+        def fake_get_image(account, md5, acc_dir, **kw):
+            return body, ctype
+
+        old = ex.media.get_image
+        ex.media.get_image = fake_get_image
+        try:
+            dest = self.tmp / "media_out"
+            dest.mkdir(parents=True, exist_ok=True)
+            return ex._try_decrypt(str(self.acc), self.account, self.chat,
+                                   "a" * 32, None, 1, 1_700_000_000,
+                                   dest / "0000_aaaaaaaaaaaa.jpg")
+        finally:
+            ex.media.get_image = old
+
+    def test_heic_not_mislabeled_as_jpg(self):
+        out, reason = self._run_with_fake_image(b"\x00" * 32, "image/heic")
+        self.assertIsNotNone(out)
+        self.assertEqual(reason, "")
+        self.assertEqual(out.suffix, ".heic")
+
+    def test_wxgf_not_mislabeled_as_jpg(self):
+        out, reason = self._run_with_fake_image(b"wxgf" + b"\x00" * 28, "image/wxgf")
+        self.assertIsNotNone(out)
+        self.assertEqual(out.suffix, ".wxgf")
+
+    def test_jpeg_still_works(self):
+        out, reason = self._run_with_fake_image(b"\xff\xd8\xff" + b"\x00" * 29, "image/jpeg")
+        self.assertIsNotNone(out)
+        self.assertEqual(out.suffix, ".jpeg")
+
+
 class TestImageFailReason(TempRootCase):
     """P2-7：/api/chat/media/image 的 404 必须带结构化 reason，前端据此
     区分「没下载原图 / 解密失败 / 本平台无法解码」，不再只有一种文案。"""
@@ -3816,7 +3859,6 @@ class TestImageFailReason(TempRootCase):
     def setUp(self):
         super().setUp()
         self.acc, self.account, self.chat = make_account(self.tmp, n_texts=6)
-
     def test_reason_field_classifies_failures(self):
         from siwx import media
         from siwx.server import app
@@ -3934,7 +3976,9 @@ class TestMediaBackup(unittest.TestCase):
 
     def test_images_classified_by_content_type(self):
         """可预览(jpeg) / wxgf 转码失败后原样保留 / 真失败，三种结果各自
-        正确归类，wxgf 不被误标成打不开的假 jpg。"""
+        正确归类，wxgf 不被误标成打不开的假 jpg。转码本身走哪条平台分支
+        不是这个用例关心的（见 TestMediaBackupWxgfConversion），这里只
+        验证转码失败时"原样保留 wxgf"这条兜底路径。"""
         from siwx import media_backup
         (self.attach_root / "a.dat").write_bytes(b"fake-jpeg-bytes")
         (self.attach_root / "b.dat").write_bytes(b"fake-wxgf-bytes")
@@ -3965,7 +4009,8 @@ class TestMediaBackup(unittest.TestCase):
         self.assertFalse((out_dir / "c.wxgf").exists())
 
     def test_videos_copied_without_decryption(self):
-        """视频实测未加密（ISO Media/MP4 容器），原样复制，不经 media._decrypt_any。"""
+        """视频实测未加密（ISO Media/MP4 容器），原样复制即可，不经过
+        media._decrypt_any。"""
         from siwx import media_backup
         raw = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 20
         (self.video_root / "x.mp4").write_bytes(raw)
@@ -3982,9 +4027,13 @@ class TestMediaBackup(unittest.TestCase):
         self.assertEqual(out_file.read_bytes(), raw)
 
     def test_rerun_on_readonly_source_video_does_not_fail(self):
-        """实测踩坑：微信落盘的源视频本身只读。copy2() 连权限位一起拷到
-        目标后，重跑备份对同名只读目标再 copy2() 就是 PermissionError
-        （实测 1926 个视频 1913 个这样假性失败）。必须按大小跳过。"""
+        """实测踩坑：微信落盘的源视频文件本身是只读的（-r--r--r--）。旧实现
+        用 shutil.copy2() 连权限位也一起拷到目标文件——第一次备份后目标
+        也变只读，第二次运行（新消息到达后重新备份）对同名目标文件再次
+        copy2() 等于覆盖写一个只读文件，当场 PermissionError（实测 1926
+        个视频里 1913 个"已备份过的"全部这样假性失败，数据其实一直都在）。
+        模拟"已存在只读目标 + 内容不变"的重复运行场景，必须直接跳过，
+        不碰权限位也不报错。"""
         from siwx import media_backup
         raw = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 20
         src = self.video_root / "x.mp4"
@@ -4031,7 +4080,243 @@ class TestMediaBackup(unittest.TestCase):
 
         self.assertEqual(stats["total"], 1)
         self.assertEqual(stats["ok"], 1)
-        self.assertTrue((self.tmp / "out_files" / "2026-01" / "示例文档(1).pdf").is_file())
+        self.assertEqual(stats["failed"], 0)
+        out_file = self.tmp / "out_files" / "2026-01" / "示例文档(1).pdf"
+        self.assertTrue(out_file.is_file())
+        self.assertEqual(out_file.read_bytes(), raw)
+
+    def test_files_skips_ds_store(self):
+        from siwx import media_backup
+        (self.file_root / ".DS_Store").write_bytes(b"junk")
+        (self.file_root / "real.apk").write_bytes(b"PK\x03\x04" + b"\x00" * 10)
+
+        with self._patch_roots():
+            stats = media_backup.backup_files(self.wxid, self.tmp / "out_files",
+                                              log=None)
+
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["ok"], 1)
+        self.assertFalse((self.tmp / "out_files" / "2026-01" / ".DS_Store").exists())
+
+    def test_files_rerun_on_readonly_source_does_not_fail(self):
+        """同一只读权限位坑（见 backup_videos 的回归用例）：msg/file 下的
+        源文件也是只读的，重新运行备份时必须直接跳过已存在且内容不变的
+        目标文件，不碰权限位也不报错。"""
+        from siwx import media_backup
+        raw = b"PK\x03\x04" + b"\x00" * 20
+        src = self.file_root / "app.apk"
+        src.write_bytes(raw)
+        src.chmod(0o444)
+        dst = self.tmp / "out_files" / "2026-01" / "app.apk"
+        dst.parent.mkdir(parents=True)
+        dst.write_bytes(raw)
+        dst.chmod(0o444)
+
+        with self._patch_roots():
+            stats = media_backup.backup_files(self.wxid, self.tmp / "out_files",
+                                              log=None)
+
+        self.assertEqual(stats["failed"], 0)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(dst.read_bytes(), raw)
+
+    def test_no_account_dir_returns_empty_stats_not_raises(self):
+        from siwx import media_backup
+        with mock.patch("siwx.media._wechat_cache_roots", return_value=[]):
+            stats = media_backup.backup_images("wxid_nonexistent",
+                                               self.tmp / "out_none", log=None)
+        self.assertEqual(stats["total"], 0)
+        self.assertEqual(stats["failed"], 0)
+
+
+class TestMediaBackupWxgfConversion(unittest.TestCase):
+    """backup_images() 对解密出来的 wxgf 按平台分流转码——macOS 走
+    media_wxgf_macos 的批量接口（一次 attach 处理一批，不逐张开销）；
+    其它平台走 media.convert_wxgf() 的逐张调用（Windows VoipEngine.dll
+    句柄内部已缓存，逐张调用开销不大）。两条路径都要能在转码失败时
+    干净回退到"原样保留 wxgf"，不让整个备份中断。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_wxgfconv_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_macos_path_uses_batch_api_and_cleans_up_source(self):
+        from siwx import media_backup
+        wxgf = self.tmp / "a.wxgf"
+        wxgf.write_bytes(b"fake-wxgf")
+        heic = wxgf.with_suffix(".heic")
+        pending = [(wxgf, heic)]
+        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
+
+        def fake_batch(items, log=None):
+            for src, dst in items:
+                dst.write_bytes(b"HEIC-BYTES")
+            return {str(wxgf): {"ok": True, "bytes": 10}}
+
+        with mock.patch("siwx.media_backup.platform.system", return_value="Darwin"), \
+             mock.patch("siwx.media_wxgf_macos.convert_wxgf_batch", side_effect=fake_batch):
+            media_backup._convert_pending_wxgf(pending, stats, log=None)
+
+        self.assertEqual(stats["ok_viewable"], 1)
+        self.assertEqual(stats["ok_wxgf_preserved"], 0)
+        self.assertFalse(wxgf.exists())  # 转码成功后原始 wxgf 应被清理
+        self.assertTrue(heic.is_file())
+
+    def test_macos_path_preserves_wxgf_when_batch_reports_failure(self):
+        from siwx import media_backup
+        wxgf = self.tmp / "b.wxgf"
+        wxgf.write_bytes(b"fake-wxgf")
+        pending = [(wxgf, wxgf.with_suffix(".heic"))]
+        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
+
+        with mock.patch("siwx.media_backup.platform.system", return_value="Darwin"), \
+             mock.patch("siwx.media_wxgf_macos.convert_wxgf_batch",
+                        return_value={str(wxgf): {"ok": False, "reason": "no_wechat_process"}}):
+            media_backup._convert_pending_wxgf(pending, stats, log=None)
+
+        self.assertEqual(stats["ok_viewable"], 0)
+        self.assertEqual(stats["ok_wxgf_preserved"], 1)
+        self.assertTrue(wxgf.is_file())  # 转码失败，原始 wxgf 必须还在
+
+    def test_non_macos_path_uses_convert_wxgf_per_file(self):
+        from siwx import media_backup
+        wxgf = self.tmp / "c.wxgf"
+        wxgf.write_bytes(b"fake-wxgf")
+        pending = [(wxgf, wxgf.with_suffix(".heic"))]
+        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
+        jpeg_bytes = b"\xff\xd8\xff" + b"\x00" * 10
+
+        with mock.patch("siwx.media_backup.platform.system", return_value="Windows"), \
+             mock.patch("siwx.media.convert_wxgf", return_value=jpeg_bytes):
+            media_backup._convert_pending_wxgf(pending, stats, log=None)
+
+        self.assertEqual(stats["ok_viewable"], 1)
+        self.assertEqual(stats["ok_wxgf_preserved"], 0)
+        self.assertFalse(wxgf.exists())
+        self.assertTrue(wxgf.with_suffix(".jpeg").is_file())
+
+    def test_non_macos_path_preserves_wxgf_when_convert_returns_none(self):
+        from siwx import media_backup
+        wxgf = self.tmp / "d.wxgf"
+        wxgf.write_bytes(b"fake-wxgf")
+        pending = [(wxgf, wxgf.with_suffix(".heic"))]
+        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
+
+        with mock.patch("siwx.media_backup.platform.system", return_value="Windows"), \
+             mock.patch("siwx.media.convert_wxgf", return_value=None):
+            media_backup._convert_pending_wxgf(pending, stats, log=None)
+
+        self.assertEqual(stats["ok_viewable"], 0)
+        self.assertEqual(stats["ok_wxgf_preserved"], 1)
+        self.assertTrue(wxgf.is_file())
+
+    def test_log_none_does_not_raise(self):
+        """log=None 是本模块其余函数的既有约定（"不要日志"），这里不能因为
+        内部要给 convert_wxgf_batch 传 log 就炸出 TypeError。"""
+        from siwx import media_backup
+        wxgf = self.tmp / "e.wxgf"
+        wxgf.write_bytes(b"fake-wxgf")
+        pending = [(wxgf, wxgf.with_suffix(".heic"))]
+        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
+        with mock.patch("siwx.media_backup.platform.system", return_value="Darwin"), \
+             mock.patch("siwx.media_wxgf_macos.convert_wxgf_batch", return_value={}):
+            media_backup._convert_pending_wxgf(pending, stats, log=None)  # 不应抛异常
+        self.assertEqual(stats["ok_wxgf_preserved"], 1)
+
+
+class TestGetImageReusesBackup(unittest.TestCase):
+    """get_image() 优先复用 media_backup.py 已经转码好的结果，不现场重新
+    解密+转码。批量导出/浏览很多会话时，同一张图可能被多条消息引用到；
+    全量备份往往已经批量转过一遍、结果就在磁盘上，现场再走一遍
+    attach/hardlink/Bubble 解析 + （wxgf 的话）活的微信进程 LLDB 转码，
+    既慢得多，微信没开时还直接没法看——有现成备份就应该优先用。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_getimage_backup_"))
+        self.acc_out = self.tmp / "wxid_test"
+        self.backup_images = self.acc_out / "media_backup" / "images" / "chatmd5" / "2026-01" / "Img"
+        self.backup_images.mkdir(parents=True)
+        media._BACKUP_INDEX.clear()  # 每个用例独立，避免索引缓存串台
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        media._BACKUP_INDEX.clear()
+        media._IMG_CACHE.clear()
+
+    def test_viewable_backup_hit_skips_live_decrypt_entirely(self):
+        md5 = "a" * 32
+        (self.backup_images / f"{md5}_M.jpeg").write_bytes(
+            b"\xff\xd8\xff" + b"\x00" * 10)
+
+        with mock.patch("siwx.media.attach_paths") as m_attach, \
+             mock.patch("siwx.media._decrypt_any") as m_decrypt:
+            body, ctype = media.get_image("wxid_test", md5, self.acc_out)
+
+        self.assertEqual(ctype, "image/jpeg")
+        self.assertTrue(body.startswith(b"\xff\xd8\xff"))
+        m_attach.assert_not_called()
+        m_decrypt.assert_not_called()
+
+    def test_heic_backup_hit_converts_via_sips_for_browser_compat(self):
+        """第一版实现直接把 .heic 原样返回，浏览器 <img> 里 HEIC 原生支持
+        不可靠（Safari 能显示，Chrome/Firefox 普遍不行）——必须跟现场
+        转码路径一样，补一次 sips 转 JPEG。"""
+        md5 = "b" * 32
+        (self.backup_images / f"{md5}_M.heic").write_bytes(b"HEIC-BYTES")
+        jpeg_bytes = b"\xff\xd8\xff" + b"\x00" * 10
+
+        with mock.patch("siwx.media.platform.system", return_value="Darwin"), \
+             mock.patch("siwx.media_wxgf_macos._heic_to_jpeg", return_value=jpeg_bytes) as m_sips:
+            body, ctype = media.get_image("wxid_test", md5, self.acc_out)
+
+        self.assertEqual(ctype, "image/jpeg")
+        self.assertEqual(body, jpeg_bytes)
+        m_sips.assert_called_once()
+
+    def test_heic_backup_hit_falls_back_to_raw_heic_when_sips_fails(self):
+        md5 = "c" * 32
+        (self.backup_images / f"{md5}_M.heic").write_bytes(b"HEIC-BYTES")
+
+        with mock.patch("siwx.media.platform.system", return_value="Darwin"), \
+             mock.patch("siwx.media_wxgf_macos._heic_to_jpeg", return_value=None):
+            body, ctype = media.get_image("wxid_test", md5, self.acc_out)
+
+        self.assertEqual(ctype, "image/heic")
+        self.assertEqual(body, b"HEIC-BYTES")
+
+    def test_preserved_wxgf_in_backup_does_not_short_circuit(self):
+        """备份里的 .wxgf 是"转码失败时的兜底留档"，不算已有可预览结果——
+        不能直接原样返回给浏览器，必须落到下面走一遍正常的现场解析路径。"""
+        md5 = "d" * 32
+        (self.backup_images / f"{md5}_M.wxgf").write_bytes(b"wxgf" + b"\x00" * 10)
+
+        with mock.patch("siwx.media.attach_paths", return_value=[]) as m_attach:
+            body, info = media.get_image("wxid_test", md5, self.acc_out, chat="any")
+
+        m_attach.assert_called_once()  # 确实落到了现场解析路径
+        self.assertIsNone(body)  # 没有真实 attach 数据，自然找不到，返回失败是预期的
+
+    def test_backup_index_is_cached_across_calls(self):
+        md5 = "e" * 32
+        (self.backup_images / f"{md5}_M.jpeg").write_bytes(
+            b"\xff\xd8\xff" + b"\x00" * 10)
+        media.get_image("wxid_test", md5, self.acc_out)
+        backup_root = self.acc_out / "media_backup" / "images"
+        self.assertIn(str(backup_root), media._BACKUP_INDEX)
+        idx_obj_id = id(media._BACKUP_INDEX[str(backup_root)])
+        media._IMG_CACHE.clear()  # 清掉图片缓存，逼第二次调用重新走查找
+        media.get_image("wxid_test", md5, self.acc_out)
+        self.assertEqual(id(media._BACKUP_INDEX[str(backup_root)]), idx_obj_id)
+
+    def test_no_backup_dir_falls_through_to_live_path(self):
+        """账号从没跑过 media_backup 全量备份时，目录都不存在——必须正常
+        落到现场解析路径，不能因为目录缺失就报错。"""
+        acc_out = self.tmp / "wxid_never_backed_up"
+        with mock.patch("siwx.media.attach_paths", return_value=[]) as m_attach:
+            media.get_image("wxid_never_backed_up", "f" * 32, acc_out, chat="any")
+        m_attach.assert_called_once()
 
 
 class TestMediaBackupApi(TempRootCase):
