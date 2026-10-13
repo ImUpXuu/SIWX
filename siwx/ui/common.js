@@ -48,6 +48,7 @@
   /* 任务：POST /api/run + 轮询 /api/job；返回 stop()。 */
   function startJob(body, onLog, onDone) {
     let stop = false;
+    let failStreak = 0;
     (async () => {
       try {
         const r = await fetch('/api/run', {
@@ -61,7 +62,20 @@
         const poll = async () => {
           if (stop) return;
           let job;
-          try { job = await (await fetch('/api/job')).json(); } catch (e) { return; }
+          try {
+            job = await (await fetch('/api/job')).json();
+          } catch (e) {
+            // 后端重启/瞬时网络失败时不能直接 return：续跑的 setTimeout 只在成功
+            // 分支里，一次抖动就会既不再轮询、也永不回调 onDone（按钮永久卡死）。
+            // 抄 export.js 的做法，连续失败到阈值才放弃并明确报错。
+            if (++failStreak >= 5) {
+              onDone && onDone({ error: '与后端失去联系，请刷新页面后重试' });
+              return;
+            }
+            setTimeout(poll, 600);
+            return;
+          }
+          failStreak = 0;
           if (onLog) onLog(job.logs || []);
           if (job.running) {
             setTimeout(poll, 600);
@@ -94,13 +108,29 @@
   function go(hash) { location.hash = hash; }
   function setupDone() { return localStorage.getItem('siwx-setup-done') === '1'; }
   function setSetupDone() { localStorage.setItem('siwx-setup-done', '1'); }
-  function resetSetup() { localStorage.removeItem('siwx-setup-done'); }
 
   /* 图片解密失败占位 → 点击重试（在微信中打开图片下载原图后再点） */
   function imgFallback(img, retrySrc) {
     const span = document.createElement('span');
     span.className = 'm-retry';
     span.textContent = '[原图未下载 · 在微信中打开该图片后点此重试]';
+    /* 后端 404 带结构化 reason（api_chat._image_fail_reason）：按原因升级
+       文案，避免「本平台无法解码」被显示成「原图未下载」导致反复重试。
+       拉取失败保持默认文案。 */
+    fetch(retrySrc)
+      .then(r => (r.status === 404 ? r.json() : null))
+      .then(d => {
+        if (!d || !d.reason) return;
+        if (d.reason === 'no_decoder_on_platform') {
+          const kept = (d.error || '').indexOf('留档') >= 0
+            ? '，原始文件已留档到输出目录 wxgf_archive/' : '';
+          span.textContent = '[微信专有 wxgf 格式 · 本平台暂无法解码' + kept +
+            ' · 重启微信后点此重试]';
+        } else if (d.reason === 'decrypt_failed') {
+          span.textContent = '[原图解密失败 · 可点此重试]';
+        }
+      })
+      .catch(() => {});
     span.addEventListener('click', () => {
       const img2 = document.createElement('img');
       img2.className = 'm-img';
@@ -114,12 +144,22 @@
     img.replaceWith(span);
   }
 
-  /* 打开导出目录/文件（资源管理器），仅限 exports 根内 */
-  function openPath(path) {
-    fetch('/api/export/open', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path }),
-    });
+  /* 打开导出目录/文件（资源管理器），仅限 exports 根内；失败给出提示 */
+  async function openPath(path) {
+    let r;
+    try {
+      r = await fetch('/api/export/open', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+    } catch (e) {
+      toast('打开目录失败：' + e.message, true);
+      return;
+    }
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      toast('打开目录失败：' + (j.error || `HTTP ${r.status}`), true);
+    }
   }
 
   /* ── 插件渲染器：结构化节点树 → HTML ─────────────────────────────
@@ -208,7 +248,37 @@
     return ok;
   }
 
+  /* ── 全局 toast：非阻断轻反馈，替代 window.alert ─────────────
+   * 统一挂在壳层，任何页面都能 SX.toast('已复制')；err=true 用危险色。 */
+  let _toastTimer = null;
+  function toast(text, err) {
+    let box = document.getElementById('sx-toast-box');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'sx-toast-box';
+      box.setAttribute('aria-live', 'polite');
+      document.body.appendChild(box);
+    }
+    box.innerHTML = '';
+    const t = document.createElement('div');
+    t.className = 'sx-toast' + (err ? ' err' : '');
+    t.textContent = text;
+    box.appendChild(t);
+    clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => {
+      t.classList.add('out');
+      setTimeout(() => t.remove(), 200);
+    }, 2400);
+  }
+
+  /* ── 全局账号（状态本体在 app.js，这里做惰性转发）──────────────
+   * 页面用法：init 时 const account = SX.getAccount()；账号变化由壳层
+   * 统一重载页面，页面内不需要订阅事件。 */
+  function getAccount() { return window.__sxAccount ? window.__sxAccount.get() : null; }
+  function listAccounts() { return window.__sxAccount ? window.__sxAccount.list() : []; }
+  function setAccount(wxid, opts) { if (window.__sxAccount) window.__sxAccount.set(wxid, opts); }
+
   window.SX = { esc, timeStr, fmtTs, fmtListTs, fetchJSON, startJob, renderLog, go,
-                setupDone, setSetupDone, resetSetup, imgFallback, openPath,
-                renderNodes, copyText };
+                setupDone, setSetupDone, imgFallback, openPath,
+                renderNodes, copyText, toast, getAccount, listAccounts, setAccount };
 })();

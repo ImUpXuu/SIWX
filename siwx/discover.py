@@ -7,6 +7,7 @@ from pathlib import Path
 
 import psutil
 
+from siwx import logger as _slog
 from siwx import paths as _paths
 
 WECHAT_PROCESSES_WIN = ("weixin.exe", "wechat.exe")
@@ -25,13 +26,16 @@ def load_manual_data_dirs() -> list:
         return []
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as e:
+        # 审计 §3.6：配置损坏静默返回空 → 引导页直接回空，无从排查
+        _slog.warn("discover", f"手动路径配置损坏 {p.name}: {e}")
         return []
     paths = raw.get("paths", raw if isinstance(raw, list) else [])
     out, seen = [], set()
     for item in paths:
         r = validate_db_path(str(item or ""))
         if not r.get("ok"):
+            _slog.detailed("discover", f"手动路径被拒: {item} ({r.get('error', '')})")
             continue
         key = str(Path(r["db_dir"]).resolve()).casefold()
         if key in seen:
@@ -118,10 +122,15 @@ def find_wechat_pids():
             if name in [n.lower() for n in target_names]:
                 rss = proc.info["memory_info"].rss if proc.info["memory_info"] else 0
                 out.append((rss, proc.info["pid"]))
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except psutil.NoSuchProcess:
+            continue  # 正常竞态，不记（审计 §7.6 不埋点清单）
+        except psutil.AccessDenied:
+            _slog.detailed("discover", f"进程枚举被拒 pid={proc.info.get('pid')}")
             continue
     out.sort(reverse=True)
-    return [pid for _rss, pid in out]
+    pids = [pid for _rss, pid in out]
+    _slog.detailed("discover", f"微信进程: {pids}")
+    return pids
 
 
 def find_wechat_data_dirs():
@@ -143,11 +152,14 @@ def find_wechat_data_dirs():
                 if users_dir.is_dir():
                     try:
                         for user_dir in users_dir.iterdir():
-                            if user_dir.is_dir():
-                                roots.append(user_dir / "Documents" / "xwechat_files")
-                                roots.append(user_dir / "xwechat_files")
-                    except OSError:
-                        pass
+                            try:
+                                if user_dir.is_dir():
+                                    roots.append(user_dir / "Documents" / "xwechat_files")
+                                    roots.append(user_dir / "xwechat_files")
+                            except OSError:
+                                continue
+                    except OSError as e:
+                        _slog.detailed("discover", f"枚举 {users_dir} 失败: {e}")
     elif system == "Darwin":
         home = Path.home()
         containers = home / "Library" / "Containers"
@@ -164,14 +176,17 @@ def find_wechat_data_dirs():
         if users_dir.is_dir():
             try:
                 for user_dir in users_dir.iterdir():
+                    # 其他用户的 ~/Documents 受系统保护，is_dir() 会抛
+                    # PermissionError（EACCES 不在 pathlib 忽略的错误码内），
+                    # 必须逐个兜住，否则一个不可读用户就中断其余扫描。
                     try:
                         if user_dir.is_dir() and user_dir != home:
                             roots.append(user_dir / "Documents" / "xwechat_files")
                             roots.append(user_dir / "xwechat_files")
                     except OSError:
                         continue
-            except OSError:
-                pass
+            except OSError as e:
+                _slog.detailed("discover", f"枚举 {users_dir} 失败: {e}")
     else:
         roots = []
 
@@ -197,8 +212,16 @@ def find_wechat_data_dirs():
                 db = entry / "db_storage"
                 if db.is_dir():
                     add(entry.name, db)
-        except OSError:
+        except OSError as e:
+            # 枚举失败静默削减候选集不可见（审计 §3.6:195-196）
+            _slog.detailed("discover", f"枚举根目录 {root} 失败: {e}")
             continue
+
+    # 这行在每次扫描时都写：媒体解密每张图都会调 find_wechat_data_dirs()，
+    # 实测 logs/siwx.log 13760 行里 5800 行（42%）都是这条扫描噪音，把日志页
+    # 那个 5000 行的环形缓冲反复冲干净。降级为不写 UI 环的详细轨。
+    _slog.detailed("discover", f"扫描 {len(roots)} 个根, 命中 {len(out)} 账号",
+                   ring=False)
 
     # 用户手动指定的目录必须参与后续状态页、解密任务与媒体查找；否则自动
     # 扫描没命中时，引导页永远无法进入自定义路径流程。
@@ -313,8 +336,8 @@ def find_wechat_storage_in_registry() -> str:
             winreg.CloseKey(key)
             if install_path:
                 return str(Path(install_path).parent / "xwechat_files")
-        except Exception:
-            pass
+        except Exception as e:
+            _slog.detailed("discover", f"注册表读取失败: {type(e).__name__}: {e}")
     return ""
 
 

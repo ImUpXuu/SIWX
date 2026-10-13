@@ -33,11 +33,8 @@ python run.py decrypt --db-dir ~/Library/Containers/com.tencent.xinWeChat/Data/D
 ## 注意事项
 
 1. **微信必须运行并登录**：密钥只存在于运行中的进程内存
-2. **LLDB 权限：`sudo` 不够，必须关闭 SIP**（实测结论，非推测）。当前版本微信
-   开启了 hardened runtime 且不带 `get-task-allow` entitlement，SIP 开启时
-   内核 AMFI 会拒绝任何进程（包括 root）对它 `attach`，报错
-   `Not allowed to attach to process`；`sudo lldb ... attach` 会原样复现同一
-   错误。唯一可行路径：
+2. **微信版本必须 ≥ 4.1.80**：更低版本的 raw key 不走本工具的 LLDB 断点路径，提取恒为 0/N（issue #30）。先在「微信 → 关于微信」确认版本，不满足请先升级
+3. **SIP 必须关闭**（PR #27 纠偏）：SIP 开启时 AMFI 拒绝 attach 没有 `get-task-allow` 权限的 hardened-runtime 进程，**root / `sudo` 也不行**，只能 `csrutil disable` 后重启。文档旧版「可能需要 sudo」的说法不成立
    ```bash
    # 重启进入恢复模式 (Apple Silicon: 开机按住电源键 → 选项)
    # 恢复模式的 Terminal 里：
@@ -46,11 +43,7 @@ python run.py decrypt --db-dir ~/Library/Containers/com.tencent.xinWeChat/Data/D
    csrutil enable
    ```
    SIP 关闭期间系统级调试保护整体降级，不是只影响本工具，提取完成后应尽快改回。
-3. **断点只在数据库连接“新建”时命中一次**：若微信已经运行了一段时间，所有
-   `db_storage/*.db` 的连接早已建立，`sqlite3_key`/`CCKeyDerivationPBKDF`
-   不会再触发，`keys extract` 会稳定拿到 0/N。解决方法是强制微信重新建立
-   连接——完整退出并重新打开微信后，**立即**执行提取命令（启动后的几秒内
-   窗口很短）：
+4. **断点窗口只在数据库连接新建时命中一次**（PR #27）：微信跑久了不会再触发断点，必须**完整退出微信再重开**，并在窗口期内立即执行 `keys extract`。退出建议用 `killall WeChat`——`osascript … quit` 需要「自动化」权限，未授权时会静默失败，表现为「看着重启了其实还是旧 PID」
    ```bash
    killall WeChat   # 用 kill，不要用 "osascript ... quit"：
                      # 后者需要系统「自动化」权限，未授权时会静默失败，
@@ -58,9 +51,8 @@ python run.py decrypt --db-dir ~/Library/Containers/com.tencent.xinWeChat/Data/D
    open -a WeChat
    python run.py keys extract
    ```
-4. **首次使用**：建议先用 `python run.py keys extract` 测试密钥提取
-5. **多账号时按需用 `--db-dir` 缩小范围**：`keys extract --db-dir <path>` 只
-   处理指定账号，能避免把上面第 3 条的短暂捕获窗口浪费在不需要的账号上。
+5. **多账号机器**：用 `python run.py keys extract --db-dir <目标账号的 db_storage 路径>` 把捕获窗口留给目标账号
+6. **首次使用**：建议先用 `python run.py keys extract` 测试密钥提取
 
 ## 与 Windows 版本的差异
 
@@ -74,6 +66,5 @@ python run.py decrypt --db-dir ~/Library/Containers/com.tencent.xinWeChat/Data/D
 ## 测试状态
 
 - [x] WeChat 4.1.80 (Intel Mac, macOS 12.7.6)
-- [x] WeChat 4.1.13 (Apple Silicon Mac, macOS 27.0) —— 需 SIP 关闭 +
-      重启微信后立即提取（见「注意事项」第 2、3 条），27/27 salt 全部验证通过
+- [x] WeChat 4.1.80+ (Apple Silicon) — PR #26/#28 报告者实测（含 M 系列修复）
 - [ ] 更高版本微信

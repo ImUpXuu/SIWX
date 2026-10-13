@@ -41,7 +41,7 @@ if platform.system() == "Darwin":
 | 1 | `keystore_source` | 本机密钥库缓存命中 | 否 |
 | 2 | `mmkv` | MMKV 离线文件提取 | 否 |
 | 3 | `config_cipher` | WCDB Config.Cipher 只读扫描 | 是 |
-| 4 | `memscan` | 全内存 x'<hex>' 字面量兜底 | 是 |
+| 4 | `memscan` | 全内存 `x'<hex>'` 字面量兜底 | 是 |
 
 **跳过逻辑**:
 - `use_memory=False` 时跳过 `_PROCESS_DEPENDENT` 中的策略（全局收割已覆盖）

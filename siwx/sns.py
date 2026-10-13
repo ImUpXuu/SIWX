@@ -27,6 +27,8 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
 
+from siwx import logger as _sns_logger
+
 # ── 常量 ────────────────────────────────────────────────────────────
 
 SNS_ID_SHIFT = 23          # snsId = (createTime_ms << 23) | random(23bit)
@@ -356,6 +358,13 @@ def _parse_card(co, to) -> dict | None:
             card["description"] = texts[0]
         return card
 
+    # ── 小视频（Sight，type 15）：内容就是 mediaList 里那条视频，
+    # 卡片只是「微信小视频 + 升级页」占位（实测 61/61，title 有两种写法）。
+    # 渲染成外链卡只会把用户引到"请升级微信"死胡同，还会把视频流 URL
+    # 误当 cover_url；视频本身已在媒体网格里播放（密钥在 <enc key>）。
+    if title in ("微信小视频", "Weixin Sight") and "common_page__upgrade" in curl:
+        return None
+
     # ── 普通外链（type 3 链接 / type 5 外部直播等）─────────────────
     if title or desc or curl:
         card["kind"] = "link"
@@ -681,15 +690,18 @@ def iter_cache_images(acc_root: Path, decrypt_fn=None, limit: int | None = None)
                     raw = f.read_bytes()
                 except OSError:
                     stat["fail"] += 1
+                    _sns_logger.detailed("sns", f"缓存图读取失败 file={f.name} stage=read")
                     continue
                 body = decrypt_fn(raw)
                 if not body:
                     stat["fail"] += 1
+                    _sns_logger.detailed("sns", f"缓存图解密失败 file={f.name} stage=decrypt")
                     continue
                 ext = _image_ext(body)
                 wh = _jpeg_size(body) if ext == "jpg" else None
                 if wh is None:
                     stat["no_size"] += 1
+                    _sns_logger.detailed("sns", f"缓存图无尺寸 file={f.name} stage=size")
                     continue
                 st = f.stat()
                 out.append(CacheImage(f, f.name, wh[0], wh[1], st.st_mtime, len(raw), ext))
@@ -747,6 +759,9 @@ def match_feed_images(feed: dict, cache: list[CacheImage],
             continue
         w, h = m.get("width") or 0, m.get("height") or 0
         if not (w and h):
+            # 审计 §4.7：媒体无尺寸 → match 直接 none，此前无人知晓
+            _sns_logger.detailed(
+                "sns", f"媒体无尺寸 tid={feed.get('tid')} idx={idx}")
             results.append(Match(idx, "none", method="no-size"))
             continue
 
@@ -930,6 +945,7 @@ def export_image_pool(cache: list[CacheImage], dest_dir: Path,
             raw = c.path.read_bytes()
         except OSError:
             stat["fail"] += 1
+            _sns_logger.detailed("sns", f"图池导出失败 file={c.name} stage=read")
             continue
         body = decrypt_fn(raw) if decrypt_fn else None
         if body is None:
@@ -941,6 +957,7 @@ def export_image_pool(cache: list[CacheImage], dest_dir: Path,
                     break
         if not body:
             stat["fail"] += 1
+            _sns_logger.detailed("sns", f"图池导出失败 file={c.name} stage=decrypt")
             continue
         body = _strip_wechat_tail(body)
         import datetime as _dt
@@ -955,6 +972,7 @@ def export_image_pool(cache: list[CacheImage], dest_dir: Path,
             stat["bytes"] += len(body)
         except OSError:
             stat["fail"] += 1
+            _sns_logger.detailed("sns", f"图池导出失败 file={fname} stage=write")
     return stat
 
 
@@ -969,6 +987,7 @@ def iter_timeline(db_path: Path, desc: bool = True, limit: int | None = None):
     import sqlite3
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.text_factory = bytes
+    fail_n = 0
     try:
         sql = "SELECT tid, user_name, content FROM SnsTimeLine ORDER BY tid " + ("DESC" if desc else "ASC")
         if limit:
@@ -976,12 +995,29 @@ def iter_timeline(db_path: Path, desc: bool = True, limit: int | None = None):
         for tid, user, content in con.execute(sql):
             feed = parse_timeline(content)
             if feed is None:
+                # 审计 §4.7：实测 5684 条有 17 条解析失败，此前静默缺帖。
+                # tid/user/content 均可能是 bytes（text_factory=bytes），必须
+                # errors="replace" 解码；content 片段过脱敏（可能含他人 wxid/昵称）
+                fail_n += 1
+                try:
+                    tid_s = (tid.decode("utf-8", "replace")
+                             if isinstance(tid, (bytes, bytearray)) else tid)
+                    frag = (content[:200] if isinstance(content, (bytes, bytearray))
+                            else (content or "")[:200])
+                    if isinstance(frag, (bytes, bytearray)):
+                        frag = frag.decode("utf-8", "replace")
+                    frag = _sns_logger.desensitize_msg(frag)
+                    _sns_logger.detailed("sns", f"XML解析失败 tid={tid_s} content={frag!r}")
+                except Exception:
+                    pass
                 continue
             feed["tid"] = tid
             feed["ts_ms"] = sns_id_to_ms(tid)
             feed["ts"] = feed["ts_ms"] // 1000
             feed["user_name"] = (user or b"").decode("utf-8", "replace") if isinstance(user, bytes) else (user or "")
             yield feed
+        if fail_n:
+            _sns_logger.warn("sns", f"朋友圈动态 XML 解析失败 {fail_n} 条被跳过")
     finally:
         con.close()
 

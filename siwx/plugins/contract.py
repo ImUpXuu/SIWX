@@ -42,6 +42,14 @@ HOOK_KEYS = {
 SUPPORTED_API_VERSION = 1
 
 
+def _skip_non_dict(meta, hook: str, i: int, e) -> None:
+    """条目不是 dict 被跳过的统一埋点（审计 §6.1：最高频静默容错点，十余处）。
+
+    只记类型名 + hook 名 + 索引，便于插件作者定位拼错的声明。"""
+    log.detailed("plugin", f"{meta.name}.{hook}[{i}] 条目不是 dict"
+                           f"（{type(e).__name__}），已跳过")
+
+
 def resolve_callable(module, name):
     """把字符串函数名解析为同模块顶层可调用对象；失败返回 None。"""
     if callable(name):
@@ -122,8 +130,9 @@ def _build_pages(module, meta, entries):
     default_dir = str(getattr(module, "__siwx_pages_dir__", "") or "")
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "pages", i, e)
             continue
         name = str(e.get("name") or "").strip()
         if not name:
@@ -150,8 +159,9 @@ def _build_renderers(module, meta, entries):
     from siwx.plugins.registry import Renderer
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "renderers", i, e)
             continue
         fn = resolve_callable(module, e.get("render"))
         if fn is None:
@@ -171,12 +181,13 @@ def _build_renderers(module, meta, entries):
     return out
 
 
-def _build_decorators(module, meta, entries, default_hot=False):
+def _build_decorators(module, meta, entries, default_hot=False, hook="decorators"):
     from siwx.plugins.registry import Decorator
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, hook, i, e)
             continue
         fn = resolve_callable(module, e.get("decorate"))
         if fn is None:
@@ -199,8 +210,9 @@ def _build_settings(module, meta, entries):
 
     out = []
     seen = set()
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "settings", i, e)
             continue
         key = str(e.get("key") or "").strip()
         if not key or key in seen:
@@ -232,10 +244,11 @@ def _build_themes(module, meta, entries):
     from siwx.plugins.registry import GenericHook
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if isinstance(e, str):                       # 简写：直接给 CSS 文件名
             e = {"name": e, "css": e}
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "themes", i, e)
             continue
         name = str(e.get("name") or "").strip()
         spec = e.get("css") or e.get("fn")
@@ -264,8 +277,9 @@ def _build_cli(module, meta, entries):
     from siwx.plugins.registry import CliCommand
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "cli", i, e)
             continue
         name = str(e.get("name") or "").strip()
         fn = resolve_callable(module, e.get("handler"))
@@ -285,8 +299,9 @@ def _build_after_export(module, meta, entries):
     from siwx.plugins.registry import AfterExport
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "after_export", i, e)
             continue
         fn = resolve_callable(module, e.get("run"))
         if fn is None:
@@ -307,8 +322,9 @@ def _build_mcp(module, meta, entries):
     from siwx.plugins.registry import McpTool
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "mcp_tools", i, e)
             continue
         name = str(e.get("name") or "").strip()
         fn = resolve_callable(module, e.get("handler"))
@@ -316,11 +332,16 @@ def _build_mcp(module, meta, entries):
             log.warn("plugin", f"{meta.name}.mcp_tools 无效条目（name={name!r}）")
             continue
         schema = e.get("inputSchema") or e.get("input_schema") or {}
+        if not isinstance(schema, dict):
+            # 非 dict 的 schema 静默置空会让 MCP 工具无法正确传参
+            log.warn("plugin", f"{meta.name}.mcp_tools[{name}].inputSchema 非 dict"
+                               f"（{type(schema).__name__}），已置空")
+            schema = {}
         out.append(McpTool(
             name=name,
             description=str(e.get("description") or ""),
             handler=fn,
-            input_schema=schema if isinstance(schema, dict) else {},
+            input_schema=schema,
             meta=meta,
         ))
     return out
@@ -330,8 +351,9 @@ def _build_export(module, meta, entries):
     from siwx.plugins.registry import ExportFormat
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "export_formats", i, e)
             continue
         fmt = str(e.get("fmt") or "").strip().lower()
         fn = resolve_callable(module, e.get("writer"))
@@ -350,8 +372,9 @@ def _build_keys(module, meta, entries):
     from siwx.plugins.registry import KeyStrategy
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if not isinstance(e, dict):
+            _skip_non_dict(meta, "key_strategies", i, e)
             continue
         fn = resolve_callable(module, e.get("fn") or e.get("extract"))
         if fn is None:
@@ -364,15 +387,16 @@ def _build_keys(module, meta, entries):
     return out
 
 
-def _build_generic(module, meta, entries, fn_keys):
+def _build_generic(module, meta, entries, fn_keys, hook="hook"):
     """通用薄 hook：从多个可能的键里解析出函数。"""
     from siwx.plugins.registry import GenericHook
 
     out = []
-    for e in entries or []:
+    for i, e in enumerate(entries or []):
         if isinstance(e, str):
             e = {fn_keys[0]: e}
         if not isinstance(e, dict):
+            _skip_non_dict(meta, hook, i, e)
             continue
         fn = None
         for k in fn_keys:
@@ -409,6 +433,16 @@ def register_plugin(module, registry, data: dict) -> dict:
     registry.metas[meta.name] = meta
     counts = {}
 
+    # 未声明的 hook 键（拼错名）会被静默无视——detailed 提示插件作者
+    _known_plugin_keys = set(HOOK_KEYS) | {
+        "meta", "name", "version", "author", "description", "homepage",
+        "requires", "api_version", "pages_dir", "pages_hint", "api_blueprints",
+    }
+    unknown_keys = set(data) - _known_plugin_keys
+    if unknown_keys:
+        log.detailed("plugin", f"{meta.name} PLUGIN 未知键（拼写错误?）: "
+                               f"{', '.join(sorted(map(str, unknown_keys)))}")
+
     # 页面目录：优先 PLUGIN 的 pages_dir，其次模块级 __siwx_pages_dir__，
     # 最后由 loader 在导入前写入（单文件插件 → <file>.pages/，包插件 → <pkg>/pages/）
     default_pages_dir = _resolve_pages_root(
@@ -426,9 +460,11 @@ def register_plugin(module, registry, data: dict) -> dict:
         ("pages", lambda: _build_pages(module, meta, data.get("pages"))),
         ("renderers", lambda: _build_renderers(module, meta, data.get("renderers"))),
         ("message_decorators", lambda: _build_decorators(
-            module, meta, data.get("message_decorators"))),
+            module, meta, data.get("message_decorators"),
+            hook="message_decorators")),
         ("session_decorators", lambda: _build_decorators(
-            module, meta, data.get("session_decorators"))),
+            module, meta, data.get("session_decorators"),
+            hook="session_decorators")),
         ("settings", lambda: _build_settings(module, meta, data.get("settings"))),
         ("cli_commands", lambda: _build_cli(module, meta, data.get("cli"))),
         ("after_export", lambda: _build_after_export(
@@ -439,18 +475,24 @@ def register_plugin(module, registry, data: dict) -> dict:
         ("key_strategies", lambda: _build_keys(
             module, meta, data.get("key_strategies"))),
         ("content_transformers", lambda: _build_generic(
-            module, meta, data.get("content_transformers"), ("transform", "fn"))),
+            module, meta, data.get("content_transformers"), ("transform", "fn"),
+            hook="content_transformers")),
         ("avatar_resolvers", lambda: _build_generic(
-            module, meta, data.get("avatar_resolvers"), ("resolve", "fn"))),
+            module, meta, data.get("avatar_resolvers"), ("resolve", "fn"),
+            hook="avatar_resolvers")),
         ("media_providers", lambda: _build_generic(
-            module, meta, data.get("media_providers"), ("provide", "fn"))),
+            module, meta, data.get("media_providers"), ("provide", "fn"),
+            hook="media_providers")),
         ("session_filters", lambda: _build_generic(
-            module, meta, data.get("session_filters"), ("keep", "filter", "fn"))),
+            module, meta, data.get("session_filters"), ("keep", "filter", "fn"),
+            hook="session_filters")),
         ("task_listeners", lambda: _build_generic(
-            module, meta, data.get("task_listeners"), ("on_event", "fn"))),
+            module, meta, data.get("task_listeners"), ("on_event", "fn"),
+            hook="task_listeners")),
         ("themes", lambda: _build_themes(module, meta, data.get("themes"))),
         ("routes", lambda: _build_generic(
-            module, meta, data.get("routes"), ("handler", "fn"))),
+            module, meta, data.get("routes"), ("handler", "fn"),
+            hook="routes")),
     )
 
     for hook_name, builder in builders:
@@ -548,7 +590,7 @@ def _is_duplicate(target, item) -> bool:
     for existing in target.items:
         if _dup_key(existing) == key:
             return True
-    # 页面额外与内置 6 项比对（前端也会挡一层，这里是服务端保证）
+    # 页面额外与内置页名比对（前端也会挡一层，这里是服务端保证）
     if isinstance(item, object) and getattr(item, "name", None) in BUILTIN_PAGE_NAMES:
         return True
     return False
@@ -556,4 +598,4 @@ def _is_duplicate(target, item) -> bool:
 
 #: 内置 UI 页面名 —— 插件不得占用（前端也应保持内置优先）
 BUILTIN_PAGE_NAMES = frozenset(
-    {"guide", "chat", "export", "mcp", "logs", "settings"})
+    {"chat", "export", "mcp", "logs", "settings"})

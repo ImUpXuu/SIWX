@@ -1,72 +1,30 @@
-/* MCP 配置页 —— 左侧会话列表 + 右侧配置/工具开关 + 调用日志 */
-import { createDropdown } from '/widgets.js?v=2026100203';
-
-const { esc, fetchJSON, fmtTs, fmtListTs } = window.SX;
+/* MCP 配置页 —— 服务器信息 / 工具开关 / 调用日志 */
+const { esc, fetchJSON, toast } = window.SX;
 
 function el(id) { return document.getElementById(id); }
 
-let account = null;
-let sessions = [];
 let pollTimer = null;
-let accDrop = null;
-
-async function loadSessions() {
-  if (!account) return;
-  const { sessions: ss } = await fetchJSON(
-    `/api/chat/sessions?account=${encodeURIComponent(account)}`);
-  sessions = ss;
-  renderSessions('');
-}
-
-function renderSessions(kw) {
-  const k = (kw || '').toLowerCase();
-  const list = sessions.filter(s =>
-    !k || s.display.toLowerCase().includes(k) || s.username.toLowerCase().includes(k));
-  el('m-sessions').innerHTML = list.length ? list.map(s => {
-    const initials = (s.display || s.username || '?').slice(0, 2).toUpperCase();
-    return `
-    <div class="sess" data-u="${esc(s.username)}">
-      <div class="ava">${esc(initials)}</div>
-      <span class="name">${esc(s.display)}</span>
-      <span class="prev">${esc(s.preview || '')}</span>
-      <span class="tm">${fmtListTs(s.last_time)}</span>
-    </div>`;
-  }).join('') : '<div class="c-empty">没有匹配的会话</div>';
-}
 
 async function load() {
-  accDrop = createDropdown({ options: [], placeholder: '选择账号', label: '微信账号' });
-  el('m-account').appendChild(accDrop.el);
-  accDrop.onChange = (v) => { account = v; loadSessions(); };
-  try {
-    const { accounts } = await fetchJSON('/api/chat/accounts');
-    accDrop.options = accounts.map(a => ({ value: a.wxid, label: a.wxid }));
-    if (accounts.length) {
-      account = accDrop.value;
-      await loadSessions();
-    } else {
-      el('m-sessions').innerHTML = '<div class="c-empty">无解密产物</div>';
-    }
-  } catch (e) {
-    el('m-sessions').innerHTML = `<div class="c-empty">${esc(e.message)}</div>`;
-  }
-  el('m-search').addEventListener('input', () => renderSessions(el('m-search').value));
-
   try {
     const info = await fetchJSON('/api/mcp/info');
     const cmd = info.command;
     el('m-cmd').textContent = `"${cmd.command}" ${cmd.args.join(' ')}`;
     el('m-json').textContent = info.client_config;
     el('m-path').textContent = info.config_path;
-    el('m-tools').innerHTML = info.tools.map(t => `
+    el('m-tools').innerHTML = info.tools.length
+      ? info.tools.map(t => `
       <label class="m-tool">
         <input type="checkbox" data-t="${esc(t.name)}" ${t.enabled ? 'checked' : ''}>
         <div><b>${esc(t.name)}</b><span>${esc(t.description)}</span></div>
-      </label>`).join('');
+      </label>`).join('')
+      : '<div class="empty">暂无注册工具</div>';
   } catch (e) {
     el('m-tools').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
   }
   el('m-save').addEventListener('click', save);
+  el('m-all').addEventListener('click', () => setAllTools(true));
+  el('m-none').addEventListener('click', () => setAllTools(false));
   document.querySelectorAll('.copy-btn').forEach(b => {
     b.addEventListener('click', () => copy(b.dataset.target, b));
   });
@@ -75,26 +33,47 @@ async function load() {
   pollLogs();
 }
 
+function setAllTools(on) {
+  el('m-tools').querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.checked = on;
+  });
+}
+
 async function save() {
   const tools = {};
   el('m-tools').querySelectorAll('input[type=checkbox]').forEach(cb => {
     tools[cb.dataset.t] = cb.checked;
   });
-  await fetchJSON('/api/mcp/config', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ tools }),
-  });
-  el('m-save-msg').textContent = '✓ 已保存';
-  setTimeout(() => { el('m-save-msg').textContent = ''; }, 3000);
+  const btn = el('m-save');
+  btn.disabled = true;
+  try {
+    await fetchJSON('/api/mcp/config', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tools }),
+    });
+    const msg = el('m-save-msg');
+    if (msg) {
+      msg.textContent = '已保存';
+      setTimeout(() => { if (msg.isConnected) msg.textContent = ''; }, 3000);
+    }
+    toast('MCP 工具配置已保存');
+  } catch (e) {
+    toast('保存失败：' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function copy(target, btn) {
-  const text = el(target).textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    btn.textContent = '✓ 已复制';
-    setTimeout(() => { btn.textContent = '复制'; }, 1500);
-  } catch (e) { /* 忽略 */ }
+  const text = el(target)?.textContent ?? '';
+  const ok = await window.SX.copyText(text);
+  if (!btn.isConnected) return;
+  if (ok) {
+    btn.textContent = '已复制';
+    setTimeout(() => { if (btn.isConnected) btn.textContent = '复制'; }, 1500);
+  } else {
+    toast('复制失败，请手动选择', true);
+  }
 }
 
 // ── MCP 调用日志 ───────────────────────────────────────────────
@@ -103,17 +82,18 @@ async function pollLogs() {
   if (pollTimer) clearInterval(pollTimer);
   const box = el('m-log');
   const render = (lines) => {
+    // 用户上翻阅读时不再强制拽回底部（距底 >40px 视为正在阅读）
+    const stick = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
     box.innerHTML = lines.map(ln => {
-      // 级别着色
       let cls = 'log-line';
       if (ln.includes('[ERROR]')) cls += ' err';
       else if (ln.includes('完成')) cls += ' ok';
-      else if (ln.includes('调用')) cls += '';
       return `<div class="${cls}">${esc(ln)}</div>`;
     }).join('') || '<div class="log-line dim">暂无日志…</div>';
-    box.scrollTop = box.scrollHeight;
+    if (stick) box.scrollTop = box.scrollHeight;
   };
   const fetchLogs = async () => {
+    if (document.hidden) return;             // 后台标签页暂停轮询
     try {
       const d = await fetchJSON('/api/mcp/logs?limit=200');
       render(d.logs || []);

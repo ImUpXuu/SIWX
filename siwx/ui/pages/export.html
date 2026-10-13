@@ -1,8 +1,7 @@
 <div class="export-wrap">
   <aside class="e-list">
     <div class="e-top">
-      <div id="e-account"></div>
-      <input id="e-search" placeholder="搜索会话…">
+      <input id="e-search" placeholder="搜索会话…" aria-label="搜索会话">
       <label class="e-selall"><input type="checkbox" id="e-selall"> 全选</label>
     </div>
     <div id="e-sessions"></div>
@@ -14,19 +13,20 @@
       <div class="f-grid2">
         <label>导出格式<div id="e-fmt"></div></label>
         <label>打包方式<div id="e-pack"></div></label>
+        <label>HTML 模板<div id="e-tpl"></div></label>
         <label>开始日期<div id="e-start"></div></label>
         <label>结束日期<div id="e-end"></div></label>
       </div>
       <div class="f-checks">
-        <label class="f-chk"><input type="checkbox" id="e-msg" checked> 💬 消息记录</label>
-        <label class="f-chk"><input type="checkbox" id="e-media"> 🖼 媒体图片（按需解密）</label>
-        <label class="f-chk"><input type="checkbox" id="e-voice"> 🎤 语音（转 WAV，失败保留 SILK）</label>
-        <label class="f-chk"><input type="checkbox" id="e-ava"> 👤 联系人头像</label>
+        <label class="f-chk"><input type="checkbox" id="e-msg" checked> 消息记录</label>
+        <label class="f-chk"><input type="checkbox" id="e-media"> 媒体图片（按需解密）</label>
+        <label class="f-chk"><input type="checkbox" id="e-voice"> 语音（转 WAV，失败保留 SILK）</label>
+        <label class="f-chk"><input type="checkbox" id="e-ava"> 联系人头像</label>
       </div>
-      <div class="g-nav"><button id="e-run" class="btn btn-primary" disabled>📦 开始导出</button></div>
+      <div class="g-nav"><button id="e-run" class="btn btn-primary" disabled>开始导出</button></div>
     </div>
 
-    <div class="card" id="e-progress-card" style="display:none">
+    <div class="card hidden" id="e-progress-card">
       <div class="progress"><div class="bar" id="e-bar" style="width:0%"></div></div>
     </div>
 

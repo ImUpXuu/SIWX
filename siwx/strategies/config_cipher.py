@@ -100,13 +100,18 @@ def _candidates_from_decoded_generic(decoded: bytes, mask: bytes):
     return out
 
 
-def _try_candidates(cands, page1_by_salt, key_map, attrib, strategy, log) -> int:
-    found = 0
+def _try_candidates(cands, page1_by_salt, key_map, attrib, strategy, log):
+    """逐候选 HMAC 验证。返回 (found, tried, bad_hex)：
+    tried=实际参与验证的候选数，bad_hex=因非法 hex 被丢弃的候选数
+    （审计 §3.4:63-66/94-97/106-109/114-121：候选丢弃与 HMAC 失败计数）。"""
+    found = tried = bad_hex = 0
     for key_hex, emb_salt in cands:
         try:
             kb = bytes.fromhex(key_hex)
         except ValueError:
+            bad_hex += 1
             continue
+        tried += 1
         targets = []
         if emb_salt and emb_salt in page1_by_salt and emb_salt not in key_map:
             targets.append(emb_salt)
@@ -121,7 +126,7 @@ def _try_candidates(cands, page1_by_salt, key_map, attrib, strategy, log) -> int
                 break
         if len(key_map) >= len(page1_by_salt):
             break
-    return found
+    return found, tried, bad_hex
 
 
 # ---------------- 自研掩码恢复（crib-drag 约束求解） ----------------
@@ -212,6 +217,8 @@ def extract(ctx) -> int:
     key_map = ctx["key_map"]
     attrib = ctx["attrib"]
     log = ctx["log"]
+    # 审计 §2.1 双通道：Debug 才该出现的失败细分/计数走 dbg（不刷任务面板）
+    dbg = ctx.get("dbg", log)
 
     pids = winproc.psutil_pid_list()
     if not pids:
@@ -221,12 +228,15 @@ def extract(ctx) -> int:
 
     entry = len(key_map)
     found_any = False
+    tot_found = tot_tried = tot_bad = 0
     for pid in pids:
         if len(key_map) >= len(page1_by_salt):
             break
         h = winproc.open_process(pid)
         if not h:
-            log(f"[cipher] PID={pid} 无法打开 (权限不足?)")
+            # 审计 §3.4:227-230：配合 winproc use_last_error 改造，记真实错误码
+            dbg(f"[cipher] PID={pid} 打开失败 "
+                f"err={winproc._stats.get('open_last_err', 0)}")
             continue
         try:
             regions = winproc.enum_regions(h)
@@ -247,8 +257,11 @@ def extract(ctx) -> int:
             log(f"[cipher] PID={pid}: 定位 {len(needle_addrs)} 个 needle")
 
             # 第二遍：找指向 needle 的 (ptr, len) 节点 → config 对象 → blob
+            # 指针链逐层计数（审计 §3.4:264-279：结构体偏移因微信版本失效时
+            # 定位失败发生在哪一层）
             blobs = []
             seen = set()
+            n_node = n_cfg = n_blob = 0
             pair_patterns = [
                 struct.pack("<Q", a) + struct.pack("<Q", len(CONFIG_CIPHER_NAME))
                 for a in needle_addrs
@@ -263,34 +276,50 @@ def extract(ctx) -> int:
                         node_base = qaddr - 0x10
                         node = winproc.read_mem(h, node_base, 0x50)
                         if node and len(node) >= 0x40:
+                            n_node += 1
                             if (_u64_from(node, 0x10) in needle_addrs
                                     and _u64_from(node, 0x18) == len(CONFIG_CIPHER_NAME)):
                                 config_ptr = _u64_from(node, 0x28)
                                 if 0x10000 <= config_ptr < winproc.MAX_USER_ADDRESS:
                                     obj = winproc.read_mem(h, config_ptr + 0x88, 0x28)
                                     if obj and len(obj) >= 0x18:
+                                        n_cfg += 1
                                         data_ptr = _u64_from(obj, 0x8)
                                         data_len = _u64_from(obj, 0x10)
                                         if (0 < data_len <= CONFIG_BLOB_MAX
                                                 and 0x10000 <= data_ptr < winproc.MAX_USER_ADDRESS):
                                             blob = winproc.read_mem(h, data_ptr, int(data_len))
                                             if blob and len(blob) == data_len and blob not in seen:
+                                                n_blob += 1
                                                 seen.add(blob)
                                                 blobs.append(blob)
                         pos = data.find(pat, pos + 1)
+            dbg(f"[cipher] PID={pid} 指针链: node命中={n_node} config命中={n_cfg} "
+                f"blob命中={n_blob} RPM失败={winproc._stats.get('rpm_fail', 0)}")
             if not blobs:
                 log(f"[cipher] PID={pid}: 未取得配置 blob")
                 continue
             log(f"[cipher] PID={pid}: 取得 {len(blobs)} 个配置 blob，尝试内置掩码…")
 
-            for blob in blobs:
+            for i, blob in enumerate(blobs):
                 cands = list(_blob_key_candidates(blob))
-                if _try_candidates(cands, page1_by_salt, key_map, attrib, "cipher", log):
+                # 审计 §3.4:287-289：blob 在但解不出候选（内置掩码失效第一信号）。
+                # blob 内容绝不落日志。
+                dbg(f"[cipher] blob#{i} len={len(blob)} 候选={len(cands)}")
+                f, tr, bd = _try_candidates(
+                    cands, page1_by_salt, key_map, attrib, "cipher", log)
+                tot_found += f
+                tot_tried += tr
+                tot_bad += bd
+                if f:
                     found_any = True
+            dbg(f"[cipher] PID={pid} 候选汇总: 命中={tot_found} "
+                f"尝试={tot_tried} 非法hex={tot_bad}")
 
             # 掩码恢复兜底（微信升级导致内置掩码失效时）
             if not found_any and len(key_map) < len(page1_by_salt):
                 log("[cipher] 内置掩码未命中，启用验证引导的掩码求解…")
+                dbg(f"[cipher] 掩码求解仅用 blob[0]（共 {len(blobs)} 个）")
 
                 def check(mask_bytes, _blobs=blobs):
                     for blob in _blobs:
@@ -298,7 +327,7 @@ def extract(ctx) -> int:
                         cands = _candidates_from_decoded_generic(decoded, mask_bytes)
                         if cands and _try_candidates(
                                 cands, page1_by_salt, key_map, attrib,
-                                "cipher/掩码恢复", log):
+                                "cipher/掩码恢复", log)[0]:
                             return True
                     return False
 
@@ -310,6 +339,9 @@ def extract(ctx) -> int:
                 if mask is not None:
                     log(f"[cipher] 求解掩码: {mask.hex()}")
                     found_any = True
+                else:
+                    # 审计 §3.4:292-311：crib 与打分两路都失败必须可见
+                    dbg("[cipher] 掩码求解失败: crib 与 ASCII 打分均未命中")
         finally:
             winproc.close_handle(h)
         if found_any:

@@ -1,7 +1,7 @@
-/* 聊天统计页 —— 所有图表用内联 SVG 手绘，零外部依赖，沿用黑白描边风格 */
-import { createDropdown, createDatePicker } from '/widgets.js?v=2026100203';
+/* 聊天统计页 —— 账号来自全局账号卡（SX.getAccount），本页不再自选 */
+import { createDropdown, createDatePicker } from '/widgets.js?v=2026100601';
 
-const { esc, fmtTs, fetchJSON } = window.SX;
+const { esc, fmtTs, fetchJSON, getAccount, go, toast } = window.SX;
 
 function el(id) { return document.getElementById(id); }
 function nf(n) { return (Number(n) || 0).toLocaleString('zh-CN'); }
@@ -9,10 +9,13 @@ function nf(n) { return (Number(n) || 0).toLocaleString('zh-CN'); }
 let account = null;
 let lastData = null;
 let busy = false;
-let accDrop = null;
+let pendingLoad = 0;             // busy 期间用户又改了筛选：0 无 / 1 普通刷新 / 2 强刷
 let rangeDrop = null;
 let startPick = null;
 let endPick = null;
+
+/* 页面存活哨兵：切页后仍在飞的异步回调就此止步 */
+function gone() { return !document.getElementById('st-body'); }
 
 /* ── SVG 小工具 ─────────────────────────────────────────── */
 function svg(w, h, inner, cls) {
@@ -20,12 +23,7 @@ function svg(w, h, inner, cls) {
     preserveAspectRatio="xMidYMid meet" role="img">${inner}</svg>`;
 }
 
-/* 灰阶调色板改由 CSS 类（.st-shade-N，见 stats.css）承载：
-   浅色/深色主题各有一套值，切换主题时无需重绘图表 */
-
-/* 动画工具：用 CSS 变量把目标值交给样式表，由 CSS transition 补间。
-   直接写死属性会让动画被"瞬移"掉 —— 浏览器不会对首次渲染的 SVG
-   属性做过渡，必须先给出起点（0），下一帧再改成目标值。        */
+/* 动画工具：用 CSS 变量把目标值交给样式表，由 CSS transition 补间 */
 const animQueue = [];
 
 /** 让元素在下一帧从 from 过渡到 to（写 CSS 变量，样式表负责 transition） */
@@ -39,7 +37,7 @@ function animVar(node, prop, from, to, delay) {
   });
 }
 
-/** 统一冲刷动画队列：两帧后统一触发，避免每个元素各自 requestAnimationFrame */
+/** 统一冲刷动画队列：两帧后统一触发 */
 function flushAnim() {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     animQueue.forEach(fn => { try { fn(); } catch (e) { /* 忽略单点失败 */ } });
@@ -49,6 +47,12 @@ function flushAnim() {
 
 /* ── 环形图（类型分布）────────────────────────────────────── */
 function donut(groups) {
+  // 色板只有 8 档：超过 8 类时合并为「其他」，避免扇区与图例撞色
+  if (groups.length > 8) {
+    const head = groups.slice(0, 7);
+    const rest = groups.slice(7);
+    groups = head.concat([{ label: `其他（${rest.length} 类）`, count: rest.reduce((s, g) => s + g.count, 0) }]);
+  }
   const total = groups.reduce((s, g) => s + g.count, 0) || 1;
   const size = 190, cx = size / 2, cy = size / 2;
   const r = 68, sw = 26;
@@ -56,7 +60,6 @@ function donut(groups) {
   let offset = 0;
 
   const arcs = groups.map((g, i) => {
-    // 每段留 1.5px 视觉间隙，避免同色相邻糊成一片
     const frac = g.count / total;
     const len = Math.max(0, frac * C - 1.5);
     const seg = `<circle class="st-arc st-shade-${i % 8}" cx="${cx}" cy="${cy}" r="${r}" fill="none"
@@ -72,7 +75,7 @@ function donut(groups) {
 
   const hole = `<circle cx="${cx}" cy="${cy}" r="${r - sw / 2 - 1}" fill="var(--card)"></circle>`;
   const txt = `<text class="st-donut-val" x="${cx}" y="${cy - 4}" text-anchor="middle"
-      style="font-size:22px;font-weight:700">${nf(total)}</text>
+      style="font-size:22px;font-weight:700;fill:var(--text)">${nf(total)}</text>
     <text x="${cx}" y="${cy + 15}" text-anchor="middle"
       style="font-size:11px">条消息</text>`;
 
@@ -96,7 +99,6 @@ function monthBars(items) {
   const iw = W - padL - padR, ih = H - padT - padB;
   const max = Math.max(...items.map(d => d.count), 1);
 
-  // Y 轴 4 条网格线
   let grid = '', yl = '';
   for (let i = 0; i <= 4; i++) {
     const v = max * i / 4;
@@ -109,19 +111,16 @@ function monthBars(items) {
   const bw = Math.max(3, Math.min(38, iw / items.length * 0.62));
   const step = iw / items.length;
   const bars = items.map((d, i) => {
-    const h = (d.count / max) * ih;
+    const h = Math.max(1, (d.count / max) * ih);
     const x = padL + step * i + (step - bw) / 2;
     const isTop = d.count === max;
-    // 每根柱子都带 <title>，鼠标悬停可看具体月份与条数。
-    // 高度用 CSS 变量 + scaleY，这样能走 GPU 合成，比动画 height 顺滑。
     return `<rect class="bar-grow ${isTop ? 'bar' : 'bar-dim'}"
-      x="${x.toFixed(1)}" y="${padT.toFixed(1)}" width="${bw.toFixed(1)}"
-      height="${Math.max(1, ih).toFixed(1)}"
-      rx="2" style="--grow:${(h / Math.max(1, ih)).toFixed(4)};--i:${i}">
+      x="${x.toFixed(1)}" y="${(padT + ih - h).toFixed(1)}" width="${bw.toFixed(1)}"
+      height="${h.toFixed(1)}"
+      rx="2" style="--grow:${(h / ih).toFixed(4)};--i:${i}">
       <title>${esc(d.month)}：${nf(d.count)} 条</title></rect>`;
   }).join('');
 
-  // X 轴标签：按可用宽度抽稀，避免重叠
   const every = Math.ceil(items.length / Math.floor(iw / 52)) || 1;
   const xl = items.map((d, i) => {
     if (i % every) return '';
@@ -156,12 +155,12 @@ function hourBars(hours) {
   const step = iw / 24;
   const bw = Math.max(4, step * 0.66);
   const bars = hours.map((v, i) => {
-    const h = (v / max) * ih;
+    const h = Math.max(1, (v / max) * ih);
     const x = padL + step * i + (step - bw) / 2;
     const cls = i === peak ? 'bar' : 'bar-dim';
-    return `<rect class="bar-grow ${cls}" x="${x.toFixed(1)}" y="${padT.toFixed(1)}"
-      width="${bw.toFixed(1)}" height="${Math.max(1, ih).toFixed(1)}" rx="2"
-      style="--grow:${(h / Math.max(1, ih)).toFixed(4)};--i:${i}">
+    return `<rect class="bar-grow ${cls}" x="${x.toFixed(1)}" y="${(padT + ih - h).toFixed(1)}"
+      width="${bw.toFixed(1)}" height="${h.toFixed(1)}" rx="2"
+      style="--grow:${(h / ih).toFixed(4)};--i:${i}">
       <title>${String(i).padStart(2, '0')}:00 — ${nf(v)} 条</title></rect>`;
   }).join('');
 
@@ -170,7 +169,6 @@ function hourBars(hours) {
       text-anchor="middle" style="font-size:10.5px">${String(i).padStart(2, '0')}</text>`
   )).join('');
 
-  // 峰值标注
   const px = padL + step * peak + step / 2;
   const peakH = (hours[peak] / max) * ih;
   const mark = `<text x="${px.toFixed(1)}" y="${(padT + ih - peakH - 7).toFixed(1)}"
@@ -186,14 +184,13 @@ function hourBars(hours) {
 function weekdayBars(days) {
   const names = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
   const max = Math.max(...days, 1);
-  return `<div style="display:flex;flex-direction:column;gap:9px">${
+  return `<div class="st-week-rows">${
     days.map((v, i) => `
     <div class="st-mini">
-      <span style="width:38px;flex:none;font-size:12.5px">${names[i]}</span>
+      <span class="st-week-name">${names[i]}</span>
       <span class="track"><span class="fill" data-w="${(v / max * 100).toFixed(1)}"
         style="--i:${i}"></span></span>
-      <span style="width:66px;text-align:right;font-size:12.5px;font-weight:700;
-        font-variant-numeric:tabular-nums">${nf(v)}</span>
+      <span class="st-week-num">${nf(v)}</span>
     </div>`).join('')
   }</div>`;
 }
@@ -203,8 +200,8 @@ function rankTable(rows, maxLabel) {
   if (!rows.length) return '<div class="st-empty">暂无数据</div>';
   const max = Math.max(...rows.map(r => r.count), 1);
   return `<table class="st-table">
-    <thead><tr><th></th><th>${esc(maxLabel)}</th><th style="width:180px">占比</th>
-    <th style="text-align:right">消息数</th></tr></thead>
+    <thead><tr><th></th><th>${esc(maxLabel)}</th><th class="col-share">占比</th>
+    <th class="col-num">消息数</th></tr></thead>
     <tbody>${rows.map((r, i) => `
       <tr style="--i:${i}">
         <td class="idx">${i + 1}</td>
@@ -234,11 +231,10 @@ function render(d) {
     ['最活跃星期', ['周一', '周二', '周三', '周四', '周五', '周六', '周日'][d.peak_weekday] || '—', ''],
   ];
 
-  // 后端已按私聊过滤并给出昵称；这里只取前 12 位
   const topSenders = (d.top_senders || []).slice(0, 12);
 
   const body = el('st-body');
-  if (!body) return;                       // 页面已切走
+  if (!body) return;
   body.innerHTML = `
     <div class="st-cards">${cards.map((c, i) => `
       <div class="st-card" style="--i:${i}">
@@ -264,7 +260,7 @@ function render(d) {
 
       <div class="st-panel st-full" style="--i:2">
         <div class="st-panel-head"><h2>月度消息趋势</h2>
-          <span class="hint">实心柱 = 峰值月份</span></div>
+          <span class="hint">绿柱 = 峰值月份</span></div>
         ${monthBars(d.by_month || [])}
       </div>
 
@@ -287,8 +283,8 @@ function render(d) {
 
   const meta = el('st-meta');
   if (meta) {
-    meta.textContent = d.generated_at
-      ? `统计于 ${SX.timeStr(d.generated_at * 1000)}` : '';
+    meta.textContent = (account ? `${account} · ` : '') +
+      (d.generated_at ? `统计于 ${SX.timeStr(d.generated_at * 1000)}` : '');
   }
 }
 
@@ -297,41 +293,38 @@ function startAnimations() {
   const body = el('st-body');
   if (!body) return;
 
-  // 横向条：宽度从 0 长到目标
   body.querySelectorAll('.st-mini .fill[data-w]').forEach((n, i) => {
     animVar(n, 'width', '0%', n.dataset.w + '%', i * 45);
   });
-
-  // 纵向柱：scaleY 从 0 长到 1
   body.querySelectorAll('.bar-grow').forEach((n, i) => {
     const g = n.style.getPropertyValue('--grow') || '1';
     animVar(n, '--sy', '0', g, i * 18);
   });
-
-  // 环形图：整圈先转出来，再逐段展开
   body.querySelectorAll('.st-arc').forEach((n, i) => {
     animVar(n, '--arc', '0', '1', i * 90);
   });
-
-  // 数字滚动：从 0 数到目标
   body.querySelectorAll('.st-card .v, .st-donut-val').forEach((n, i) => {
     const raw = n.textContent || '';
+    if (raw.includes(':')) return;         // 「21:00」这类时间不是数值，滚动会毁成 2,100
     const target = Number(raw.replace(/[^\d.]/g, ''));
     if (!target) return;
-    n.textContent = '0';
+    // 保留单位后缀（如「365 天」的「 天」、百分号）：此前直接置 0 再只写数字，单位被抹掉
+    const unit = (raw.match(/[^\d.,]+/) || [''])[0];
+    n.textContent = '0' + unit;
     animVar(n, 'opacity', '1', '1', 0);
-    countUp(n, target, i * 60, raw.includes('.'));
+    countUp(n, target, i * 60, raw.includes('.'), unit);
   });
 
   flushAnim();
 }
 
-/** 数字滚动动画（带千分位） */
-function countUp(node, target, delay, keepDecimal) {
+/** 数字滚动动画（带千分位；unit 为需要保留的单位后缀） */
+function countUp(node, target, delay, keepDecimal, unit) {
   const dur = 700;
-  const fmt = (v) => keepDecimal
+  const suffix = unit || '';
+  const fmt = (v) => (keepDecimal
     ? v.toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
-    : Math.round(v).toLocaleString('zh-CN');
+    : Math.round(v).toLocaleString('zh-CN')) + suffix;
   setTimeout(() => {
     if (!node.isConnected) return;
     let t0 = null;
@@ -339,7 +332,6 @@ function countUp(node, target, delay, keepDecimal) {
       if (!node.isConnected) return;
       if (t0 === null) t0 = ts;
       const p = Math.min(1, (ts - t0) / dur);
-      // easeOutCubic：先快后慢，收尾更自然
       const e = 1 - Math.pow(1 - p, 3);
       node.textContent = fmt(target * e);
       if (p < 1) requestAnimationFrame(step);
@@ -361,32 +353,36 @@ function rangeStart(months) {
   return dateStr(d);
 }
 
-/** 读取当前工具条上的时间范围。
- *  返回 {start, end}，两者都是 "YYYY-MM-DD" 或 null。
- *  后端会用日级聚合缓存过滤整页统计，不只是裁剪月度图。 */
 function currentRange() {
   const v = rangeDrop ? rangeDrop.value : 'all';
   if (v === 'custom') {
     let start = startPick && startPick.value ? startPick.value : null;
     let end = endPick && endPick.value ? endPick.value : null;
-    if (start && end && start > end) { const t = start; start = end; end = t; }
+    if (start && end && start > end) {
+      // 起止倒置：交换并回写日期框，用户看到的就是实际生效的范围
+      const t = start; start = end; end = t;
+      if (startPick && endPick) { startPick.value = start; endPick.value = end; }
+      toast('起止日期写反了，已自动交换');
+    }
     return { start, end };
   }
   if (v === 'all') return { start: null, end: null };
   return { start: rangeStart(Number(v)), end: null };
 }
 
-/** 显示/隐藏正文下方的占位提示。占位符在 HTML 里独立于 #st-body，
- *  因为 render() 会整体覆写 st-body.innerHTML。 */
 function setEmpty(show, html) {
   const box = el('st-empty');
-  if (!box) return;                       // 页面已切走，安全退出
+  if (!box) return;
   if (html != null) box.innerHTML = html;
   box.classList.toggle('hidden', !show);
 }
 
 async function load(force) {
-  if (!account || busy) return;
+  if (!account) return;
+  if (busy) {                     // 加载中改筛选：记下来，本轮结束后补跑
+    pendingLoad = Math.max(pendingLoad, force ? 2 : 1);
+    return;
+  }
   busy = true;
   const rf = el('st-refresh');
   if (rf) rf.disabled = true;
@@ -397,6 +393,10 @@ async function load(force) {
       body.innerHTML = `<div class="st-loading">${
         force ? '正在重新统计，请稍候…' : '正在统计…'}</div>`;
     }
+  } else {
+    // 已有数据时后台更新：给一个可见的进行中标记，正文保持可读
+    const m = el('st-meta');
+    if (m) m.textContent = '正在更新…';
   }
 
   const { start, end } = currentRange();
@@ -407,10 +407,12 @@ async function load(force) {
 
   try {
     const d = await fetchJSON(`/api/stats/overview?${qs}`);
+    if (gone()) return;
     lastData = d;
     setEmpty(false);
     render(d);
   } catch (e) {
+    if (gone()) return;
     // 失败时保留上次成功的数据，避免整页被清空
     if (lastData) {
       const m = el('st-meta');
@@ -418,11 +420,18 @@ async function load(force) {
       setEmpty(true, `<div class="st-err">统计失败：${esc(e.message)}（下方为上次结果）</div>`);
     } else {
       if (body) body.innerHTML = '';
-      setEmpty(true, `<div class="st-err">统计失败：${esc(e.message)}</div>`);
+      setEmpty(true, `<div class="st-err">统计失败：${esc(e.message)}</div>
+        <div class="st-retry"><button class="btn" id="st-retry" type="button">重试</button></div>`);
+      el('st-retry')?.addEventListener('click', () => load(true));
     }
   } finally {
     busy = false;
     if (rf) rf.disabled = false;
+    if (pendingLoad) {
+      const f = pendingLoad > 1;
+      pendingLoad = 0;
+      load(f);
+    }
   }
 }
 
@@ -445,8 +454,13 @@ function syncCustomVisible() {
 }
 
 async function init() {
-  accDrop = createDropdown({ options: [], placeholder: '选择账号', label: '统计账号' });
-  el('st-account').appendChild(accDrop.el);
+  account = getAccount();
+  if (!account) {
+    setEmpty(true, '还没有解密产物。<br><br><button class="btn btn-primary" id="st-go-guide" type="button">去添加账号</button>');
+    el('st-go-guide')?.addEventListener('click', () => window.__sxOnboarding?.open('add'));
+    return;
+  }
+
   rangeDrop = createDropdown({
     options: [
       { value: 'all', label: '全部时间' },
@@ -469,27 +483,9 @@ async function init() {
   if (rf) rf.disabled = true;
   const body = el('st-body');
   try {
-    const { accounts } = await fetchJSON('/api/stats/accounts');
-    if (!accounts.length) {
-      if (body) body.innerHTML = '';
-      setEmpty(true, '<div class="st-err">还没有解密产物。'
-        + '请先在「引导设置」完成密钥提取与解密，再回来看统计。</div>');
-      return;
-    }
-    accDrop.options = accounts.map(a => ({
-      value: a.wxid, label: `${a.wxid}（${a.shards} 分片）`,
-    }));
-    account = accDrop.value;
-    accDrop.onChange = () => {
-      account = accDrop.value;
-      lastData = null;
-      load(false);
-    };
-
     rangeDrop.onChange = () => {
       syncCustomVisible();
-      // 切到自定义时会自动填好「最近 1 个月」的起止日期，因此可以立即刷新，
-      // 用户再改两个日期框时也会自动刷新。
+      // 切到自定义时会自动填好「最近 1 个月」的起止日期，因此可以立即刷新
       load(false);
     };
     startPick.onChange = () => load(false);
@@ -500,6 +496,7 @@ async function init() {
     syncCustomVisible();
     await load(false);
   } catch (e) {
+    if (gone()) return;
     if (body) body.innerHTML = '';
     setEmpty(true, `<div class="st-err">加载失败：${esc(e.message)}</div>`);
   } finally {

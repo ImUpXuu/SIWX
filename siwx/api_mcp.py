@@ -31,7 +31,7 @@ def info():
     builtin = _builtin_names()
     tools = [{"name": t["name"], "description": t["description"],
               "owner": "" if t["name"] in builtin else "plugin",
-              "enabled": bool(cfg.get("tools", {}).get(t["name"], True))}
+              "enabled": bool((cfg.get("tools") or {}).get(t["name"], True))}
              for t in _all_tools()]
     return jsonify({
         "command": cmd,
@@ -56,7 +56,10 @@ def save():
 @bp.get("/logs")
 def logs():
     """返回 MCP 调用日志（最近 N 行）。"""
-    limit = min(int(request.args.get("limit", "200")), 2000)
+    try:
+        limit = max(1, min(int(request.args.get("limit", "200") or 200), 2000))
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit 参数无效（必须是整数）"}), 400
     p = _mcp_log_path()
     if not p.is_file():
         return jsonify({"logs": [], "path": str(p)})

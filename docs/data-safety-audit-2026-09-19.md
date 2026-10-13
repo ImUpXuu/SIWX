@@ -67,17 +67,17 @@ def add(wxid, db):
 $ python -c "from siwx.discover import find_wechat_data_dirs; ..."
 
 本机扫描到 3 个账号:
-  wxid=wxid_redacted_b_645e
-    db_dir=D:\xwechat_files\wxid_redacted_b_645e\db_storage
-  wxid=wxid_redacted_a_6409
-    db_dir=C:\Users\<user>\xwechat_files\wxid_redacted_a_6409\db_storage
-  wxid=wxid_redacted_a_6409
-    db_dir=D:\xwechat_files\wxid_redacted_a_6409\db_storage
+  wxid=wxid_redacted_b_9002
+    db_dir=D:\xwechat_files\wxid_redacted_b_9002\db_storage
+  wxid=wxid_redacted_a_9001
+    db_dir=C:\Users\<user>\xwechat_files\wxid_redacted_a_9001\db_storage
+  wxid=wxid_redacted_a_9001
+    db_dir=D:\xwechat_files\wxid_redacted_a_9001\db_storage
 
 wxid 重复的组: 1
-  !! wxid_redacted_a_6409: 2 个不同 db_dir 指向同一输出目录
-       C:\Users\<user>\xwechat_files\wxid_redacted_a_6409\db_storage
-       D:\xwechat_files\wxid_redacted_a_6409\db_storage
+  !! wxid_redacted_a_9001: 2 个不同 db_dir 指向同一输出目录
+       C:\Users\<user>\xwechat_files\wxid_redacted_a_9001\db_storage
+       D:\xwechat_files\wxid_redacted_a_9001\db_storage
 ```
 
 两个副本的规模对比：
@@ -91,7 +91,7 @@ C 盘那份是**空壳残留**（微信换数据盘后的旧目录），D 盘才
 
 ### 覆盖后果
 
-两者共用输出目录 `output/wxid_redacted_a_6409/`，其中 `rel` 路径重合 **16 个**，且内容规模差异巨大：
+两者共用输出目录 `output/wxid_redacted_a_9001/`，其中 `rel` 路径重合 **16 个**，且内容规模差异巨大：
 
 | rel | C 盘 | D 盘 |
 |---|---|---|
@@ -387,7 +387,7 @@ def find_account_conflicts(dirs=None) -> list:
 ```
 - `find_wechat_data_dirs()` 的签名与返回类型**未改动**，新增独立函数，零调用点影响。
 - 接入两处：作业启动时逐条打印告警（`server.py::_run_job`）；`/api/status` 返回 `conflicts` 字段。
-- 实测本机抓到真实冲突：`wxid_redacted_a_6409` 的 C/D 双副本。
+- 实测本机抓到真实冲突：`wxid_redacted_a_9001` 的 C/D 双副本。
 
 **方案 B**（`siwx/extract.py`）
 - 新增模块级常量 `SOURCE_FIELD = "@source"`。

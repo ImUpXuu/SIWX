@@ -4,6 +4,7 @@ from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
 
+from siwx import logger as _log
 from siwx import paths as _paths
 
 bp = Blueprint("export_api", __name__, url_prefix="/api/export")
@@ -40,9 +41,16 @@ def formats():
                 "ext": w.ext or w.fmt,
                 "owner": w.meta.name if w.meta else "",
             })
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warn("plugin", f"插件导出格式列举失败: {e}")
     return jsonify({"formats": out})
+
+
+@bp.get("/templates")
+def templates():
+    """可用 HTML 导出模板（用户自定义优先于内置同名）。"""
+    from siwx.html_template import list_templates
+    return jsonify({"templates": list_templates()})
 
 
 @bp.get("/download")
@@ -54,6 +62,9 @@ def download():
     root = _paths.exports_root().resolve()
     target = Path(p).resolve()
     if not target.is_relative_to(root) or not target.is_file():
+        # 审计 §4.7：404 拒绝是安全边界行为（可能被扫描/误触频繁触发），
+        # 用 detailed 防 warn 刷文件日志
+        _log.detailed("export", f"下载拒绝 path={p}")
         return jsonify({"error": "文件不存在"}), 404
     return send_file(target, as_attachment=True)
 
@@ -68,6 +79,7 @@ def open_dir():
     root = _paths.exports_root().resolve()
     target = Path(p).resolve()
     if not target.is_relative_to(root) or not target.exists():
+        _log.detailed("export", f"打开拒绝 path={p}")
         return jsonify({"error": "路径无效"}), 404
     if target.is_file():
         subprocess.Popen(["explorer", "/select,", str(target)])
@@ -107,4 +119,5 @@ def render():
                             "preview": d.get("messages", [])[:20]})
         return jsonify({"error": "仅支持 JSON 预览"}), 400
     except Exception as e:
+        _log.warn("export", f"预览失败 path={p}: {type(e).__name__}: {e}")
         return jsonify({"error": str(e)}), 400

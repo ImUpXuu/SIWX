@@ -22,7 +22,9 @@ import threading
 import time
 from pathlib import Path
 
+from siwx import logger as log
 from siwx import paths as _paths
+from siwx import validate
 
 
 # SQLite 的 `local_type` 是带标志位的整数，低 16 位才是真实类型。
@@ -73,16 +75,26 @@ _CACHE_LOCK = threading.Lock()
 _MEM_CACHE: dict = {}
 _CONTACT_NAME_CACHE: dict = {}   # {(path, mode, key): (file_sig, value)}
 
-_CACHE_VERSION = 3      # 统计口径变更时递增，使旧缓存自动失效
+_CACHE_VERSION = 4      # 统计口径变更时递增，使旧缓存自动失效
                         # v3: 增加 by_day，使自定义时间范围真正过滤全页指标
+                        # v4: 会话数按表名去重（修 2.39× 虚高）；by_day 增加
+                        #     sessions，使日期筛选下的会话数不再是全账号常量
 
 
 def _out_root() -> Path:
     return _paths.out_root()
 
 
+def _acc_dir(account: str) -> Path | None:
+    """账号目录（已校验：单段名 + resolve/relative_to 不越界）；非法返回 None。"""
+    return validate.account_dir(account, must_exist=False)
+
+
 def _msg_dir(account: str) -> Path:
-    return _out_root() / account / "message"
+    # 账号名非法时给一个不存在的占位路径：各处 is_dir()/glob()/scandir() 自然落空，
+    # 不会上跳到 out_root 之外。compute_stats 另有 _acc_dir 校验兜底。
+    p = _acc_dir(account)
+    return (p or (_out_root() / "__invalid_account__")) / "message"
 
 
 def signature(account: str):
@@ -99,14 +111,17 @@ def signature(account: str):
                 if e.name.endswith(".db"):
                     st = e.stat()
                     items.append((e.name, st.st_size, st.st_mtime_ns))
-    except OSError:
+    except OSError as e:
+        # 签名不可用 → 缓存永不命中，每次请求都全量重扫（约 2.4s/8 万条）
+        log.detailed("stats", f"{account} 分片签名不可用: {type(e).__name__}: {e}")
         return None
     items.sort()
     return tuple(items)
 
 
 def _cache_file(account: str) -> Path:
-    return _out_root() / account / ".siwx_stats.json"
+    p = _acc_dir(account) or (_out_root() / "__invalid_account__")
+    return p / ".siwx_stats.json"
 
 
 def _shard_tables(conn: sqlite3.Connection) -> list:
@@ -143,7 +158,9 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
            "by_day": {}, "ts_min": 0, "ts_max": 0}
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        # 分片打不开 → 统计总量无声偏低（数据完整性）
+        log.warn("stats", f"分片打开失败: {db.name}: {e}（结果可能不完整）")
         return out
     try:
         tables = _shard_tables(conn)
@@ -157,8 +174,10 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
                 un = (un or "").strip()
                 if un:
                     own.setdefault("Msg_" + hashlib.md5(un.encode()).hexdigest(), un)
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as e:
+            # 失败 → 该分片的私聊排行降级为空（排行里少数据）
+            log.detailed("stats", f"Name2Id 读取失败 db={db.name}: {e}"
+                                  f"（私聊排行降级）")
 
         # 会话归属：私聊表写入 username，其余（群聊/公众号/系统）写入空串，
         # 这样后面的 `WHERE cid <> ''` 就天然只捞出私聊消息。
@@ -169,21 +188,23 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
             vf, al = flags.get(un, (0, "")) if un else (0, "")
             cid = un if (un and _is_private_chat(un, vf, al)) else ""
             parts.append(f"SELECT create_time, local_type, real_sender_id, "
-                         f"{_sql_lit(cid)} AS cid FROM [{t}]")
+                         f"{_sql_lit(cid)} AS cid, {_sql_lit(t)} AS tbl FROM [{t}]")
         union = " UNION ALL ".join(parts)
         try:
             conn.execute("PRAGMA temp_store=MEMORY")
             # 一次性算出日/月/小时/星期，后续 GROUP BY 直接用列，避免重复 strftime。
+            # tbl 也带上：日级「有消息的会话」按表名去重（与 _chat_tables 同口径）。
             conn.execute(
                 f"CREATE TEMP TABLE _siwx_s AS "
                 f"SELECT create_time, (local_type & {_TYPE_MASK}) AS k, "
-                f"real_sender_id AS sid, cid, "
+                f"real_sender_id AS sid, cid, tbl, "
                 f"strftime('%Y-%m-%d', create_time, 'unixepoch', 'localtime') AS d, "
                 f"strftime('%Y-%m', create_time, 'unixepoch', 'localtime') AS m, "
                 f"CAST(strftime('%H', create_time, 'unixepoch', 'localtime') AS INTEGER) AS h, "
                 f"((CAST(strftime('%w', create_time, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7) AS w "
                 f"FROM ({union}) WHERE create_time > 0")
-        except sqlite3.Error:
+        except sqlite3.Error as e:
+            log.warn("stats", f"分片聚合建表失败: {db.name}: {e}（结果可能不完整）")
             return out
 
         # 主聚合：一趟 GROUP BY 同时喂给全局类型/月/小时/星期和日级桶。
@@ -228,9 +249,20 @@ def _scan_shard(db: Path, flags: dict = None) -> dict:
                 b = _day_bucket(out["by_day"], day)
                 b["by_chat"][un] = b["by_chat"].get(un, 0) + cnt
 
+        # 日级「有消息的会话」：按表名去重（含群聊/公众号，与全量 chat_count 同口径），
+        # 这样日期筛选下的「会话数」不再是一个无视筛选的全账号常量。
+        for day, tbl in conn.execute(
+                "SELECT d, tbl FROM _siwx_s WHERE tbl <> '' GROUP BY d, tbl"):
+            if day and tbl:
+                _day_bucket(out["by_day"], day)["sessions"].add(tbl)
+
         conn.execute("DROP TABLE _siwx_s")
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as e:
+        # 主聚合兜底：空分片（total=0）失败可能是真的没数据，不 warn 防误报
+        if out["total"]:
+            log.warn("stats", f"分片聚合中断: {db.name}: {e}（结果可能不完整）")
+        else:
+            log.detailed("stats", f"分片聚合失败(空分片?): {db.name}: {e}")
     finally:
         conn.close()
     return out
@@ -246,7 +278,8 @@ def _day_bucket(by_day: dict, day: str) -> dict:
     b = by_day.get(day)
     if b is None:
         b = {"total": 0, "type_counts": {}, "by_hour": [0] * 24,
-             "by_weekday": [0] * 7, "by_chat": {}, "ts_min": 0, "ts_max": 0}
+             "by_weekday": [0] * 7, "by_chat": {}, "sessions": set(),
+             "ts_min": 0, "ts_max": 0}
         by_day[day] = b
     return b
 
@@ -262,6 +295,14 @@ def _merge_scans(results: list) -> dict:
     by_chat: dict = {}
     by_day: dict = {}
     ts_min = ts_max = 0
+    # 日级会话集合以「会话编号」落盘：直接存 Msg_<md5> 表名会让 126 万条消息的
+    # 账号缓存从 1.8MB 涨到 5.4MB，编号化后回到百 KB 量级（编号只在本次合并内有意义）。
+    tbl_ids: dict = {}
+    for r in results:
+        for src in (r.get("by_day") or {}).values():
+            for tbl in (src.get("sessions") or ()):
+                if tbl not in tbl_ids:
+                    tbl_ids[tbl] = len(tbl_ids)
     for r in results:
         total += r["total"]
         _merge_type_counts(type_counts, r["type_counts"])
@@ -285,6 +326,8 @@ def _merge_scans(results: list) -> dict:
                 dst["by_weekday"][i] += v
             for un, v in (src.get("by_chat") or {}).items():
                 dst["by_chat"][un] = dst["by_chat"].get(un, 0) + v
+            for tbl in (src.get("sessions") or ()):
+                dst["sessions"].add(tbl_ids[tbl])
             mn, mx = src.get("ts_min") or 0, src.get("ts_max") or 0
             if mn and (not dst["ts_min"] or mn < dst["ts_min"]):
                 dst["ts_min"] = mn
@@ -294,6 +337,8 @@ def _merge_scans(results: list) -> dict:
             ts_min = r["ts_min"]
         if r["ts_max"] > ts_max:
             ts_max = r["ts_max"]
+    for b in by_day.values():
+        b["sessions"] = sorted(b["sessions"])
     return {"total": total, "type_counts": type_counts, "by_month": by_month,
             "by_hour": by_hour, "by_weekday": by_weekday, "by_sender": by_sender,
             "by_chat": by_chat, "by_day": dict(sorted(by_day.items())),
@@ -356,20 +401,24 @@ def _scan(account: str, log=None) -> dict:
 
 
 def _chat_tables(account: str) -> list:
-    """有消息的会话表名列表（用于会话数统计）。"""
-    out = []
+    """有消息的会话表名列表（用于会话数统计），**按表名去重**。
+
+    同一个会话的 Msg_ 表会散在多个分片里（实测 wxalias_example_01：一个会话多达
+    9 个分片），旧实现直接 extend → 会话数虚高 2.39×（3483 vs 真实 1459）。
+    """
+    out = set()
     for db in sorted(_msg_dir(account).glob("*.db")):
         try:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         except sqlite3.Error:
             continue
         try:
-            out.extend(_shard_tables(conn))
+            out.update(_shard_tables(conn))
         except sqlite3.Error:
             pass
         finally:
             conn.close()
-    return out
+    return sorted(out)
 
 
 def _empty_stats(account: str, shards: int) -> dict:
@@ -417,7 +466,8 @@ def _file_sig(p: Path):
 
 def _contact_flags(account: str) -> dict:
     """username → (verify_flag, alias)，用于识别没走 gh_ 前缀的公众号。"""
-    p = _out_root() / account / "contact" / "contact.db"
+    acc = _acc_dir(account)
+    p = (acc / "contact" / "contact.db") if acc else (_out_root() / "__invalid_account__")
     sig = _file_sig(p)
     if sig is None:
         return {}
@@ -430,7 +480,8 @@ def _contact_flags(account: str) -> dict:
     out: dict = {}
     try:
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        log.detailed("stats", f"contact.db 打不开（认证标记降级）db={p.name}: {e}")
         return {}
     try:
         for un, vf, al in conn.execute(
@@ -438,9 +489,10 @@ def _contact_flags(account: str) -> dict:
             un = (un or "").strip()
             if un:
                 out[un] = (int(vf or 0), (al or "").strip())
-    except sqlite3.Error:
+    except sqlite3.Error as e:
         # 老测试/旧库可能没有 verify_flag；没有认证信息时只靠 username 规则过滤。
-        pass
+        log.detailed("stats", f"verify_flag 读取失败（公众号识别降级）"
+                              f"db={p.name}: {e}")
     finally:
         conn.close()
     with _CACHE_LOCK:
@@ -467,7 +519,8 @@ def _contact_name_map(account: str) -> dict:
     用户连续调范围会感觉卡。这里第一次读全表（真实样本约 3800 行，成本很低），
     后续所有范围直接内存取子集。
     """
-    p = _out_root() / account / "contact" / "contact.db"
+    p = ((_acc_dir(account) or (_out_root() / "__invalid_account__")) /
+         "contact" / "contact.db")
     sig = _file_sig(p)
     if sig is None:
         return {}
@@ -480,7 +533,9 @@ def _contact_name_map(account: str) -> dict:
     names: dict = {}
     try:
         conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-    except sqlite3.Error:
+    except sqlite3.Error as e:
+        log.detailed("stats", f"contact.db 打不开（昵称表降级为空）"
+                              f"db={p.name}: {e}")
         return names
     try:
         for un, remark, nick, alias in conn.execute(
@@ -488,8 +543,10 @@ def _contact_name_map(account: str) -> dict:
             un = (un or "").strip()
             if un:
                 names[un] = _best_contact_name(un, remark, nick, alias)
-    except sqlite3.Error:
-        # schema 不匹配时退化为无昵称，不影响统计主流程。
+    except sqlite3.Error as e:
+        # schema 不匹配时退化为无昵称，不影响统计主流程——排行里全是 wxid 的原因
+        log.detailed("stats", f"contact.db schema 不匹配（昵称降级为空）"
+                              f"db={p.name}: {e}")
         names = {}
     finally:
         conn.close()
@@ -545,7 +602,13 @@ def _load_disk_cache(account: str, sig):
         return None
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except ValueError as e:
+        # 损坏 → 静默重算并覆盖，用户侧只见"突然变慢"
+        log.warn("stats", f"统计缓存 JSON 损坏，忽略并全量重算（下次会覆盖）"
+                          f"{p.name}: {e}")
+        return None
+    except OSError as e:
+        log.warn("stats", f"统计缓存读取失败 {p.name}: {type(e).__name__}")
         return None
     if data.get("version") != _CACHE_VERSION:
         return None
@@ -563,32 +626,55 @@ def _save_disk_cache(account: str, sig, stats: dict) -> None:
         p.write_text(json.dumps({"version": _CACHE_VERSION, "sig": list(sig),
                                  "stats": stats}, ensure_ascii=False),
                      encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as e:
+        # 不影响进程内 _MEM_CACHE，但跨进程/重启后每次都要全量重扫（约 2.4s/8 万条）
+        log.detailed("stats", f"统计缓存写入失败（重启后需全量重扫）"
+                              f"{p.name}: {type(e).__name__}: {e}")
 
 
 def compute_stats(account: str, force: bool = False, log=None) -> dict:
-    """计算（或命中缓存返回）某账号的聊天统计。"""
-    if not _msg_dir(account).is_dir():
+    """计算（或命中缓存返回）某账号的聊天统计。
+
+    log 为既有回调通道（api_stats 传 lambda 转 logger.detailed("stats", ...)），
+    这里补充耗时与缓存来源（mem/disk/miss）标记——审计核查 C2/B3：该通道
+    此前从未被传参，属"接通现有通道而非另起 detailed"。
+    """
+    if _acc_dir(account) is None or not _msg_dir(account).is_dir():
         raise FileNotFoundError("账号不存在或未解密")
+
+    t0 = time.perf_counter()
+
+    def _l(msg):
+        if log:
+            try:
+                log(msg)
+            except Exception:
+                pass
 
     sig = signature(account)
     if not force and sig is not None:
         with _CACHE_LOCK:
             hit = _MEM_CACHE.get(account)
             if hit is not None and _sig_equal(hit[0], sig):
+                _l(f"[stats] {account}: 缓存命中(mem) "
+                   f"耗时={(time.perf_counter() - t0) * 1000:.1f}ms")
                 return hit[1]
         disk = _load_disk_cache(account, sig)
         if disk is not None:
             with _CACHE_LOCK:
                 _MEM_CACHE[account] = (sig, disk)
+            _l(f"[stats] {account}: 缓存命中(disk) "
+               f"耗时={(time.perf_counter() - t0) * 1000:.1f}ms")
             return disk
 
+    _l(f"[stats] {account}: 缓存未命中(miss)，开始全量扫描")
     stats = _scan(account, log=log)
     if sig is not None:
         _save_disk_cache(account, sig, stats)
         with _CACHE_LOCK:
             _MEM_CACHE[account] = (sig, stats)
+    _l(f"[stats] {account}: 全量扫描完成(miss) "
+       f"耗时={(time.perf_counter() - t0) * 1000:.0f}ms")
     return stats
 
 
@@ -639,7 +725,8 @@ def summarize(stats: dict, start: str = None, end: str = None) -> dict:
 
     return {
         "total": total,
-        "chat_count": stats.get("chat_count") or 0,
+        # 有区间时用区间内的会话集合，否则用全量统计值（两者同为「按表名去重」口径）
+        "chat_count": view.get("chat_count", stats.get("chat_count") or 0),
         "shards": stats.get("shards") or 0,
         "span": {"min": view.get("ts_min") or 0, "max": view.get("ts_max") or 0},
         "generated_at": stats.get("generated_at") or 0,
@@ -692,6 +779,7 @@ def _range_stats(stats: dict, start: str = None, end: str = None) -> dict:
     out = {"total": 0, "type_counts": {}, "by_month": {}, "by_hour": [0] * 24,
            "by_weekday": [0] * 7, "by_chat": {}, "by_day": {},
            "ts_min": 0, "ts_max": 0}
+    sessions = set()
     for day, d in sorted((stats.get("by_day") or {}).items()):
         if day < s or day > e:
             continue
@@ -705,11 +793,15 @@ def _range_stats(stats: dict, start: str = None, end: str = None) -> dict:
             out["by_weekday"][i] += v
         for un, v in (d.get("by_chat") or {}).items():
             out["by_chat"][un] = out["by_chat"].get(un, 0) + v
+        for tbl in (d.get("sessions") or ()):
+            sessions.add(tbl)
         mn, mx = d.get("ts_min") or 0, d.get("ts_max") or 0
         if mn and (not out["ts_min"] or mn < out["ts_min"]):
             out["ts_min"] = mn
         if mx > out["ts_max"]:
             out["ts_max"] = mx
+    # 区间内「有消息的会话」= 各日会话集合的并集（与全量 chat_count 同口径：按表名）
+    out["chat_count"] = len(sessions)
     return out
 
 
@@ -726,7 +818,10 @@ def clear_cache(account: str = None) -> None:
     with _CACHE_LOCK:
         if account:
             _MEM_CACHE.pop(account, None)
-            acc_contact = str(_out_root() / account / "contact" / "contact.db")
+            acc = _acc_dir(account)
+            if acc is None:
+                return                       # 账号名非法：不做任何路径操作
+            acc_contact = str(acc / "contact" / "contact.db")
             for k in list(_CONTACT_NAME_CACHE):
                 if k and k[0] == acc_contact:
                     _CONTACT_NAME_CACHE.pop(k, None)
@@ -736,7 +831,11 @@ def clear_cache(account: str = None) -> None:
     root = _out_root()
     if not root.is_dir():
         return
-    targets = [root / account] if account else [d for d in root.iterdir() if d.is_dir()]
+    if account:
+        a = _acc_dir(account)
+        targets = [a] if a else []
+    else:
+        targets = [d for d in root.iterdir() if d.is_dir()]
     for d in targets:
         try:
             (d / ".siwx_stats.json").unlink(missing_ok=True)

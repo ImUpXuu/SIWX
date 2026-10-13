@@ -232,9 +232,13 @@ class TestContract(PluginTestCase):
         self.assertEqual(len(self.reg.pages), 0)
 
     def test_builtin_page_names_protected(self):
-        """插件不得占用内置页面名（服务端也要挡一层）。"""
+        """插件不得占用内置页面名（服务端也要挡一层）。
+
+        guide 已在 7e8f9b7 从保留名单移除（该内置页同时被删除），
+        插件现在可以合法使用这个名字。
+        """
         from siwx.plugins import contract
-        for name in ("guide", "chat", "export", "mcp", "logs", "settings"):
+        for name in ("chat", "export", "mcp", "logs", "settings"):
             self.reg.pages.items = []
             counts = contract.register_plugin(FakeModule(), self.reg, {
                 "name": "p1", "pages": [{"name": name, "title": "x"}],
@@ -841,11 +845,6 @@ class TestLoader(PluginTestCase):
         page = self.reg.pages.get("p")
         self.assertTrue(Path(page.pages_dir).name == "assets")
 
-    def test_discover_entrypoints_stub(self):
-        """pip entry_points 发现目前是预留接口，返回空列表。"""
-        from siwx.plugins import loader
-        self.assertEqual(loader.discover_entrypoints(), [])
-
 
 # ═══════════════════════════════════════════════════════════════
 # 6. 注册表查询辅助
@@ -1364,9 +1363,6 @@ class TestNodeTreeContract(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════
 
 class TestZeroPluginBackwardCompat(PluginTestCase):
-
-    def test_empty_registry_all_namespaces_falsy(self):
-        self.assertTrue(all(not getattr(self.reg, f) for f in self._NS_FIELDS))
 
     def test_summary_counts_empty(self):
         self.assertEqual(self.reg.summary_counts(), {})

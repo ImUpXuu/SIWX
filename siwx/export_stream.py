@@ -9,15 +9,14 @@
 import heapq
 import hashlib
 import json
-import os
-import re
 import sqlite3
 from pathlib import Path
 
-from siwx import logger, media, voice
+from siwx import logger
 from siwx.api_chat import (
-    KIND_MAP, SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
-    _parse_appmsg, _parse_refer, _sender_map, _fmt, owner_base, shards_for,
+    SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
+    _sender_map, _fmt, enrich_message_row, message_kind,
+    parse_quote_or_link, self_ids_for, shards_for,
 )
 
 # 精简消息字段（去掉 rawContent 重复、去掉前端专用字段）
@@ -29,7 +28,7 @@ _KEEP_FIELDS = ("localId", "createTime", "localType", "typeName",
 BATCH_SIZE = 500
 
 
-def _enrich_row(row, names, my_base, is_group, chat, account):
+def _enrich_row(row, names, my_base, self_ids, is_group, chat, account):
     """把一行原始数据精简为导出用 dict。"""
     local_id, server_id, ltype, ts, origin, rsid, content, packed, smap = row
     text = _decode_content(content)
@@ -51,32 +50,43 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
             sender_wxid = chat
     if is_group and not sender_wxid and origin == 1:
         sender_wxid = my_base
-    is_me = (sender_wxid == my_base or sender_wxid == account
-             or (not is_group and sender_wxid == my_base))
+    is_me = sender_wxid in self_ids
+    # 本人发送者归一到展示用 wxid：设备后缀变体不在联系人表，
+    # 不归一的话导出里的 senderDisplayName/头像落不到本人身上
+    if is_me and sender_wxid != my_base and sender_wxid not in names \
+            and my_base in names:
+        sender_wxid = my_base
     if is_group and not is_me and sender_wxid == chat:
         sender_wxid = ""
 
     t = ltype & 0xFFFF
-    md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
-    voice_meta = voice.parse_voice_meta(text) if t == 34 else None
-    bubble_md5 = None
-    if t in (3, 47) and packed:
-        m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
-        bubble_md5 = m2.group().decode() if m2 else None
+    # md5/气泡 md5/语音元数据/表情包元数据采集与 49/57 引用分流统一走 api_chat 公共函数
+    # （原与 build_messages / messages 两处逐字重复，改判定需三处同步）
+    md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
 
-    quote = link = None
-    if t == 57:
-        quote = _parse_refer(text)
-    if t == 49:
-        if "<refermsg>" in text:
-            # 微信 5.0 库里引用消息外层是 49，引用信息在内层 <refermsg>；
-            # 必须走引用分支并跳过 link 卡片，否则"谁引用了什么"全部丢失
-            # （实测全量导出 31437 条内层 57 的引用消息外层全部为 49）。
-            quote = _parse_refer(text)
-        else:
-            title, url, des = _parse_appmsg(text)
-            if title or url:
-                link = {"title": title or "链接", "url": url, "desc": des}
+    if t in (3, 47) and not md5 and not bubble_md5:
+        # 审计 §4.2：三级来源全靠 local_id+ts，成功率骤降但此前无日志
+        logger.detailed("media",
+                        f"图片无md5可定位 local_id={local_id} ts={ts} localType={t}",
+                        ring=False)
+
+    quote, link, record, channels = parse_quote_or_link(t, text)
+
+    # 审计 §4.2：只埋"无异常但返回 None"的兜底——引用解析**异常**路径已有
+    # api_chat.py:_safe_parse_refer 的日志，勿重复埋点
+    if quote is None and t == 57:
+        logger.detailed(
+            "parse",
+            f"引用解析为空 local_id={local_id} ts={ts} len={len(text or '')} "
+            f"head={(text or '').encode('utf-8', 'replace')[:16].hex()}",
+            ring=False)
+
+    if t not in TYPE_NAMES:
+        logger.detailed(
+            "parse",
+            f"未知类型 t={t} local_id={local_id} ts={ts} len={len(text or '')} "
+            f"head={(text or '').encode('utf-8', 'replace')[:16].hex()}",
+            ring=False)
 
     return {
         "localId": local_id,
@@ -85,7 +95,7 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
         "localType": t,
         "typeName": TYPE_NAMES.get(t, f"类型{t}"),
         "rawContent": raw_text,
-        "content": _fmt(t, text) if t != 1 else text,
+        "content": _fmt(ltype, text) if t != 1 else text,
         "isSend": 1 if is_me else 0,
         "senderUsername": sender_wxid or chat,
         "senderDisplayName": (names.get(sender_wxid, sender_wxid) if sender_wxid
@@ -93,8 +103,11 @@ def _enrich_row(row, names, my_base, is_group, chat, account):
         "md5": md5,
         "bubbleMd5": bubble_md5,
         "voice": voice_meta,
+        "sticker": sticker,
+        "channels": channels,
         "quote": quote,
         "link": link,
+        "record": record,
     }
 
 
@@ -130,40 +143,67 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
     table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
     if names is None:
         names = _contact_names(acc)
-    my_base = owner_base(account)
+    my_base, self_ids = self_ids_for(acc, account)
     is_group = chat.endswith("@chatroom")
 
     # 分片索引：只打开真正含该会话的分片。原先每次调用都要把 message/ 下全部
     # *.db 逐个打开查 sqlite_master，实测占导出总耗时的 99.5%。
+    # 审计 §4.2：分片打开/查询包 try——单分片损坏从"中断整个导出"改为
+    # "部分导出" + warn 对账（缺失由 run_export 的 count-vs-written 兜底）。
     iterators = []
+    failed_shards = 0
     for db in shards_for(acc, chat):
-        conn = sqlite3.connect(db)
-        smap = _sender_map(conn)
-        cur = conn.execute(
-            f"SELECT local_id, server_id, local_type, create_time, "
-            f"origin_source, real_sender_id, message_content, packed_info_data "
-            f"FROM [{table}] ORDER BY create_time")
+        conn = None
+        try:
+            conn = sqlite3.connect(db)
+            smap = _sender_map(conn)
+            cur = conn.execute(
+                f"SELECT local_id, server_id, local_type, create_time, "
+                f"origin_source, real_sender_id, message_content, packed_info_data "
+                f"FROM [{table}] ORDER BY create_time")
+        except sqlite3.Error as e:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001  关闭失败不影响主流程
+                    pass
+            failed_shards += 1
+            logger.warn("export", f"[export] 流式读取分片失败，消息可能缺失: "
+                                  f"{Path(db).name}: {e}")
+            continue
         iterators.append(_shard_iter(cur, conn, smap))
+
+    logger.detailed("export",
+                    f"message_stream: shards={len(iterators)} "
+                    f"failed={failed_shards} table={table}")
 
     if not iterators:
         return
 
     merged = heapq.merge(*iterators, key=lambda x: (x[0] or 0, x[1] or 0))
-    for ts, local_id, (ltype, origin, rsid, content, packed, smap) in merged:
+    for ts, local_id, (ltype, server_id, origin, rsid, content, packed,
+                       smap) in merged:
         if start_ts and (ts or 0) < start_ts:
             continue
         if end_ts and (ts or 0) > end_ts:
             continue
-        row = (local_id, None, ltype, ts, origin, rsid, content, packed, smap)
-        yield _enrich_row(row, names, my_base, is_group, chat, account)
+        row = (local_id, server_id, ltype, ts, origin, rsid, content, packed,
+               smap)
+        yield _enrich_row(row, names, my_base, self_ids, is_group, chat,
+                          account)
 
 
 def _shard_iter(cursor, conn, smap):
-    """分片迭代器：yield (ts, local_id, row_tuple)。"""
+    """分片迭代器：yield (ts, local_id, row_tuple)。
+
+    row_tuple 第二元素是 server_id——P1 修复：此前 SELECT 取出了它却在
+    这里丢弃，导致导出 platformMessageId 恒为空串、语音导出 svr_id 恒 0
+    （voice.get_voice 少一条查询命中路径）。"""
     try:
         for row in cursor:
             local_id, server_id, ltype, ts, origin, rsid, content, packed = row
-            yield (ts, local_id, (ltype, origin, rsid, content, packed, smap))
+            yield (ts, local_id, (ltype, server_id, origin, rsid, content,
+                                  packed, smap))
     finally:
         conn.close()
 
@@ -240,7 +280,10 @@ def stream_export_csv(path: Path, msg_iter, progress=None):
         w = csv.writer(f)
         w.writerow(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
         count = 0
+        truncated = 0      # P3：内容截断留痕（CSV 单元格 2000 字上限）
         for msg in msg_iter:
+            if len(msg["content"]) > 2000:
+                truncated += 1
             w.writerow([msg["localId"],
                         datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                         msg["typeName"], msg["senderDisplayName"],
@@ -249,6 +292,10 @@ def stream_export_csv(path: Path, msg_iter, progress=None):
             count += 1
             if count % 500 == 0 and progress:
                 progress(0, f"已写入 {count} 条…")
+    if truncated:
+        logger.detailed("export",
+                        f"CSV内容截断(>2000字) {truncated}/{count} 条，"
+                        f"换 JSON/HTML 格式可得全文", ring=False)
     return count
 
 
