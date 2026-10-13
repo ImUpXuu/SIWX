@@ -44,6 +44,8 @@ framework 实际初始化后才会被真正填入；脱离微信进程单独 dlo
 - 这两条任一不满足，本模块的转码会优雅失败（返回 None / 空结果），
   调用方应回退到"已解密但当前平台暂不支持预览"的现有提示，而不是
   让整条图片服务链路跟着报错。
+
+（实现吸收自上游 PR #28，作者已在 Apple Silicon 真机端到端验证。）
 """
 import inspect
 import json
@@ -59,11 +61,10 @@ from siwx.strategies.macos_lldb import _lldb_cmd_prefix
 # 请求），一个聊天页同时懒加载多张 wxgf 缩略图会对 /api/chat/media/image
 # 发起多个并发请求；若不加锁，每个请求各自 spawn 一个 lldb 子进程去
 # attach 同一个正在运行的微信进程——多个调试器并发 attach/操作同一个目标
-# 进程既浪费（重复的符号解析开销），也有真实风险（见下面模块级风险说明：
-# 并发状态下谁先谁后不确定，更容易撞上未知的边界情况）。全局串行化成
-# "一次只有一个 LLDB 会话在跟微信打交道"，牺牲一点并发吞吐换来确定性和
-# 对微信进程的最小打扰；单张图片本身的转码开销只有不到 1 秒，串行排队
-# 的用户可感知延迟可以接受。
+# 进程既浪费（重复的符号解析开销），也有真实风险（并发状态下谁先谁后
+# 不确定，更容易撞上未知的边界情况）。全局串行化成"一次只有一个 LLDB
+# 会话在跟微信打交道"，牺牲一点并发吞吐换来确定性和对微信进程的最小
+# 打扰；单张图片本身的转码开销只有不到 1 秒，串行排队可接受。
 _LLDB_LOCK = threading.Lock()
 _LOCK_WAIT_TIMEOUT = 45  # 排队等锁的上限；超时宁可报失败也不无限阻塞请求线程
 
@@ -297,12 +298,9 @@ except Exception as e:
 def _run_lldb_batch(pid: int, items: list, log=print, timeout: int = 180):
     """items: [(in_path, out_path), ...]。返回 {in_path: {"ok": bool, ...}}。
 
-    全程持有 _LLDB_LOCK：同一时刻只允许一个 LLDB 会话跟微信进程打交道
-    （见模块顶部的并发防护说明）。等锁超过 _LOCK_WAIT_TIMEOUT 秒就放弃，
-    给每个 item 一个明确的 server_busy 失败原因，而不是让请求线程无限期
-    卡住——调用方（media.py 的按需解密路径）据此走"已解密但当前平台暂不
-    支持预览"的既有兜底，用户体验上是"这张图暂时没转码成功"，不会整个
-    请求挂起不返回。
+    全程持有 _LLDB_LOCK：同一时刻只允许一个 LLDB 会话跟微信进程打交道。
+    等锁超过 _LOCK_WAIT_TIMEOUT 秒就放弃，给每个 item 一个明确的
+    server_busy 失败原因，而不是让请求线程无限期卡住。
     """
     if not items:
         return {}
@@ -329,13 +327,9 @@ def _run_lldb_batch(pid: int, items: list, log=print, timeout: int = 180):
                                          f"command script import {script_path}"],
                 capture_output=True, text=True, timeout=timeout)
             for line in proc.stdout.splitlines():
-                if line.startswith("RESOLVED:"):
+                if line.startswith(("RESOLVED:", "FAIL:", "DONE:")):
                     log(f"[media_wxgf_macos] {line}")
-                elif line.startswith("FAIL:"):
-                    log(f"[media_wxgf_macos] {line}")
-                elif line.startswith("DONE:"):
-                    log(f"[media_wxgf_macos] {line}")
-                elif line.startswith("Traceback") or line.startswith("  File"):
+                elif line.startswith(("Traceback", "  File")):
                     log(f"[media_wxgf_macos] 脚本异常: {line}")
             if proc.stderr:
                 err = proc.stderr.strip()[:2000]
@@ -366,10 +360,9 @@ def _heic_to_jpeg(heic_bytes: bytes, log=print) -> bytes | None:
     """HEIC → JPEG，供浏览器端展示用。
 
     与 wxgf→HEIC 那一步完全不同：这一步不需要微信进程、不需要 LLDB，
-    只是调用 macOS 自带的 sips（图像处理命令行工具），任何时候都能跑，
-    不受"微信是否在运行""SIP 是否关闭"影响。单独转这一步是因为 HEIC
-    在浏览器里的原生支持并不可靠——Safari 能直接显示，Chrome/Firefox
-    的 <img> 普遍不支持——转成 JPEG 才能保证所有浏览器都能看。
+    只是调用 macOS 自带的 sips，任何时候都能跑，不受"微信是否在运行"
+    "SIP 是否关闭"影响。单独转这一步是因为 HEIC 在浏览器里的原生支持
+    并不可靠——Safari 能直接显示，Chrome/Firefox 的 <img> 普遍不支持。
     """
     with tempfile.NamedTemporaryFile(suffix=".heic", delete=False) as inf:
         inf.write(heic_bytes)
@@ -411,7 +404,7 @@ def convert_wxgf_for_web(data: bytes, log=print) -> tuple[bytes, str] | None:
 
 
 def find_wechat_pid():
-    """复用 discover.find_wechat_pids() 里同一套查找逻辑，取内存占用最大的那个。"""
+    """复用 discover.find_wechat_pids() 里同一套查找逻辑，取第一个。"""
     from siwx.discover import find_wechat_pids
     pids = find_wechat_pids()
     return pids[0] if pids else None

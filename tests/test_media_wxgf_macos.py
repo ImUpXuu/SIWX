@@ -11,9 +11,6 @@
      （防止手改脚本模板时和独立函数定义出现漂移）；
   3. 优雅降级：找不到微信进程时直接返回 None / 空结果，不抛异常、不
      真的去 spawn lldb 子进程。
-
-运行：
-    python -m unittest discover -s tests -v
 """
 import sys
 import unittest

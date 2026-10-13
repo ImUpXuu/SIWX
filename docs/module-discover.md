@@ -62,8 +62,8 @@ for root in roots:
 从 db_storage 路径提取 wxid。
 
 ```python
->>> wxid_of("C:/Users/xxx/xwechat_files/wxid_abc123/db_storage")
-'wxid_abc123'
+>>> wxid_of("C:/Users/xxx/xwechat_files/wxid_demo_c/db_storage")
+'wxid_demo_c'
 ```
 
 ---

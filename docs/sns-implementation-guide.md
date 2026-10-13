@@ -456,7 +456,7 @@ SnsDataItem
     <size width="288" height="288" totalSize="9884"/>
     <videoDuration>2.37800002</videoDuration>
     <liveStillImageTimeMs>734</liveStillImageTimeMs>
-    <enc key="1884729990">1</enc>
+    <enc key="1880000001">1</enc>
   </liveMedia></LivePhoto>
 </media>
 ```

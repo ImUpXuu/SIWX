@@ -22,6 +22,38 @@ PBKDF2_DKLEN = 32
 PBKDF2_DIGEST = "sha512"
 
 
+def _version_tuple(v: str):
+    """'4.1.80' → (4, 1, 80)；容忍 '4.1.80.17' 与非数字尾巴。"""
+    parts = []
+    for seg in (v or "").split("."):
+        digits = ""
+        for ch in seg:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts[:3])
+
+
+def _wechat_bundle_version():
+    """读微信 App Bundle 的版本号（P1-4 前置判定）；读不到返回 None 不拦路。"""
+    import plistlib
+    candidates = [
+        Path("/Applications/WeChat.app/Contents/Info.plist"),
+        Path.home() / "Applications" / "WeChat.app" / "Contents" / "Info.plist",
+    ]
+    for p in candidates:
+        try:
+            with open(p, "rb") as f:
+                v = plistlib.load(f).get("CFBundleShortVersionString")
+            if v:
+                return str(v)
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def extract(ctx) -> int:
     """macOS only: LLDB breakpoint to capture passphrase + PBKDF2 derivation."""
     import sys
@@ -34,6 +66,20 @@ def extract(ctx) -> int:
     log = ctx["log"]
     # 审计 §3.4：逐 salt 细分等 Debug 才需要的信号走 dbg（95 行已有无条件汇总）
     dbg = ctx.get("dbg", log)
+
+    # P1-4 前置判定（issue #30 零回复的根因之一）：<4.1.80 的微信 raw key
+    # 不经过 sqlite3_key/CCKeyDerivationPBKDF 断点路径，attach 注定 0/N，
+    # 与其让用户在无解的循环里重试，不如直接给明确的下一步。
+    bundle_ver = _wechat_bundle_version()
+    if bundle_ver is not None:
+        log(f"[macos_lldb] 微信版本: {bundle_ver}")
+        if _version_tuple(bundle_ver) < (4, 1, 80):
+            log("[macos_lldb] ✗ 微信版本低于 4.1.80 —— 该版本的密钥提取在本工具"
+                "的 LLDB 断点路径下必然 0/N")
+            log("[macos_lldb]   请先把微信升级到 4.1.80+ 再重跑（详见 MACOS_SUPPORT.md）")
+            return 0
+    else:
+        dbg("[macos_lldb] 未读到微信 App 版本号（非标准安装路径?），跳过版本前置判定")
 
     try:
         result = subprocess.run(["lldb", "--version"], capture_output=True, check=True, timeout=10)
@@ -251,7 +297,14 @@ def _main():
                         rounds = process.ReadUnsignedFromMemory(sp + 8, 8, error)
                 if rounds is not None:
                     rounds &= 0xFFFFFFFF
-                if rounds == 256000 and plen == 32 and pw:
+                if plen == 32 and pw:
+                    # P1-4：命中条件从 rounds==256000 放宽到 plen==32——
+                    # KDF 参数随版本变化的概率远高于 passwordLen 变化；
+                    # rounds 不符仍捕获，由本地 PBKDF2 + HMAC 验证兜底，
+                    # 同时把实际 rounds 记进日志便于按版本适配。
+                    if rounds is not None and rounds != 256000:
+                        print(f"HIT:cc KDF rounds={{rounds}} 与内置 256000 不符，"
+                              f"仍捕获 passphrase 供验证")
                     data = process.ReadMemory(pw, 32, error)
                     if not error.Fail() and len(data) == 32:
                         print(f"OK:{{data.hex()}}")
@@ -260,7 +313,7 @@ def _main():
                 else:
                     cc_other += 1
                     if cc_other <= 8:
-                        print(f"HIT:cc rounds={{rounds}} plen={{plen}} hits={{hits}}")
+                        print(f"HIT:cc rounds={{rounds}} plen={{plen}} pw={{bool(pw)}} hits={{hits}}")
                 continue
             # 用断点 ID 区分命中了哪个函数，二者参数位不同:
             # sqlite3_key(db, pKey, nKey)         -> pKey=arg2, nKey=arg3
