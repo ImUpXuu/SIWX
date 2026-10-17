@@ -1,9 +1,9 @@
-"""Strategy: macOS LLDB breakpoint + PBKDF2 derivation (WeChat 4.1.80+).
+"""Strategy: macOS LLDB breakpoint + PBKDF2 derivation (WeChat 4.1.x).
 
-Since WeChat 4.1.80, raw keys are no longer cached in memory, only a 32-byte
-passphrase remains. This strategy uses LLDB to set a breakpoint on sqlite3_key
-/ sqlite3_key_v2, captures the passphrase, then derives per-database keys using
-PBKDF2-SHA512 (256000 iterations).
+On macOS WeChat 4.1.x (verified on 4.1.13), raw keys are no longer cached in
+memory, only a 32-byte passphrase remains. This strategy uses LLDB to set a
+breakpoint on sqlite3_key / sqlite3_key_v2, captures the passphrase, then
+derives per-database keys using PBKDF2-SHA512 (256000 iterations).
 
 Requires: macOS + lldb CLI + WeChat logged in.
 """
@@ -16,14 +16,14 @@ from pathlib import Path
 
 from siwx.sqlcipher import verify_enc_key
 
-# PBKDF2 params (matches WeChat 4.1.80)
+# PBKDF2 params (matches WeChat 4.1.x; verified on 4.1.13)
 PBKDF2_ITERATIONS = 256000
 PBKDF2_DKLEN = 32
 PBKDF2_DIGEST = "sha512"
 
 
 def _version_tuple(v: str):
-    """'4.1.80' → (4, 1, 80)；容忍 '4.1.80.17' 与非数字尾巴。"""
+    """'4.1.8' → (4, 1, 8)；容忍 '4.1.8.106' 与非数字尾巴。"""
     parts = []
     for seg in (v or "").split("."):
         digits = ""
@@ -67,19 +67,21 @@ def extract(ctx) -> int:
     # 审计 §3.4：逐 salt 细分等 Debug 才需要的信号走 dbg（95 行已有无条件汇总）
     dbg = ctx.get("dbg", log)
 
-    # P1-4 前置判定（issue #30 零回复的根因之一）：<4.1.80 的微信 raw key
-    # 不经过 sqlite3_key/CCKeyDerivationPBKDF 断点路径，attach 注定 0/N，
-    # 与其让用户在无解的循环里重试，不如直接给明确的下一步。
+    # 版本基线提示（issue #30/#32）：此前这里的门槛是 4.1.80 —— 那是
+    # "4.1.8.0" 的笔误被当成了 (4, 1, 80) 参与比较。macOS 微信最高只有
+    # 4.1.15，于是 5.0.9~5.0.10 把所有 macOS 用户直接拦在策略门外，
+    # 一次 attach 都没发生过（issue #32 的 4.1.8.106 / 4.1.15 都是这样）。
+    # 真实基线是 4.1.8：PR #26 作者在 4.1.13 上实测 31/31 salt 验证通过。
+    # 低于基线只提示、不拦路——没有任何实测证据证明某个 macOS 版本必然
+    # 走不通，硬拦只会重蹈"版本号猜错导致全员 0/N"的覆辙。
     bundle_ver = _wechat_bundle_version()
     if bundle_ver is not None:
         log(f"[macos_lldb] 微信版本: {bundle_ver}")
-        if _version_tuple(bundle_ver) < (4, 1, 80):
-            log("[macos_lldb] ✗ 微信版本低于 4.1.80 —— 该版本的密钥提取在本工具"
-                "的 LLDB 断点路径下必然 0/N")
-            log("[macos_lldb]   请先把微信升级到 4.1.80+ 再重跑（详见 MACOS_SUPPORT.md）")
-            return 0
+        if _version_tuple(bundle_ver) < (4, 1, 8):
+            log("[macos_lldb] ⚠ 微信版本低于 4.1.8 —— LLDB 断点路径只在"
+                " 4.1.8+ 上验证过，继续尝试，但失败概率较高")
     else:
-        dbg("[macos_lldb] 未读到微信 App 版本号（非标准安装路径?），跳过版本前置判定")
+        dbg("[macos_lldb] 未读到微信 App 版本号（非标准安装路径?），跳过版本提示")
 
     try:
         result = subprocess.run(["lldb", "--version"], capture_output=True, check=True, timeout=10)
@@ -207,7 +209,7 @@ def _main():
     # Attach 后按名字在所有模块上创建断点（兼容符号表/导出表两种形态）
     bp_key = target.BreakpointCreateByName("sqlite3_key")
     bp_v2 = target.BreakpointCreateByName("sqlite3_key_v2")
-    # 微信 4.1.80+ 的 SQLCipher 不导出 sqlite3_key（按名字只会匹配到系统 libsqlite3 的
+    # 微信 4.1.x 的 SQLCipher 不导出 sqlite3_key（按名字只会匹配到系统 libsqlite3 的
     # 空壳），因此额外在 CCKeyDerivationPBKDF 上下断点：SQLCipher 用它把 passphrase
     # 派生为数据库密钥 (rounds=256000)，参数里直接就是 passphrase。
     bp_cc = target.BreakpointCreateByName("CCKeyDerivationPBKDF")
