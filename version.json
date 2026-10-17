@@ -1,12 +1,12 @@
 {
-  "version": "5.0.10",
-  "date": "2026-10-11 02:10:42",
-  "notes": "v5.0.10\n\n**聊天查看新增微信式搜索与筛选：关键词 + 类型双条件、精确计数、点击结果直达原文上下文。**\n\n- **聊天内搜索**：会话内按关键词查找聊天记录，大小写不敏感；zstd 压缩消息同样可搜（解码后匹配——SQL LIKE 对压缩行完全失明，逐条解码保证不漏）。\n- **类型筛选**：文本 / 图片 / 视频 / 语音 / 表情 / 链接与文件 / 系统，一键切换，可与关键词叠加。\n- **高效定位**：搜索结果带精确总数；点击任一结果退出筛选并跳回该消息的原文位置（高亮闪烁标记）；关键词命中处黄色高亮。\n- **性能**：消息解码按分片缓存（有界 LRU），首次搜索后翻页/换词是纯内存扫描，秒级响应；日期定位沿用时间轴按月跳转。\n- **缓存刷新**：UI 资源版本号更新，升级后浏览器自动加载新界面，不会残留旧界面缓存。\n\n全量测试通过（含 8 个筛选/搜索新回归用例）。",
+  "version": "5.0.11",
+  "date": "2026-10-17 03:40:00",
+  "notes": "v5.0.11\n\n**紧急修复：macOS 密钥提取的版本门槛误拦了所有 macOS 用户（5.0.9~5.0.10 实际全量失效）。无破坏性变更。**\n\n### 根因\n\n5.0.9 引入的微信版本前置判定把基线写成 **4.1.80** —— 这是 `4.1.8.0` 的笔误被当作 `(4, 1, 80)` 参与比较。macOS 微信最高只有 4.1.15，于是 4.1.8.106 / 4.1.15 / 4.1.13 全部被判为「低于 4.1.80」，`macos_lldb` 策略在进入 LLDB 之前就 `return 0`，一次 attach 都没发生（issue #30 / #32）。\n\n### 修复\n\n- **版本基线改为 4.1.8**：PR #26 作者在 4.1.13 上实测 31/31 salt 验证通过\n- **低于基线只警告、不再拦路**：没有实测证据证明某个 macOS 版本必然走不通，硬拦只会重蹈「版本号猜错导致全员 0/N」的覆辙\n- 同步修正 `extract.py` 的失败提示与 README / MACOS_SUPPORT.md / docs 中的 4.1.80 错误表述\n- 新增回归测试：钉住 4.1.8.106 / 4.1.15 / 4.1.13 必须放行到 LLDB\n\n### 升级后仍失败？\n\nmacOS 提取密钥还需满足：SIP 已关闭（`csrutil status`）、微信已登录、`killall WeChat` 重开后**立即**执行 `keys extract`（断点只在微信新建数据库连接时命中）。详见 MACOS_SUPPORT.md。\n\n全量测试 455 通过 / 1 跳过。",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.10/stories-in-wx-v5.0.10-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.10/stories-in-wx-v5.0.10-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.11/stories-in-wx-v5.0.11-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.11/stories-in-wx-v5.0.11-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.10/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.11/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
