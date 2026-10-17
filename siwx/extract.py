@@ -236,7 +236,7 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
     if report["verified"] == 0 and report["total_salts"] > 0:
         log("[extract] ✗ 未能提取到任何密钥！可能原因:")
         log("  1. 微信未登录 — 请先启动并登录微信")
-        log("  2. 微信版本不支持 — 需要 WeChat 4.1.x (Windows) 或 4.1.80+ (macOS)")
+        log("  2. 微信版本不支持 — 需要 WeChat 4.1.x (Windows) 或 4.1.8+ (macOS)")
         log("  3. 密钥已过期 — 尝试在微信中重新打开聊天后重跑")
         if platform.system() == "Darwin":
             # PR #27/#30：断点只在数据库连接新建时命中，且 SIP 开启时 root 也

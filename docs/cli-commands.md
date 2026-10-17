@@ -218,7 +218,7 @@ if platform.system() not in ("Windows", "Darwin"):
     return 1
 ```
 
-Windows 完整支持（config_cipher / memscan 策略）；macOS 支持 WeChat 4.1.80+（LLDB 断点捕获密钥，见 [MACOS_SUPPORT.md](../MACOS_SUPPORT.md)）；其他平台直接退出。
+Windows 完整支持（config_cipher / memscan 策略）；macOS 支持 WeChat 4.1.x（LLDB 断点捕获密钥，见 [MACOS_SUPPORT.md](../MACOS_SUPPORT.md)）；其他平台直接退出。
 
 ---
 

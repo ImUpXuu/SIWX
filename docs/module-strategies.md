@@ -207,7 +207,7 @@ PBKDF2_DIGEST = "sha512"
 
 **依赖**: macOS + lldb CLI + 微信已登录
 
-**适用场景**: WeChat 4.1.80+（raw key 不再缓存，只保留 passphrase）。
+**适用场景**: WeChat 4.1.x（4.1.13 实测；raw key 不再缓存，只保留 passphrase）。
 
 ---
 
