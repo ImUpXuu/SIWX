@@ -49,7 +49,7 @@ pc_wechat_exp 的 harvest-keys（V2 魔数邻近窗口扫描 + 32hex 正则）�
 
 - `msg/attach` 中 32 个 `95b2` 开头的未知签名文件（疑似视频/缩略图变体）。
 - MMKV code 的有效期：换号/重装后 code 是否变化（预期：每个账号一个 code，稳定）。
-- 视频文件（msg/video）的加密方式（大概率同 V2，待采样）。
+- ~~视频文件（msg/video）的加密方式~~ **已采样（2026-10）：明文 MP4 未加密**，详见 media-decryption-principles.md；剩余问题是消息↔文件 md5 匹配与被微信自动清理的存量缺口。
 
 ## 媒体解密模块设计（待实施，按需解密不全量）
 

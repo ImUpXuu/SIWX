@@ -186,13 +186,18 @@ def stream_html_msg(f, m, first: bool):
 
 
 def stream_html_tail(f, count: int, title: str, faces: dict | None = None,
-                     maps: dict | None = None, template=None):
+                     maps: dict | None = None, template=None,
+                     media_enabled: bool | None = None):
     """写 CHAT_DATA 收尾 + 渲染器脚本。count 为实际写出的消息数。
 
     faces: 本会话用到的微信小黄脸 name → dataURI（由 exporter 收集传入），
     注入 window.WX_FACES 供渲染器把 [表情名] 替换为内联官方表情图。
     maps: 位置消息瓦片键 → dataURI（wx_maps 尽力下载），注入
     window.WX_MAPS 供渲染器在位置卡显示地图缩略图。
+    media_enabled: 本次导出是否启用媒体导出（run_export 的 want_media）。
+    注入 window.MEDIA_EXPORT 供渲染器区分占位原因——"未启用媒体导出"
+    与"解密失败/源缺失"在页面上应当有不同的解释；None（JSON 转换等
+    无法得知原始开关的路径）不注入，渲染器用通用措辞。
     """
     tpl = get_template(template)
     f.write("]};</script>\n")
@@ -200,6 +205,9 @@ def stream_html_tail(f, count: int, title: str, faces: dict | None = None,
         f.write(f"\n<script>window.WX_FACES = {_script_safe_json(faces)};</script>\n")
     if maps:
         f.write(f"\n<script>window.WX_MAPS = {_script_safe_json(maps)};</script>\n")
+    if media_enabled is not None:
+        f.write("\n<script>window.MEDIA_EXPORT = "
+                f"{_script_safe_json({'enabled': bool(media_enabled)})};</script>\n")
     f.write(f"\n<script>\nconst MSG_COUNT = {count};\n"
             f"const CHAT_TITLE = {_script_safe_json(title)};\n")
     f.write(tpl.renderer + "\n</script>\n</body>\n</html>")

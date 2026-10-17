@@ -31,7 +31,7 @@
 body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
      background:var(--bg);color:var(--text);line-height:1.45;
      -webkit-font-smoothing:antialiased}
-.app{max-width:880px;margin:0 auto;height:100vh;display:flex;
+.app{max-width:940px;margin:0 auto;height:100vh;display:flex;
      flex-direction:column;background:var(--chat-bg);box-shadow:0 0 60px var(--shadow)}
 .chat-header{background:var(--header-bg);padding:12px 18px;display:flex;
              align-items:center;justify-content:space-between;flex-shrink:0;
@@ -40,6 +40,7 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
 .header-avatar{width:40px;height:40px;border-radius:12px;background:var(--accent);
                color:#fff;display:flex;align-items:center;justify-content:center;
                font-size:18px;font-weight:600;flex-shrink:0;overflow:hidden}
+.header-avatar img{width:100%;height:100%;object-fit:cover}
 .header-info h1{font-size:16px;font-weight:600;white-space:nowrap;overflow:hidden;
                 text-overflow:ellipsis}
 .header-meta{font-size:12px;color:var(--sub)}
@@ -49,17 +50,23 @@ body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
           display:inline-flex;align-items:center;justify-content:center}
 .icon-btn svg{display:block}
 .icon-btn:hover{background:var(--tag-bg)}
-.stats-panel{background:var(--panel);border-bottom:1px solid var(--border);
-             display:none;padding:12px 16px;flex-shrink:0}
-.stats-panel.active{display:block}
+/* 统计 / 筛选：模态框（<dialog>），不再下推消息流 */
+dialog.modal{border:none;border-radius:16px;background:var(--panel);color:var(--text);
+             padding:0;width:min(480px,92vw);max-height:80vh;
+             box-shadow:0 24px 60px rgba(0,0,0,.28)}
+dialog.modal::backdrop{background:rgba(0,0,0,.45)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;
+            padding:13px 18px;border-bottom:1px solid var(--border);
+            font-size:15px;font-weight:600;flex-shrink:0}
+.modal-body{padding:14px 18px;overflow-y:auto;max-height:calc(80vh - 51px)}
 .stats-row{display:flex;flex-wrap:wrap;gap:8px}
 .stat-card{background:var(--tag-bg);border-radius:10px;padding:10px 14px;
            min-width:90px;flex:1;text-align:center}
 .stat-num{font-size:22px;font-weight:700;color:var(--accent-fg)}
 .stat-label{font-size:11px;color:var(--sub);margin-top:2px}
-.filter-panel{background:var(--panel);border-bottom:1px solid var(--border);
-              display:none;padding:12px 16px;flex-shrink:0}
-.filter-panel.active{display:block}
+/* 类型统计卡可点击跳筛选；概览卡（总消息/成员/天数）保持静态 */
+.stat-card.clickable{cursor:pointer;transition:transform .12s,box-shadow .12s}
+.stat-card.clickable:hover{transform:translateY(-2px);box-shadow:0 3px 10px var(--shadow)}
 .filter-label{font-size:12px;font-weight:600;color:var(--sub);margin-bottom:8px}
 .filter-tags{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
 .type-tag{display:inline-flex;align-items:center;gap:4px;padding:5px 12px;
@@ -75,24 +82,54 @@ button.type-tag{font:inherit}
             color:#fff;font-size:13px;cursor:pointer}
 .filter-btn.secondary{background:var(--tag-bg);color:var(--text);
                       border:1.5px solid var(--border)}
-.search-bar{display:none;padding:0 18px 12px;align-items:center;gap:8px;
+/* 生效中的筛选条件胶囊：面板关闭后条件仍然可见、可单独移除 */
+.filter-chips{display:none;flex-wrap:wrap;gap:6px;padding:8px 18px 0}
+.filter-chips.active{display:flex}
+.chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;
+      background:var(--accent-soft);color:var(--accent-fg);
+      border:1px solid var(--accent-line);border-radius:999px;
+      padding:3px 7px 3px 10px;font-size:12px}
+.chip-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip-x{border:none;background:var(--accent-line);color:var(--accent-fg);flex-shrink:0;
+        width:16px;height:16px;border-radius:50%;cursor:pointer;font-size:10px;
+        line-height:1;display:flex;align-items:center;justify-content:center;padding:0}
+/* 媒体缺失汇总条：明确告知"缺了什么、为什么"，可按类型一键筛选 */
+.media-banner{display:none;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 18px;
+              background:var(--accent-soft);border-bottom:1px solid var(--border)}
+.mb-title{font-size:12px;color:var(--text);font-weight:500}
+.mb-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--accent-line);
+         background:var(--panel);border-radius:8px;padding:3px 9px;font-size:12px;
+         cursor:pointer;color:var(--text);font:inherit;font-size:12px}
+.mb-chip:hover{border-color:var(--accent)}
+.mb-chip .mb-reason{color:var(--sub);font-size:11px}
+.mb-close{margin-left:auto;background:none;border:none;color:var(--sub);cursor:pointer;
+          padding:4px 6px;border-radius:8px;font-size:13px}
+.mb-close:hover{background:var(--tag-bg)}
+.search-bar{display:none;padding:0 18px 12px;align-items:center;gap:6px;
             border-bottom:1px solid var(--border)}
 .search-bar.active{display:flex}
-.search-bar input{flex:1;padding:9px 14px;border:1px solid var(--border);
+.search-bar input{flex:1;min-width:0;padding:9px 14px;border:1px solid var(--border);
                   border-radius:10px;background:var(--tag-bg);color:var(--text);
                   font-size:14px;outline:none}
+#searchCount{color:var(--sub);font-size:12px;white-space:nowrap}
 .chat-body{flex:1;overflow-y:auto;padding:8px 0}
 .chat-body::-webkit-scrollbar{width:8px}
 .chat-body::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:999px}
-.date-divider{text-align:center;padding:12px 0 8px}
+/* 日期分隔条吸顶：滚到哪天就钉在哪，点击打开日期跳转 */
+.date-divider{position:sticky;top:0;z-index:5;text-align:center;padding:12px 0 8px;
+              pointer-events:none}
 .date-divider span{background:var(--system-bg);color:var(--sub);padding:3px 12px;
-                   border-radius:999px;font-size:12px;font-weight:500}
+                   border-radius:999px;font-size:12px;font-weight:500;cursor:pointer;
+                   pointer-events:auto;box-shadow:0 2px 10px var(--shadow)}
 .system-msg{text-align:center;padding:4px 60px;margin:2px 0}
 .system-msg span{background:var(--system-bg);color:var(--sub);padding:3px 12px;
                  border-radius:999px;font-size:12px;display:inline-block;
                  max-width:100%;word-break:break-word}
 .msg-row{display:flex;padding:4px 14px;align-items:flex-end;gap:8px}
 .msg-row.sent{flex-direction:row-reverse}
+/* 同人连续消息：压紧行距，头像占位隐藏（保布局），气泡直角衔接 */
+.msg-row.cont{padding-top:1px}
+.msg-avatar.ghost{visibility:hidden;background:transparent}
 .msg-avatar{width:36px;height:36px;border-radius:11px;flex-shrink:0;overflow:hidden;
             background:#cfcecb;display:flex;align-items:center;justify-content:center;
             font-size:14px;font-weight:600;color:#fff;margin-top:2px}
@@ -111,6 +148,9 @@ button.type-tag{font:inherit}
 .msg-row:not(.sent) .bubble-body{border-top-left-radius:5px}
 .msg-row.sent .bubble-body{background:var(--send);border-color:var(--send-line);
                            color:var(--send-fg);border-top-right-radius:5px}
+/* 分组内的后续气泡：与上一条同侧直角衔接成组 */
+.msg-row.cont:not(.sent) .bubble-body{border-top-left-radius:14px}
+.msg-row.cont.sent .bubble-body{border-top-right-radius:14px}
 .msg-time{font-size:11px;color:var(--tm);text-align:right;margin-top:2px}
 /* 时间在气泡内（见 renderer.js），绿底上用气泡文字色降透明度保证可读 */
 .msg-row.sent .msg-time{color:var(--send-fg);opacity:.62}
@@ -119,11 +159,18 @@ button.type-tag{font:inherit}
            color:var(--sub);white-space:pre-wrap;word-break:break-word}
 .msg-quote .qn{color:var(--accent-fg);font-weight:600}
 .msg-quote .qt{color:var(--sub);font-weight:400;font-size:10px;margin-left:6px}
-.msg-image{cursor:pointer;border-radius:6px;max-width:300px;max-height:300px;
+.msg-image{cursor:pointer;border-radius:6px;max-width:360px;max-height:360px;
            display:block;object-fit:contain;background:var(--media-bg)}
-.msg-image.broken{width:200px;height:60px;display:flex;align-items:center;
-                  justify-content:center;background:var(--media-bg);color:var(--sub);
-                  font-size:12px;border-radius:6px}
+/* 占位媒体卡：媒体未包含在导出中时的语义化占位（类型 + 原因），
+   取代此前的"📷 图片未下载"光杆文本——视觉上是刻意设计的卡片而非破图 */
+.ph-card{display:flex;align-items:center;gap:9px;min-width:150px;max-width:240px;
+         padding:9px 12px;border:1.5px dashed var(--line-strong);border-radius:10px;
+         background:var(--media-bg)}
+.ph-icon{width:34px;height:34px;border-radius:9px;background:var(--tag-bg);flex-shrink:0;
+         display:flex;align-items:center;justify-content:center;font-size:17px}
+.ph-body{min-width:0}
+.ph-label{font-size:13px;font-weight:500}
+.ph-reason{font-size:11px;color:var(--sub);margin-top:1px}
 .msg-emoji{max-width:120px;max-height:120px;display:block;cursor:pointer}
 .msg-vtrans{font-size:12px;color:var(--sub);margin-top:4px;padding-top:4px;
             border-top:1px dashed var(--border);white-space:pre-wrap;
@@ -161,14 +208,56 @@ button.type-tag{font:inherit}
 .wx-transfer .wx-card-left{background:rgba(255,255,255,.2);color:#fff}
 .chat-footer{background:var(--bg);text-align:center;padding:10px;font-size:12px;
              color:var(--sub);border-top:1px solid var(--border);flex-shrink:0}
-.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:1000;
-          align-items:center;justify-content:center;cursor:zoom-out}
+.lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:1000;
+          align-items:center;justify-content:center}
 .lightbox.active{display:flex}
-.lightbox img{max-width:95vw;max-height:95vh;object-fit:contain;border-radius:4px;
-              -webkit-touch-callout:default}
+.lightbox img{max-width:95vw;max-height:92vh;object-fit:contain;border-radius:4px;
+              -webkit-touch-callout:default;transition:transform .18s;cursor:zoom-out}
+.lightbox img.lb-zoom{transform:scale(1.8);cursor:move}
+.lb-btn{position:absolute;top:14px;background:rgba(255,255,255,.12);color:#fff;
+        border:none;border-radius:10px;padding:9px;cursor:pointer;
+        display:inline-flex;align-items:center;justify-content:center}
+.lb-btn:hover{background:rgba(255,255,255,.24)}
+.lb-close{right:14px}
+.lb-download{right:56px;color:#fff}
+.lb-counter{position:absolute;top:20px;left:18px;color:rgba(255,255,255,.85);
+            font-size:13px;font-variant-numeric:tabular-nums}
+.lb-nav{position:absolute;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.12);
+        color:#fff;border:none;border-radius:50%;width:46px;height:46px;cursor:pointer;
+        display:flex;align-items:center;justify-content:center}
+.lb-nav:hover{background:rgba(255,255,255,.26)}
+.lb-prev{left:16px}
+.lb-next{right:16px}
+.lb-caption{position:absolute;bottom:16px;left:0;right:0;text-align:center;
+            color:rgba(255,255,255,.85);font-size:13px;pointer-events:none;
+            text-shadow:0 1px 4px rgba(0,0,0,.6);padding:0 60px}
+/* 悬浮导航（回到最新/日期跳转/跳到最早）：贴聊天列右下角，窄屏贴屏幕右缘 */
+.fab-stack{position:fixed;z-index:600;bottom:26px;display:flex;flex-direction:column;
+           gap:8px;right:max(14px, calc(50vw - 470px + 12px))}
+.fab-btn{width:42px;height:42px;border-radius:50%;border:1px solid var(--border);
+         background:var(--panel);color:var(--sub);cursor:pointer;display:flex;
+         align-items:center;justify-content:center;box-shadow:0 4px 16px var(--shadow);
+         transition:transform .12s,color .15s}
+.fab-btn:hover{transform:translateY(-2px);color:var(--accent-fg)}
+.date-pop{position:fixed;z-index:600;bottom:120px;display:none;
+          right:max(14px, calc(50vw - 470px + 12px))}
+.date-pop.active{display:block}
+.date-pop-row{display:flex;gap:8px;align-items:center;background:var(--panel);
+              border:1px solid var(--border);border-radius:12px;padding:10px;
+              box-shadow:0 10px 30px var(--shadow)}
+.date-pop input[type=date]{padding:6px 10px;border:1.5px solid var(--border);
+                           border-radius:8px;background:var(--tag-bg);color:var(--text)}
 .loading{text-align:center;padding:20px;color:var(--sub);font-size:13px}
 .no-result{text-align:center;padding:60px 20px;color:var(--sub);font-size:14px}
-@media(max-width:600px){.msg-bubble{max-width:80%}.msg-image{max-width:220px}}
+/* 搜索命中高亮与跳转闪烁：mark 只会由渲染器注入到已转义文本上 */
+.bubble-body mark,.msg-quote mark{background:#ffe58f;color:#5c4400;border-radius:2px;padding:0 1px}
+[data-theme="dark"] .bubble-body mark,[data-theme="dark"] .msg-quote mark{background:#5c4a12;color:#ffe58f}
+.msg-row .bubble-body{transition:outline-color .8s}
+.msg-row.flash .bubble-body{outline:2px solid var(--accent);outline-offset:1px;
+                            transition:outline-color .1s}
+@media(max-width:600px){.msg-bubble{max-width:80%}.msg-image{max-width:220px}
+                        dialog.modal{width:94vw}.mb-chip .mb-reason{display:none}
+                        .lb-nav{width:38px;height:38px}.lb-prev{left:8px}.lb-next{right:8px}}
 </style>
 </head>
 <body>
@@ -186,8 +275,39 @@ button.type-tag{font:inherit}
       <button class="icon-btn" id="searchToggle" title="搜索"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></button>
     </div>
   </header>
-  <div class="stats-panel" id="statsPanel"><div class="stats-row" id="statsRow"></div></div>
-  <div class="filter-panel" id="filterPanel">
+  <div class="media-banner" id="mediaBanner"></div>
+  <div class="filter-chips" id="filterChips"></div>
+  <div class="search-bar" id="searchBar">
+    <input type="text" id="searchInput" placeholder="搜索消息内容或发送者…">
+    <span id="searchCount"></span>
+    <button class="icon-btn" id="searchPrev" title="上一处"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg></button>
+    <button class="icon-btn" id="searchNext" title="下一处"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+    <button class="icon-btn" id="searchClose" title="关闭搜索"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+  </div>
+  <div class="chat-body" id="chatBody"><div id="msgContainer"></div>
+    <div class="loading" id="loadingIndicator">加载中…</div></div>
+  <footer class="chat-footer">由 stories-in-wx 导出 · 仅限个人数据备份研究</footer>
+</div>
+<div class="fab-stack">
+  <button class="fab-btn" id="fabLatest" title="回到最新"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12l7 7 7-7"/></svg></button>
+  <button class="fab-btn" id="fabDate" title="按日期跳转"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></button>
+  <button class="fab-btn" id="fabTop" title="跳到最早"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+</div>
+<div class="date-pop" id="datePop">
+  <div class="date-pop-row">
+    <input type="date" id="jumpDate">
+    <button class="filter-btn" id="jumpGo">跳转</button>
+  </div>
+</div>
+<dialog class="modal" id="statsPanel">
+  <div class="modal-head"><span>会话统计</span>
+    <button class="icon-btn modal-close" data-close="statsPanel" title="关闭"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
+  <div class="modal-body"><div class="stats-row" id="statsRow"></div></div>
+</dialog>
+<dialog class="modal" id="filterPanel">
+  <div class="modal-head"><span>筛选</span>
+    <button class="icon-btn modal-close" data-close="filterPanel" title="关闭"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
+  <div class="modal-body">
     <div class="filter-label">消息类型</div>
     <div class="filter-tags" id="typeFilters"></div>
     <div class="filter-divider"></div>
@@ -199,12 +319,13 @@ button.type-tag{font:inherit}
       <button class="filter-btn secondary" id="fReset">重置</button>
     </div>
   </div>
-  <div class="search-bar" id="searchBar">
-    <input type="text" id="searchInput" placeholder="搜索消息内容或发送者…">
-    <span id="searchCount" style="color:var(--sub);font-size:12px;white-space:nowrap"></span>
-  </div>
-  <div class="chat-body" id="chatBody"><div id="msgContainer"></div>
-    <div class="loading" id="loadingIndicator">加载中…</div></div>
-  <footer class="chat-footer">由 stories-in-wx 导出 · 仅限个人数据备份研究</footer>
+</dialog>
+<div class="lightbox" id="lightbox">
+  <div class="lb-counter" id="lbCounter"></div>
+  <button class="lb-btn lb-close" id="lbClose" title="关闭 (Esc)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+  <a class="lb-btn lb-download" id="lbDownload" title="下载此图" download><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5M12 15V3"/></svg></a>
+  <img id="lightboxImg" alt="图片大图预览" title="双击放大 / 点击关闭">
+  <button class="lb-nav lb-prev" id="lbPrev" title="上一张 (←)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+  <button class="lb-nav lb-next" id="lbNext" title="下一张 (→)"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
+  <div class="lb-caption" id="lbCaption"></div>
 </div>
-<div class="lightbox" id="lightbox"><img id="lightboxImg" alt="图片大图预览"></div>

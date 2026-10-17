@@ -29,7 +29,7 @@ V2 的密钥体系是**账号级**（不是逐文件）：
 | 聊天图片 | `xwechat_files/<wxid>/msg/attach/<目录1>/<目录2>/Img/*.dat` | 内容 md5（可带 `_h`/`_t` 缩略图后缀） |
 | 朋友圈图片（浏览缓存） | `xwechat_files/<wxid>/cache/<YYYY-MM>/Sns/Img/<2位hex>/<md5>` | 内容 md5，无扩展名 |
 | 朋友圈背景/自己发布 | `xwechat_files/<wxid>/business/sns/{bkg,publish}/...` | md5 |
-| 聊天视频 | `xwechat_files/<wxid>/msg/video/...`（加密方式待采样） | — |
+| 聊天视频 | `xwechat_files/<wxid>/msg/video/<YYYY-MM>/...` | 文件名 = 内容 md5（32hex）；**实测 2026-10：mp4 为明文未加密**（文件头即 `ftyp`），仅部分残留——微信会自动清理旧视频正文、保留封面 jpg |
 
 路径根目录可能在 `C:\Users\<user>\xwechat_files`、`D:\xwechat_files` 或
 `C:\Users\<user>\Documents\xwechat_files`（多实例并存，需全盘发现）。
@@ -162,7 +162,7 @@ WebP: 52 49 46 46 … 57 45 42 50 | 微信自研 wxgf: 77 78 67 66
 | 三个质量变体 | `msg/attach/<md5(会话)>/<年-月>/Img/` 下同名三档：`<md5>.dat`（聊天显示版）、`<md5>_h.dat`（**高清原图**）、`<md5>_t.dat`（缩略图），同一把账号 key 全部可解。会话目录名 = `md5(会话username)`，与 cache/Message 同规则。 |
 | 原图从未下载的消息 | 微信只自动下载气泡/缩略质量（Bubble 230×500 级别）；原图要点开才从 CDN 拉取。本地不存在的无法凭空解密。 |
 | `msg/attach` 中 32 个 `95b2` 开头签名的 .dat | 未识别（疑似视频/缩略图变体），待研究 |
-| 视频（msg/video）加密方式 | 待采样（大概率同 V2，未验证） |
+| 视频（msg/video）加密方式 | **已采样（2026-10）：明文 MP4，未加密**（`msg/video/<YYYY-MM>/` 下 `<md5>.mp4`，文件头即 `ftyp isom`；封面 `<md5>.jpg` 同为明文）。难点不在解密而在消息 ↔ 文件匹配（`<videomsg md5=...>` 与文件名 md5 对接）与微信自动清理导致的存量缺失 |
 | MMKV code 的稳定性 | 单账号预期稳定；换号/重装是否变化待观察（多账号各有一个 code） |
 | wxgf 格式 | 微信自研动图，用微信自带 `VoipEngine.dll` 的 `wxam_dec_wxam2pic_5`（mode 0/3）转 JPEG——DLL 就在微信安装目录，ctypes 直接调（**仅 Windows**；macOS/Linux 无法使用） |
 

@@ -587,7 +587,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                                             end_ts, account, names, media_map,
                                             avatar_map, progress, display, stats,
                                             session=session, senders=senders,
-                                            template=template)
+                                            template=template,
+                                            media_enabled=want_media)
         elif one_fmt == "txt":
             written = stream_export_txt(out_file, session, export_stream_with_media(), progress)
         elif one_fmt == "csv":
@@ -775,7 +776,7 @@ def _run_after_export(when: str, ctx: dict) -> None:
 def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                           names, media_map, avatar_map, progress=None,
                           display=None, stats=None, session=None, senders=None,
-                          template=None):
+                          template=None, media_enabled=True):
     """HTML 真流式导出（P1 修复）：消息边读边写文件句柄，内存 O(1)。
 
     旧实现把全部消息 accumulate 进 lines 再一次性 render_html——3 万条
@@ -822,7 +823,8 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
         stream_html_tail(f, count, session["displayName"],
                          faces=wx_faces.datauris(faces_used),
                          maps=wx_maps.datauris(map_keys),
-                         template=template)
+                         template=template,
+                         media_enabled=media_enabled)
     if truncated:
         logger.detailed("html",
                         f"HTML rawContent截断(>8000字) {truncated}/{count} 条",
