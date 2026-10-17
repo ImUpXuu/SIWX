@@ -2533,6 +2533,189 @@ class TestRecordinfoParsing(unittest.TestCase):
         self.assertIsNotNone(record)
 
 
+class TestRecordinfoRefsAndMedia(unittest.TestCase):
+    """issue #31：合并转发子项的媒体引用、嵌套记录与原始消息回查。
+
+    此前子项只有文本占位（图片永远显示 "[图片]"），且 datatype=17 的嵌套
+    记录被当成普通文件丢弃。现在解析器保留 kind/title/srcMsgId 等字段，
+    并可用原始消息补全 md5——图片因此能走正常媒体链路导出。
+    """
+
+    XML = ('<appmsg type="19"><title>聊天记录</title><recordinfo>'
+           '<dataitem datatype="2" dataid="1"><sourcename>张三</sourcename>'
+           '<sourcetime>1700000001</sourcetime>'
+           '<datadesc><![CDATA[[图片]]></datadesc>'
+           '<fromnewmsgid>900001</fromnewmsgid>'
+           '<srcMsgLocalid>42</srcMsgLocalid>'
+           '<srcMsgCreateTime>1700000001</srcMsgCreateTime>'
+           '</dataitem>'
+           '<dataitem datatype="17" dataid="2"><sourcename>李四</sourcename>'
+           '<sourcetime>1700000002</sourcetime>'
+           '<recordinfo><title>嵌套记录</title><datalist count="1">'
+           '<dataitem datatype="1"><sourcename>王五</sourcename>'
+           '<sourcetime>1700000003</sourcetime>'
+           '<datadesc><![CDATA[嵌套文本]]></datadesc></dataitem>'
+           '</datalist></recordinfo></dataitem>'
+           '</recordinfo></appmsg>')
+
+    def test_kind_and_source_refs(self):
+        from siwx.api_chat import _parse_recordinfo
+        rec = _parse_recordinfo(self.XML)
+        img = rec["items"][0]
+        self.assertEqual(img["kind"], "image")
+        self.assertEqual(img["datatype"], "2")
+        self.assertEqual(img["srcMsgId"], 900001)
+        self.assertEqual(img["srcLocalId"], 42)
+        self.assertEqual(img["srcCreateTime"], 1700000001)
+
+    def test_nested_record_recurses(self):
+        from siwx.api_chat import _parse_recordinfo
+        nested = _parse_recordinfo(self.XML)["items"][1]
+        self.assertEqual(nested["kind"], "record")
+        self.assertIn("record", nested)
+        self.assertEqual(nested["record"]["title"], "嵌套记录")
+        self.assertEqual(nested["record"]["items"][0]["text"], "嵌套文本")
+
+    def test_resolve_many_fills_media(self):
+        from siwx.api_chat import _parse_recordinfo
+        calls = []
+
+        def resolve(ids):
+            calls.append(list(ids))
+            return {900001: {"md5": "a" * 32, "bubbleMd5": "", "text": "",
+                             "type": 3, "localId": 42, "ts": 1700000001}}
+
+        img = _parse_recordinfo(self.XML, resolve)["items"][0]
+        self.assertTrue(img.get("resolved"))
+        self.assertEqual(img["md5"], "a" * 32)
+        self.assertEqual(calls, [[900001]])  # 一次批量查询，不逐条开库
+
+    def test_kind_record_for_filter(self):
+        """合并转发单列 record 类，不再混进链接/文件（issue #31）。"""
+        from siwx.api_chat import message_kind
+        self.assertEqual(message_kind(49, None, None, None, {"items": []}), "record")
+        self.assertEqual(message_kind(49, None, {"url": "https://x"}, None, None), "link")
+
+
+class TestRecordResolver(unittest.TestCase):
+    """make_record_resolver：按 fromnewmsgid 回查原始消息（issue #31）。"""
+
+    def _make_acc(self, td, chat, other_chat=None):
+        """临时账号目录：session.db 提供 md5(chat) 反查，message_0.db 放消息。"""
+        import hashlib
+        import sqlite3
+        from pathlib import Path
+        acc = Path(td) / "acc"
+        (acc / "message").mkdir(parents=True)
+        (acc / "session").mkdir(parents=True)
+        sdb = acc / "session" / "session.db"
+        con = sqlite3.connect(sdb)
+        con.execute("CREATE TABLE SessionTable (username TEXT)")
+        for u in filter(None, (chat, other_chat)):
+            con.execute("INSERT INTO SessionTable VALUES (?)", (u,))
+        con.commit()
+        con.close()
+
+        db = acc / "message" / "message_0.db"
+        con = sqlite3.connect(db)
+        for u in filter(None, (chat, other_chat)):
+            table = "Msg_" + hashlib.md5(u.encode()).hexdigest()
+            con.execute(
+                f'CREATE TABLE "{table}" (local_id INTEGER, server_id INTEGER, '
+                f'local_type INTEGER, create_time INTEGER, origin_source INTEGER, '
+                f'real_sender_id INTEGER, message_content TEXT, packed_info_data BLOB)')
+        con.commit()
+        con.close()
+        return acc
+
+    @staticmethod
+    def _insert(acc, chat, sid, lid, ts, md5):
+        import hashlib
+        import sqlite3
+        table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+        con = sqlite3.connect(acc / "message" / "message_0.db")
+        con.execute(f'INSERT INTO "{table}" VALUES (?, ?, 3, ?, 0, 0, ?, NULL)',
+                    (lid, sid, ts, f'<msg><img md5="{md5}" /></msg>'))
+        con.commit()
+        con.close()
+
+    def test_resolves_original_message_md5(self):
+        import tempfile
+        from siwx import api_chat
+
+        chat = "wxid_peer"
+        md5 = "b" * 32
+        with tempfile.TemporaryDirectory() as td:
+            acc = self._make_acc(td, chat)
+            self._insert(acc, chat, 900001, 7, 1700000001, md5)
+            resolve = api_chat.make_record_resolver(acc, chat)
+            got = resolve([900001, 123456])
+            self.assertIn(900001, got)
+            self.assertEqual(got[900001]["md5"], md5)
+            self.assertEqual(got[900001]["localId"], 7)
+            self.assertEqual(got[900001]["chat"], chat)
+            self.assertNotIn(123456, got)  # 原始消息不存在时不编造
+            # 二次调用命中缓存（不再查库）
+            self.assertIn(900001, resolve([900001]))
+
+    def test_resolves_cross_chat_original(self):
+        """原始消息在别的会话（真实库 1000/1392）：必须跨会话解析并带上 srcChat。"""
+        import tempfile
+        from siwx import api_chat
+
+        chat, other = "wxid_peer", "wxid_other"
+        md5 = "c" * 32
+        with tempfile.TemporaryDirectory() as td:
+            acc = self._make_acc(td, chat, other)
+            self._insert(acc, other, 910001, 9, 1700000002, md5)
+            got = api_chat.make_record_resolver(acc, chat)([910001])
+            self.assertIn(910001, got)
+            self.assertEqual(got[910001]["md5"], md5)
+            self.assertEqual(got[910001]["chat"], other)
+
+
+class TestRecordMediaExport(unittest.TestCase):
+    """导出器把合并转发子项的图片纳入媒体收集与回填（issue #31）。"""
+
+    def test_iter_record_media_walks_nested(self):
+        from siwx.exporter import _iter_record_media
+        rec = {"items": [
+            {"kind": "image", "md5": "a" * 32, "srcLocalId": 1, "srcCreateTime": 10},
+            {"kind": "text", "text": "hi"},
+            {"kind": "record", "record": {"items": [
+                {"kind": "image", "md5": "b" * 32, "srcLocalId": 2, "srcCreateTime": 20},
+            ]}},
+        ]}
+        got = [it["md5"] for it in _iter_record_media(rec)]
+        self.assertEqual(got, ["a" * 32, "b" * 32])
+
+    def test_attach_media_fills_record_item(self):
+        from siwx import exporter
+        md5 = "c" * 32
+        rec = {"title": "t", "count": 1, "items": [
+            {"sender": "a", "kind": "image", "md5": md5,
+             "srcLocalId": 42, "srcCreateTime": 1700000001}]}
+        msg = {"localType": 49, "localId": 100, "createTime": 1700000002,
+               "record": rec}
+        media_map = {exporter._media_key(md5, None, 42, 1700000001):
+                     "media/0000_cccccccccccc.jpg"}
+        exporter._attach_media(msg, media_map)
+        self.assertEqual(rec["items"][0]["mediaFile"],
+                         "media/0000_cccccccccccc.jpg")
+
+    def test_attach_media_ignores_voice_slot_for_record(self):
+        """子项只回填图片槽位，语音槽位（\\x00voice 前缀）不会串到记录里。"""
+        from siwx import exporter
+        md5 = "d" * 32
+        rec = {"items": [{"kind": "image", "md5": md5,
+                          "srcLocalId": 5, "srcCreateTime": 30}]}
+        msg = {"localType": 49, "record": rec}
+        media_map = {exporter._media_key(md5, None, 5, 30):
+                     "media/voice_0001.wav"}
+        exporter._attach_media(msg, media_map)
+        self.assertNotIn("mediaFile", rec["items"][0])
+
+
 # ── 23. S6/S1：密钥不落盘 + 更新链 fail-closed ─────────────────
 
 class TestManifestKeyStrip(unittest.TestCase):

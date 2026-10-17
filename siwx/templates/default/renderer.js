@@ -266,8 +266,17 @@
     h += '<div class="msg-record-items">';
     items.forEach(function(it) {
       var t = recordItemTime(it);
-      h += '<div class="msg-record-item"><span class="rs">'+esc(it.sender || '')+'</span>'+fmtText(it.text || '')+
-           (t ? '<span class="rt">'+esc(t)+'</span>' : '')+'</div>';
+      var rt = t ? '<span class="rt">'+esc(t)+'</span>' : '';
+      var rs = '<span class="rs">'+esc(it.sender || '')+'</span>';
+      if (it.kind === 'image' && it.mediaFile) {
+        // issue #31：子项图片已随导出解密，直接用相对路径引用
+        h += '<div class="msg-record-item">'+rs+
+             '<img class="msg-record-img" src="'+esc(it.mediaFile)+'" alt="图片" loading="lazy">'+rt+'</div>';
+      } else if (it.kind === 'record' && it.record) {
+        h += '<div class="msg-record-item msg-record-nested">'+rs+renderRecord(it.record)+rt+'</div>';
+      } else {
+        h += '<div class="msg-record-item">'+rs+fmtText(it.title || it.text || '')+rt+'</div>';
+      }
     });
     if (!items.length) h += '<div class="msg-record-item"><span class="rt">子消息详情未包含在导出数据中</span></div>';
     h += '</div><div class="msg-record-count">'+(rec.count || items.length)+' 条消息</div></div>';

@@ -122,7 +122,16 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
         senders.add(msg["senderUsername"])
         if msg.get("md5") or msg.get("bubbleMd5"):
             images.append((msg.get("md5"), msg.get("bubbleMd5"),
-                           msg["localId"], ts))
+                           msg["localId"], ts, chat))
+        # 合并转发子项里的图片/表情（issue #31）：定位键用原始消息的
+        # local_id/create_time，原始消息可能属于别的会话（跨会话转发），
+        # attach 目录必须按 srcChat 算
+        if msg.get("record"):
+            for it in _iter_record_media(msg["record"]):
+                images.append((it.get("md5"), it.get("bubbleMd5"),
+                               it.get("srcLocalId") or 0,
+                               it.get("srcCreateTime") or 0,
+                               it.get("srcChat") or chat))
         if msg.get("localType") == 34:
             voices.append((msg["localId"], msg.get("platformMessageId") or "", ts))
     return count, first_ts, last_ts, senders, images, voices
@@ -144,6 +153,35 @@ def _voice_key(local_id, ts) -> tuple:
     return (_VOICE_KEY, int(local_id or 0), int(ts or 0))
 
 
+def _iter_record_media(record):
+    """递归遍历合并转发子项里带媒体引用的条目（issue #31）。
+
+    只产出有 md5/bubbleMd5 的子项（图片/表情）；嵌套的下一层记录继续下钻。
+    子项的 srcLocalId/srcCreateTime 指向原始消息，是 attach/Bubble/Thumb
+    三级来源的定位键。
+    """
+    for it in (record or {}).get("items") or []:
+        if it.get("md5") or it.get("bubbleMd5"):
+            yield it
+        nested = it.get("record")
+        if nested:
+            yield from _iter_record_media(nested)
+
+
+def _attach_record_media(record, media_map) -> None:
+    """把已解密的媒体回填到合并转发子项（issue #31）。
+
+    子项与顶层消息共用同一个 media_map：键是 (md5, 原始 local_id, ts)，
+    与顶层消息的 local_id 天然不同，不会互挂。
+    """
+    for it in _iter_record_media(record):
+        mf = media_map.get(_media_key(it.get("md5"), it.get("bubbleMd5"),
+                                      it.get("srcLocalId") or 0,
+                                      it.get("srcCreateTime") or 0))
+        if mf and "/voice_" not in mf:
+            it["mediaFile"] = mf
+
+
 def _attach_media(msg: dict, media_map: dict) -> None:
     """按消息类型回填 mediaFile，防跨分片 local_id 撞号错挂。
 
@@ -151,7 +189,14 @@ def _attach_media(msg: dict, media_map: dict) -> None:
     (md5, localId, ts) 组合键（语音为 (\\x00voice, localId, ts)）为索引；
     多分片会话中各分片的 local_id 独立编号会撞号——图片与图片之间的互挂
     由 md5 组合键根治。文本/链接/系统消息不在类型门禁内，永不获媒体。
-    图片槽位与语音槽位互斥，防图片/语音之间串型。"""
+    图片槽位与语音槽位互斥，防图片/语音之间串型。
+
+    合并转发（type 49）不产顶层媒体，但子项可能带图片——先回填子项，
+    再走顶层类型门禁（issue #31）。
+    """
+    rec = msg.get("record")
+    if rec:
+        _attach_record_media(rec, media_map)
     t = msg.get("localType")
     if t not in (3, 47, 34):
         return
@@ -202,7 +247,12 @@ def _log_media_failures(kind: str, failures: list, total: int) -> None:
 
 
 def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=None):
-    """并行解密媒体图片。CPU 密集型 AES → 多进程池。"""
+    """并行解密媒体图片。CPU 密集型 AES → 多进程池。
+
+    images 每项是 (md5, bubble_md5, local_id, ts, msg_chat)——msg_chat 是该
+    媒体所属的会话（顶层消息就是 chat；合并转发子项可能是原始消息所在的
+    另一个会话，issue #31），attach/Bubble/Thumb 三级来源都按它定位。
+    """
     dest.mkdir(parents=True, exist_ok=True)
     if not images:
         return {}
@@ -211,10 +261,10 @@ def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=N
     # chat / ts 必须带上：media.get_image() 的 attach 原图目录、Bubble 气泡缓存、
     # Thumb 缩略图三级来源都依赖它们，缺了就只剩 hardlink 一条路，大量图片解不出。
     tasks = []
-    for i, (md5, bubble_md5, local_id, ts) in enumerate(images):
+    for i, (md5, bubble_md5, local_id, ts, msg_chat) in enumerate(images):
         fn = f"{i:04d}_{(md5 or 'img')[:12]}.jpg"
         dst = dest / fn
-        tasks.append((str(acc_out_dir), account, chat, md5, bubble_md5,
+        tasks.append((str(acc_out_dir), account, msg_chat or chat, md5, bubble_md5,
                       local_id, ts, str(dst)))
 
     # 多进程并行解密
@@ -246,11 +296,11 @@ def _decrypt_media_serial(acc_out_dir, account, chat, images, dest, progress=Non
     """串行解密（单核兜底）。"""
     media_map = {}
     failures = []
-    for i, (md5, bubble_md5, local_id, ts) in enumerate(images):
+    for i, (md5, bubble_md5, local_id, ts, msg_chat) in enumerate(images):
         fn = f"{i:04d}_{(md5 or 'img')[:12]}.jpg"
         dst = dest / fn
-        out, reason = _try_decrypt(acc_out_dir, account, chat, md5, bubble_md5,
-                                   local_id, ts, dst)
+        out, reason = _try_decrypt(acc_out_dir, account, msg_chat or chat, md5,
+                                   bubble_md5, local_id, ts, dst)
         if out:
             media_map[_media_key(md5, bubble_md5, local_id, ts)] = f"media/{out.name}"
         else:
