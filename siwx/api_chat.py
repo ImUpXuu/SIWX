@@ -59,6 +59,8 @@ _KIND_TYPES = {
     "sticker": (47,),
     "link": (48, 49, 50, 51, 57),
     "system": (10000, 10002),
+    # issue #31：合并转发与普通 49 卡片同 type，筛选时需再解析内容区分
+    "record": (49,),
 }
 
 
@@ -180,6 +182,12 @@ COMPOSITE_49_LABELS = {
 RECORD_DATATYPE_LABELS = {
     "1": "", "2": "[图片]", "3": "[图片]", "4": "[视频]", "5": "[链接]",
     "6": "[文件]", "8": "[动画表情]", "17": "[文件]",
+}
+
+# datatype → 语义类别（前端据此决定子消息的渲染方式；issue #31）
+RECORD_DATATYPE_KINDS = {
+    "1": "text", "2": "image", "3": "image", "4": "video", "5": "link",
+    "6": "file", "8": "emoji", "17": "record",
 }
 
 
@@ -825,7 +833,34 @@ def _safe_parse_refer(text: str):
         return None
 
 
-def _parse_recordinfo(text: str) -> dict:
+def _iter_dataitem_blocks(text: str):
+    """按嵌套深度切分 <dataitem> 块（issue #31）。
+
+    合并转发的 datatype=17 条目内部可以再嵌一层 <recordinfo>/<dataitem>，
+    原来的非贪婪正则 ``<dataitem…>(.*?)</dataitem>`` 会截断在外层块的
+    第一个内层闭合标签上，导致外层条目的字段串成内层内容。这里用配平
+    扫描：只有深度归零才算一个完整块。
+    产出 (开标签, 块内文本)。
+    """
+    token_re = re.compile(r"<dataitem\b[^>]*>|</dataitem>", re.S)
+    pos = 0
+    while True:
+        m = token_re.search(text or "", pos)
+        if not m or m.group(0).startswith("</"):
+            return
+        depth = 1
+        i = m.end()
+        while depth:
+            t = token_re.search(text, i)
+            if not t:
+                return
+            depth += -1 if t.group(0).startswith("</") else 1
+            i = t.end()
+        yield m.group(0), text[m.end():t.start()]
+        pos = i
+
+
+def _parse_recordinfo(text: str, resolve_many=None, _depth: int = 0) -> dict:
     """appmsg type=19 合并转发热解析（D5，参照 forwardRecordParser 思路）。
 
     按 <dataitem datatype="N"> 逐条提取 sourcename/sourcetime/datadesc/
@@ -835,13 +870,20 @@ def _parse_recordinfo(text: str) -> dict:
     去重会把"同一张图连发两次"这类合法重复也折叠掉（真实库 7→6）。
     服务器端形态（无 dataitem、只有 <des> 预览摘要）按行拆
     "发送者: 文本" 成子消息。
-    返回 {"title": str, "count": int, "items": [{"sender","ts","time","text"}]}。
+
+    issue #31：除文本外保留每条子消息的媒体引用与原始消息指针——
+    - kind: text/image/video/link/file/emoji/record（RECORD_DATATYPE_KINDS）
+    - title: 文件/链接的展示标题（datatitle）
+    - srcMsgId / srcLocalId / srcCreateTime: 指回原始消息（fromnewmsgid 等）
+    - 传入 resolve_many 时用原始消息补全 md5/bubbleMd5/原文，图片即可
+      走正常媒体链路导出
+    - datatype=17 内含下一层 <recordinfo> 时递归解析（最多 3 层）
+    返回 {"title": str, "count": int, "items": [item...]}。
     """
     title = _xml_text(html.unescape(_tag_text(text, "title"))) or "聊天记录"
     items = []
-    for m in re.finditer(r"<dataitem\s[^>]*>(.*?)</dataitem>", text or "", re.S):
-        blk = m.group(1)
-        dtm = re.search(r'datatype="(\d+)"', m.group(0))
+    for open_tag, blk in _iter_dataitem_blocks(text or ""):
+        dtm = re.search(r'datatype="(\d+)"', open_tag)
         dtype = dtm.group(1) if dtm else ""
         sender = _xml_text(html.unescape(_tag_text(blk, "sourcename"))) or ""
         time_s = ""
@@ -862,13 +904,70 @@ def _parse_recordinfo(text: str) -> dict:
                 time_s = f"{y}-{int(mo):02d}-{int(d):02d} {h:02d}:{mi}"
         desc = _xml_text(html.unescape(_tag_text(blk, "datadesc"))) or ""
         dtitle = _xml_text(html.unescape(_tag_text(blk, "datatitle"))) or ""
+        if not desc and not dtitle:
+            # 少数版本只落 sourcedesc（文本子消息）
+            desc = _xml_text(html.unescape(_tag_text(blk, "sourcedesc"))) or ""
+        kind = RECORD_DATATYPE_KINDS.get(dtype, "other")
+        # 嵌套合并转发（datatype=17 内含下一层 recordinfo）：先解析，再从
+        # 外层块里剥掉——否则内层的 datadesc 会冒领外层条目的文本
+        nested = None
+        if kind == "record" and _depth < 3 and "<recordinfo>" in blk:
+            nested = _parse_recordinfo(blk, resolve_many, _depth + 1)
+            if not nested.get("items"):
+                nested = None
+            else:
+                blk = re.sub(r"<recordinfo>.*</recordinfo>", "", blk, flags=re.S)
+                desc = _xml_text(html.unescape(_tag_text(blk, "datadesc"))) or ""
+                dtitle = _xml_text(html.unescape(_tag_text(blk, "datatitle"))) or ""
         key = (dtype, sender, ts, desc, dtitle)
         # 仅折叠紧邻的完全重复（防解析瑕疵双计），其余保留
         if items and items[-1]["_key"] == key:
             continue
-        body = desc or dtitle or RECORD_DATATYPE_LABELS.get(dtype, "[消息]")
-        items.append({"sender": sender, "ts": ts, "time": time_s,
-                      "text": body[:200], "_key": key})
+        body = (desc or dtitle or (nested["title"] if nested else "")
+                or RECORD_DATATYPE_LABELS.get(dtype, "[消息]"))
+        item = {"sender": sender, "ts": ts, "time": time_s,
+                "text": body[:200], "datatype": dtype, "kind": kind}
+        if dtitle:
+            item["title"] = dtitle[:200]
+        # 指回原始消息的引用（issue #31：图片/文件归属）
+        src_id = _tag_text(blk, "fromnewmsgid").strip()
+        if src_id.isdigit():
+            item["srcMsgId"] = int(src_id)
+        src_lid = _tag_text(blk, "srcMsgLocalid").strip()
+        if src_lid.isdigit():
+            item["srcLocalId"] = int(src_lid)
+        src_ts = _tag_text(blk, "srcMsgCreateTime").strip()
+        if src_ts.isdigit():
+            item["srcCreateTime"] = int(src_ts)
+        if nested is not None:
+            item["record"] = nested
+        items.append({**item, "_key": key})
+
+    # 用原始消息补全 md5 / 原文（一次批量查询，避免逐条开库）
+    if resolve_many is not None and items:
+        ids = [it["srcMsgId"] for it in items if it.get("srcMsgId")]
+        if ids:
+            resolved = resolve_many(ids) or {}
+            for it in items:
+                r = resolved.get(it.get("srcMsgId"))
+                if not r:
+                    continue
+                it["resolved"] = True
+                if r.get("md5"):
+                    it["md5"] = r["md5"]
+                if r.get("bubbleMd5"):
+                    it["bubbleMd5"] = r["bubbleMd5"]
+                if r.get("text"):
+                    it["resolvedText"] = r["text"][:200]
+                if r.get("type") is not None:
+                    it["resolvedType"] = r["type"]
+                # 媒体定位用原始消息的 local_id/create_time（attach 目录依赖）
+                it["srcLocalId"] = r.get("localId") or it.get("srcLocalId")
+                it["srcCreateTime"] = r.get("ts") or it.get("srcCreateTime")
+                # 原始消息所在的会话（跨会话转发时 attach 目录按它算）
+                if r.get("chat"):
+                    it["srcChat"] = r["chat"]
+
     for it in items:
         it.pop("_key", None)
     if not items:
@@ -881,11 +980,151 @@ def _parse_recordinfo(text: str) -> dict:
             m_c = re.match(r"^(.{1,40}?)[:：]\s*(.+)$", line, re.S)
             if m_c:
                 items.append({"sender": m_c.group(1), "ts": 0, "time": "",
-                              "text": m_c.group(2)[:200]})
+                              "text": m_c.group(2)[:200], "datatype": "1",
+                              "kind": "text"})
             else:
                 items.append({"sender": "", "ts": 0, "time": "",
-                              "text": line[:200]})
+                              "text": line[:200], "datatype": "1",
+                              "kind": "text"})
     return {"title": title, "count": len(items), "items": items}
+
+
+_RECORD_IDX_CACHE: dict = {}
+_RECORD_IDX_LOCK = threading.Lock()
+_RECORD_IDX_MAX_ROWS = 400_000
+
+
+def _chats_by_md5(acc: Path) -> dict:
+    """md5(会话 username) → username（合并转发跨会话回查用）。"""
+    out = {}
+    sdb = Path(acc) / "session" / "session.db"
+    if not sdb.is_file():
+        return out
+    try:
+        with closing(sqlite3.connect(sdb)) as conn:
+            for (un,) in conn.execute("SELECT username FROM SessionTable"):
+                un = (un or "").strip()
+                if un:
+                    out[hashlib.md5(un.encode()).hexdigest()] = un
+    except sqlite3.Error as e:
+        _logger.detailed("parse", f"[record] 会话表读取失败: {e}")
+    return out
+
+
+def _record_id_index(acc: Path) -> dict:
+    """server_id → (db_path, 会话 username) 的全账号索引（带签名缓存）。
+
+    合并转发子项的原始消息大多不在当前会话里（真实库实测 1000/1392 跨会话），
+    只查当前会话会漏掉绝大部分图片。索引只存 server_id 与定位信息，不加载
+    正文；一次导出只建一次（约 4s / 10 万条），之后按目录签名命中缓存。
+    超过 _RECORD_IDX_MAX_ROWS 时返回空 dict，调用方回退到同会话回查。
+    """
+    key = str(Path(acc).resolve())
+    sig = _dir_signature(Path(acc) / "message")
+    with _RECORD_IDX_LOCK:
+        hit = _RECORD_IDX_CACHE.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    idx = {}
+    total = 0
+    chat_by_md5 = _chats_by_md5(acc)
+    for table, dbs in shard_index(Path(acc) / "message").items():
+        chat = chat_by_md5.get(table[4:])
+        if not chat:
+            continue
+        for db in dbs:
+            try:
+                with closing(sqlite3.connect(db)) as conn:
+                    for (sid,) in conn.execute(
+                            f'SELECT server_id FROM [{table}] WHERE server_id>0'):
+                        idx[int(sid)] = (str(db), chat)
+                        total += 1
+                        if total > _RECORD_IDX_MAX_ROWS:
+                            _logger.warn("parse", "[record] 消息量超过跨会话索引上限，"
+                                                  "回退到同会话回查")
+                            with _RECORD_IDX_LOCK:
+                                _RECORD_IDX_CACHE[key] = (sig, {})
+                            return {}
+            except sqlite3.Error:
+                continue
+    with _RECORD_IDX_LOCK:
+        _RECORD_IDX_CACHE[key] = (sig, idx)
+    return idx
+
+
+def make_record_resolver(acc: Path, chat: str):
+    """构造合并转发子项的原始消息解析器（issue #31）。
+
+    返回 ``resolve_many(ids) -> {server_id: {...}}``：按 ``server_id`` 批量
+    回查原始消息，取出类型/原文/媒体 md5 以及原始消息所在的会话（``chat``）。
+    子消息的 ``fromnewmsgid`` 指向的就是原始消息的 server_id——命中后图片
+    即可用正常媒体链路（attach/Bubble/Thumb）导出，而不是只剩 "[图片]" 占位。
+
+    跨会话是常态（真实库 1000/1392），优先用全账号 server_id 索引；索引
+    不可用（超大账号）时退回只查当前会话。未命中（原始消息已删除/不在本
+    账号）时不返回条目，调用方保留占位文案——这是数据本身的边界，不编造。
+    """
+    table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+    cache: dict = {}
+
+    def _fetch(db: str, tbl: str, ids: list) -> dict:
+        out = {}
+        with closing(sqlite3.connect(db)) as conn:
+            for start in range(0, len(ids), 900):  # SQLite 变量上限内
+                chunk = ids[start:start + 900]
+                q = (f"SELECT server_id, local_id, create_time, local_type, "
+                     f"message_content, packed_info_data FROM [{tbl}] "
+                     f"WHERE server_id IN ({','.join('?' * len(chunk))})")
+                for sid, lid, ts, ltype, content, packed in conn.execute(q, chunk):
+                    t = (ltype or 0) & 0xFFFF
+                    raw = _decode_content(content)
+                    # 群聊原文带 "wxid:\n" 前缀，展示层不需要
+                    m = SENDER_PREFIX_RE.match(raw[:100]) if raw else None
+                    body = raw[m.end():] if m else raw
+                    md5, bubble, _v, _s = enrich_message_row(t, raw, packed)
+                    out[int(sid)] = {"localId": lid, "ts": ts or 0, "type": t,
+                                     "text": body, "md5": md5, "bubbleMd5": bubble}
+        return out
+
+    def resolve_many(ids) -> dict:
+        want = [int(i) for i in ids if i]
+        todo = [i for i in want if i not in cache]
+        if todo:
+            idx = _record_id_index(acc)
+            if idx:
+                groups: dict = {}
+                for sid in todo:
+                    hit = idx.get(sid)
+                    if hit:
+                        groups.setdefault(hit, []).append(sid)
+                for (db, chat_orig), sids in groups.items():
+                    tbl = "Msg_" + hashlib.md5(chat_orig.encode()).hexdigest()
+                    try:
+                        for sid, rec in _fetch(db, tbl, sids).items():
+                            rec["chat"] = chat_orig
+                            cache[sid] = rec
+                    except sqlite3.Error as e:
+                        _logger.detailed("parse", f"[record] 跨会话回查失败 "
+                                                  f"db={Path(db).name}: {e}")
+                todo = [i for i in todo if i not in cache]
+            else:
+                # 回退：只查当前会话
+                for db in shards_for(acc, chat):
+                    try:
+                        for sid, rec in _fetch(str(db), table, todo).items():
+                            rec["chat"] = chat
+                            cache[sid] = rec
+                    except sqlite3.Error as e:
+                        _logger.detailed("parse", f"[record] 同会话回查失败 "
+                                                  f"db={Path(db).name}: {e}")
+                    todo = [i for i in todo if i not in cache]
+                    if not todo:
+                        break
+            for i in todo:  # 查不到也缓存，避免同一次导出反复扫库
+                cache[i] = None
+        return {i: cache[i] for i in want if cache.get(i)}
+
+    return resolve_many
 
 
 def _parse_finder_feed(text: str):
@@ -934,7 +1173,7 @@ def _parse_finder_feed(text: str):
     }
 
 
-def parse_quote_or_link(t: int, text: str, local_id=None, ts=None):
+def parse_quote_or_link(t: int, text: str, local_id=None, ts=None, resolve_many=None):
     """type 57 / 49 的引用与链接卡统一分流（公共函数）。
 
     build_messages / messages / export_stream._enrich_row 三处原先逐字重复
@@ -944,6 +1183,9 @@ def parse_quote_or_link(t: int, text: str, local_id=None, ts=None):
     local_id / ts 为可选定位上下文（审计 §4.3）：解析"无异常但返回 None"
     的兜底分支（即前端出现 [引用]/[链接] 文案的场景）会带这两个字段记
     detailed 日志；解析**异常**路径已由 _safe_parse_refer 记录，不重复埋点。
+
+    resolve_many: 合并转发子项的原始消息解析器（issue #31），签名见
+    make_record_resolver；不传则子项只有占位文案。
     """
     def _raw_head(s: str) -> str:
         # 正文只记 hex 头 + 长度（_FILE_LOG 存未脱敏原文，绝不透传正文）
@@ -967,7 +1209,7 @@ def parse_quote_or_link(t: int, text: str, local_id=None, ts=None):
                                           f"raw_len={len(text or '')} raw_head={_raw_head(text)}",
                                  ring=False)
         elif _is_recordinfo(text):
-            record = _parse_recordinfo(text)
+            record = _parse_recordinfo(text, resolve_many)
         elif "<finderFeed>" in text:
             # 视频号卡片：占位 title/url（升级提示页）没有展示价值，不生成链接卡
             channels = _parse_finder_feed(text)
@@ -1021,12 +1263,15 @@ def enrich_message_row(t: int, text: str, packed):
     return md5, bubble_md5, voice_meta, sticker
 
 
-def message_kind(t: int, quote, link, channels=None) -> str:
+def message_kind(t: int, quote, link, channels=None, record=None) -> str:
     """按类型与解析结果定 kind（原三处重复逻辑收敛于此）。"""
     if t == 57 or (t == 49 and quote):
         return "quote"
     if t == 49 and channels:
         return "channels"
+    if t == 49 and record:
+        # issue #31：合并转发单列一类，前端可单独筛选/渲染子消息
+        return "record"
     if t == 49 and link and link.get("url"):
         return "link"
     return KIND_MAP.get(t, "text")
@@ -1048,6 +1293,8 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
     names = _contact_names(acc)
     my_base, self_ids = self_ids_for(acc, account)
     is_group = chat.endswith("@chatroom")
+    # 合并转发子项 → 原始消息（issue #31）；惰性连接，只有遇到记录消息才查库
+    resolve_many = make_record_resolver(acc, chat)
 
     rows = []
     # 用分片索引直接定位分片，避免每个会话都把十几个库全打开查一遍
@@ -1104,8 +1351,9 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
         t = ltype & 0xFFFF
         md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
 
-        quote, link, record, channels = parse_quote_or_link(t, text, local_id=local_id, ts=ts)
-        kind = message_kind(t, quote, link, channels)
+        quote, link, record, channels = parse_quote_or_link(
+            t, text, local_id=local_id, ts=ts, resolve_many=resolve_many)
+        kind = message_kind(t, quote, link, channels, record)
 
         msgs.append({
             # 前端形状
@@ -1185,9 +1433,13 @@ def _decoded_rows(db: Path, table: str) -> list:
 
 
 def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
-                     smap, names, my_base, self_ids, is_group, chat) -> dict:
+                     smap, names, my_base, self_ids, is_group, chat,
+                     resolve_many=None) -> dict:
     """单条消息行 → 前端气泡形状。/messages 的富化逻辑，普通分页与筛选
-    搜索两条路径共用；text 必须已经过 _decode_content。"""
+    搜索两条路径共用；text 必须已经过 _decode_content。
+
+    resolve_many: 合并转发子项的原始消息解析器（issue #31），见
+    make_record_resolver。"""
     sender_wxid = ""
     m = SENDER_PREFIX_RE.match(text[:100]) if text else None
     if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
@@ -1215,8 +1467,9 @@ def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
         sender_wxid = ""
 
     md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
-    quote, link, record, channels = parse_quote_or_link(t, text, local_id=local_id, ts=ts)
-    kind = message_kind(t, quote, link, channels)
+    quote, link, record, channels = parse_quote_or_link(
+        t, text, local_id=local_id, ts=ts, resolve_many=resolve_many)
+    kind = message_kind(t, quote, link, channels, record)
     return {
         "id": local_id, "platformMessageId": str(server_id or ""),
         "ts": ts or 0, "type": t, "kind": kind,
@@ -1242,11 +1495,16 @@ def _filtered_messages_response(acc, account, chat, table, names, my_base,
     游标语义与普通分页一致（before=更早窗口、after=更晚窗口）。"""
     q_low = q.lower() if q else ""
     type_set = _KIND_TYPES.get(kind, ()) if kind else ()
+    resolve_many = make_record_resolver(acc, chat)
     matches = []
     for db in shards_for(acc, chat):
         for (ts, local_id, server_id, t, origin, rsid, text, packed, smap) \
                 in _decoded_rows(db, table):
-            if type_set and t not in type_set:
+            if kind == "record":
+                # 合并转发与普通 49 卡片同 type，必须解析内容才能区分（issue #31）
+                if t != 49 or not _is_recordinfo(text):
+                    continue
+            elif type_set and t not in type_set:
                 continue
             if start_ts and ts < start_ts:
                 continue
@@ -1278,7 +1536,7 @@ def _filtered_messages_response(acc, account, chat, table, names, my_base,
         has_newer = hi < total
     msgs = [_enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text,
                              packed, smap, names, my_base, self_ids, is_group,
-                             chat)
+                             chat, resolve_many=resolve_many)
             for (ts, local_id, server_id, t, origin, rsid, text, packed, smap)
             in page]
     display = names.get(chat, chat)
@@ -1430,11 +1688,12 @@ def messages():
         has_newer = False
 
     msgs = []
+    resolve_many = make_record_resolver(acc, chat)
     for (local_id, server_id, ltype, ts, origin, rsid, content, packed), smap in page:
         msgs.append(_enrich_chat_row(
             local_id, server_id, ltype & 0xFFFF, ts, origin, rsid,
             _decode_content(content), packed, smap,
-            names, my_base, self_ids, is_group, chat))
+            names, my_base, self_ids, is_group, chat, resolve_many=resolve_many))
 
     # ── 插件层（无插件时零开销）──────────────────────────────
     if msgs and _plugins.has_message_hooks():

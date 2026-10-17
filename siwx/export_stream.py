@@ -15,7 +15,7 @@ from pathlib import Path
 from siwx import logger
 from siwx.api_chat import (
     SENDER_PREFIX_RE, TYPE_NAMES, _contact_names, _decode_content,
-    _sender_map, _fmt, enrich_message_row, message_kind,
+    _sender_map, _fmt, enrich_message_row, make_record_resolver, message_kind,
     parse_quote_or_link, self_ids_for, shards_for,
 )
 
@@ -28,7 +28,8 @@ _KEEP_FIELDS = ("localId", "createTime", "localType", "typeName",
 BATCH_SIZE = 500
 
 
-def _enrich_row(row, names, my_base, self_ids, is_group, chat, account):
+def _enrich_row(row, names, my_base, self_ids, is_group, chat, account,
+                resolve_many=None):
     """把一行原始数据精简为导出用 dict。"""
     local_id, server_id, ltype, ts, origin, rsid, content, packed, smap = row
     text = _decode_content(content)
@@ -70,7 +71,8 @@ def _enrich_row(row, names, my_base, self_ids, is_group, chat, account):
                         f"图片无md5可定位 local_id={local_id} ts={ts} localType={t}",
                         ring=False)
 
-    quote, link, record, channels = parse_quote_or_link(t, text)
+    quote, link, record, channels = parse_quote_or_link(
+        t, text, resolve_many=resolve_many)
 
     # 审计 §4.2：只埋"无异常但返回 None"的兜底——引用解析**异常**路径已有
     # api_chat.py:_safe_parse_refer 的日志，勿重复埋点
@@ -145,6 +147,8 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
         names = _contact_names(acc)
     my_base, self_ids = self_ids_for(acc, account)
     is_group = chat.endswith("@chatroom")
+    # 合并转发子项 → 原始消息（issue #31）；惰性连接，只有遇到记录消息才查库
+    resolve_many = make_record_resolver(acc, chat)
 
     # 分片索引：只打开真正含该会话的分片。原先每次调用都要把 message/ 下全部
     # *.db 逐个打开查 sqlite_master，实测占导出总耗时的 99.5%。
@@ -190,7 +194,7 @@ def message_stream(acc: Path, chat: str, start_ts=None, end_ts=None,
         row = (local_id, server_id, ltype, ts, origin, rsid, content, packed,
                smap)
         yield _enrich_row(row, names, my_base, self_ids, is_group, chat,
-                          account)
+                          account, resolve_many=resolve_many)
 
 
 def _shard_iter(cursor, conn, smap):

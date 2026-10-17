@@ -749,16 +749,37 @@ function messageCopyText(m) {
   return fallback || (m.link && m.link.url) || `[${m.type ?? '消息'}]`;
 }
 
+/** 合并转发子项渲染（issue #31）：文本 / 图片 / 嵌套记录分别处理。
+ *  图片子项在回查原始消息成功时带 md5+srcLocalId+srcCreateTime，
+ *  直接走与普通图片气泡相同的媒体接口；未回查到的保留占位文案。 */
+function recordItemHtml(it) {
+  const t = it.time || (it.ts ? fmtTs(it.ts) : '');
+  const time = t ? `<span class="rt">${esc(t)}</span>` : '';
+  const sender = `<span class="rs">${esc(it.sender || '')}</span>`;
+  if (it.kind === 'image' && it.md5) {
+    const src = `/api/chat/media/image?account=${encodeURIComponent(account)}` +
+                `&md5=${encodeURIComponent(it.md5)}` +
+                (it.bubbleMd5 ? `&bubble_md5=${encodeURIComponent(it.bubbleMd5)}` : '') +
+                `&chat=${encodeURIComponent(currentChat.username)}` +
+                `&local_id=${it.srcLocalId || 0}&ts=${it.srcCreateTime || it.ts || 0}`;
+    return `<div class="m-record-item">${sender}` +
+           `<img class="m-record-img" loading="lazy" src="${src}" alt="图片" data-retry="${esc(src)}">` +
+           time + `</div>`;
+  }
+  if (it.kind === 'record' && it.record) {
+    return `<div class="m-record-item m-record-nested">${sender}` +
+           `<div class="m-record-inner">${recordHtml(it.record)}</div>${time}</div>`;
+  }
+  const body = it.title || it.text || '';
+  return `<div class="m-record-item">${sender}` +
+         `<span class="rt-text">${faceText(esc(body))}</span>` + time + `</div>`;
+}
+
 /** 合并转发（recordinfo）逐条展开的 HTML。子消息时间：服务端形态是
  *  "YYYY-MM-DD HH:MM" 字符串（item.time），本地形态是 epoch（item.ts）。 */
 function recordHtml(rec) {
   const items = (rec && rec.items) || [];
-  const rows = items.map(it => {
-    const t = it.time || (it.ts ? fmtTs(it.ts) : '');
-    return `<div class="m-record-item"><span class="rs">${esc(it.sender || '')}</span>` +
-           `<span class="rt-text">${faceText(esc(it.text || ''))}</span>` +
-           (t ? `<span class="rt">${esc(t)}</span>` : '') + `</div>`;
-  }).join('');
+  const rows = items.map(recordItemHtml).join('');
   return `<div class="m-record">` +
     `<div class="m-record-title">${esc((rec && rec.title) || '聊天记录')}</div>` +
     `<div class="m-record-items">${rows || '<div class="m-record-item"><span class="rt">子消息详情未包含在数据中</span></div>'}</div>` +
