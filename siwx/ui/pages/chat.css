@@ -178,6 +178,7 @@
 .m-link a { color: var(--accent-fg); text-decoration: none; font-weight: 700; font-size: 13px; }
 .m-link a:hover { text-decoration: underline; }
 .m-link-host { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.m-link-desc { font-size: 12px; color: var(--text); margin-top: 3px; word-break: break-word; }
 .m-record { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 6px; background: var(--card-alt); text-align: left; max-width: min(420px, 72vw); }
 .m-record-title { font-weight: 700; font-size: 12px; color: var(--text); margin-bottom: 6px; }
 .m-record-items { display: flex; flex-direction: column; gap: 4px; }

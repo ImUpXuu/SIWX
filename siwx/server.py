@@ -1,6 +1,7 @@
 """Web 控制台：Flask 壳 —— 页面路由 + 任务槽；业务 API 在 api_*.py 模块化蓝图中。"""
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -156,7 +157,11 @@ _register_plugin_blueprints(app)
 # ── 全局状态（必须在路由和错误处理之前定义）──────────────────────
 _lock = threading.Lock()
 _job = {"running": False, "mode": None, "done": False, "ok": False,
-        "logs": [], "report": None, "error": None}
+        "logs": [], "report": None, "error": None,
+        "progress": {"pct": 0, "msg": ""}}
+# 协作式取消：/api/job/cancel 置位，任务循环在各检查点轮询。优雅停止——
+# 已完成会话/文件的产物保留，报告带 cancelled=True，与失败（error）区分。
+_cancel_event = threading.Event()
 _LOG_RING: list = []          # 环形日志缓冲（供日志页展示）
 _LOG_RING_MAX = 2000
 
@@ -326,6 +331,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 _log(f"[job] 收割完成, 预置 {len(preset)} 个密钥")
             accounts = []
             for wxid, db in dirs:
+                if _cancel_event.is_set():
+                    _log("[job] 已按用户请求取消：剩余账号跳过")
+                    break
                 _log(f"[job] 提取账号 {wxid}…")
                 accounts.append(extract.extract_keys_for_dir(
                     db, _log, preset=preset,
@@ -340,6 +348,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _log(f"[job] 解密输出目录: {out_root}")
             accounts = []
             for wxid, db in dirs:
+                if _cancel_event.is_set():
+                    _log("[job] 已按用户请求取消：剩余账号跳过")
+                    break
                 _log(f"[job] 解密账号 {wxid}…")
                 accounts.append({"wxid": wxid,
                                  "decrypt": extract.decrypt_dir(
@@ -355,6 +366,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _log(f"[job] 全自动: 输出目录={out_root}")
             accounts = []
             for wxid, db in dirs:
+                if _cancel_event.is_set():
+                    _log("[job] 已按用户请求取消：剩余账号跳过")
+                    break
                 _log(f"[job] 账号 {wxid}: 提取密钥…")
                 rep = extract.extract_keys_for_dir(db, _log)
                 _log(f"[job] 账号 {wxid}: 密钥 {rep['verified']}/{rep['total_salts']}")
@@ -374,6 +388,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             if not dirs:
                 raise RuntimeError("未找到微信数据目录")
             for wxid, db in dirs:
+                if _cancel_event.is_set():
+                    _log("[sync] 已按用户请求取消：剩余账号跳过")
+                    break
                 _log(f"[sync] 同步 {wxid}…")
                 entries = collect_db_files(db)
                 rep = extract.extract_keys_for_dir(db, _log,
@@ -411,6 +428,13 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                  f"打包={data.get('pack', 'folder')}")
             if start_ts:
                 _log(f"[export] 时间范围: {start} ~ {end or '现在'}")
+            def _export_progress(pct, msg):
+                # 进度同时走两条通道：结构化 progress（前端直接读字段，不再
+                # 从日志文本里正则抠百分比）+ 任务日志（留痕与旧前端兼容）
+                with _lock:
+                    _job["progress"] = {"pct": int(pct), "msg": str(msg or "")}
+                _log(f"[export] {pct}% {msg or ''}")
+
             res = exporter.run_export_multi(
                 acc_dir, data.get("account"), chats,
                 fmt=data.get("format", "json"),
@@ -422,14 +446,61 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 export_root=_paths.exports_root(),
                 pack=data.get("pack", "folder"),
                 template=data.get("template"),
-                progress=lambda pct, msg: _log(f"[export] {pct}% {msg}"))
-            _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
-                 f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"
-                 f"耗时 {res.get('duration_ms', 0)}ms")
+                progress=_export_progress,
+                should_cancel=_cancel_event.is_set)
+            if res.get("cancelled"):
+                _log(f"[export] 已按用户请求取消：完成 {res.get('ok_count', 0)} 个会话，"
+                     f"已完成部分的产物保留在 {res.get('total_dir', '')}")
+            else:
+                _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
+                     f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"
+                     f"耗时 {res.get('duration_ms', 0)}ms")
             report = {"kind": "export", **res}
+
+        elif mode == "convert":
+            # 方案 A：对已有 JSON 导出目录就地补生成 Markdown/HTML（不重跑解密）。
+            # 目录来自请求体，必须位于导出根目录内（防任意目录读/写原语）。
+            from siwx import json_export_convert
+            data = export_opts or {}
+            d = str(data.get("dir") or "")
+            if not d or not validate.within(d, _paths.exports_root()):
+                raise RuntimeError("convert 目录无效（必须位于导出根目录内）")
+            root = Path(d)
+            if not root.is_dir():
+                raise RuntimeError(f"导出目录不存在: {d}")
+            formats = [str(f).strip().lower()
+                       for f in (data.get("formats") or ["md", "html"])]
+            formats = [f for f in formats if f in ("md", "html")]
+            if not formats:
+                raise RuntimeError("formats 里没有受支持的格式（md/html）")
+            _log(f"[convert] 目录={root.name} 格式={','.join(formats)} "
+                 f"overwrite={bool(data.get('overwrite'))}")
+
+            def _convert_progress(done, total, msg):
+                pct = int(done * 100 / total) if total else 0
+                with _lock:
+                    _job["progress"] = {"pct": pct, "msg": str(msg or "")}
+                _log(f"[convert] {done}/{total} {msg or ''}")
+
+            stats = json_export_convert.convert_dir_report(
+                root, formats,
+                template=data.get("template"),
+                overwrite=bool(data.get("overwrite")),
+                log=_log, progress=_convert_progress,
+                should_cancel=_cancel_event.is_set)
+            if stats.get("cancelled"):
+                _log("[convert] 已按用户请求取消：已完成会话的产物保留")
+            report = {"kind": "convert", "dir": d, "formats": formats, **stats}
 
         else:
             raise RuntimeError(f"未知模式: {mode}")
+
+        if _cancel_event.is_set() and isinstance(report, dict) \
+                and not report.get("cancelled"):
+            # keys/decrypt/auto/sync 在账号循环中途取消会走到这里：
+            # 部分结果保留，显式标注 cancelled，前端按"已取消"而非失败呈现
+            report = dict(report, cancelled=True)
+            _log("[job] 任务已取消（已完成部分保留）")
 
         with _lock:
             _job["ok"] = True
@@ -456,6 +527,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         with _lock:
             _job["running"] = False
             _job["done"] = True
+        _cancel_event.clear()
         log.detailed("server", f"[{jid}] job 状态: running=False mode={mode} done=True")
         log.set_job_id("")  # 线程归还线程池/复用前清掉，防跨任务串 ID
 
@@ -489,7 +561,12 @@ def index():
     links = _plugin_theme_links()
     if links:
         page = page.replace("</head>", f"{links}\n</head>", 1)
-    return Response(page, mimetype="text/html")
+    # 首页壳无版本号指纹（JS/CSS 才有 ?v=），必须禁缓存：否则浏览器
+    # 拿旧壳配新脚本，页面 ID 对不上 → init 里 addEventListener(null)
+    # 这类"偶现"脚本报错。
+    resp = Response(page, mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def _plugin_theme_links() -> str:
@@ -671,10 +748,12 @@ def run():
             log.warn("server", "任务被拒绝: 已有任务在运行")
             return jsonify({"error": "已有任务在运行"}), 409
         _job.update({"running": True, "mode": data.get("mode", ""), "done": False,
-                     "ok": False, "logs": [], "report": None, "error": None})
+                     "ok": False, "logs": [], "report": None, "error": None,
+                     "progress": {"pct": 0, "msg": ""}})
     jid = _next_job_id()
     log.detailed("server", f"[{jid}] job 状态: running=True "
                            f"mode={data.get('mode', '')} done=False")
+    _cancel_event.clear()
     args = (data.get("mode", ""), data.get("db_dir"), data.get("out_dir"),
             bool(data.get("no_cache")), data.get("workers"),
             data.get("export_opts") or {}, jid)
@@ -772,6 +851,28 @@ def _log_item_text(item) -> str:
     return str(item[3] if len(item) >= 4 else item[1])
 
 
+_FILE_LINE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?\s*\[(\w+)\]\s*siwx:\s*(.*)$",
+    re.DOTALL)
+
+
+def _dedup_key(item) -> tuple:
+    """跨轨归一化去重键（秒级时间 + 模块 + 消息正文）。
+
+    同一条日志会同时出现在 siwx.log 文件轨（"… [DEBUG] siwx: [模块] 正文"）
+    与结构化轨（[ts, level, module, 正文]）。旧键 = (毫秒时间戳, 原始文本)，
+    两轨前缀与毫秒永远不同 → 去重恒失效，详细模式下日志页每条成对出现。
+    文件轨剥掉前缀后与结构化轨按 (秒, "[模块] 正文") 对齐。
+    """
+    if len(item) >= 4:
+        return (int((item[0] or 0) // 1000), f"[{item[2]}] {item[3]}")
+    text = str(item[1] or "")
+    m = _FILE_LINE_RE.match(text)
+    if m:
+        return (int((item[0] or 0) // 1000), m.group(2))
+    return (int((item[0] or 0) // 1000), text)
+
+
 def _desensitize_item(item):
     """对单条日志条目的文本部分脱敏。
 
@@ -814,7 +915,7 @@ def _merged_logs(limit: int, *, desensitize: bool = True,
             continue
         if end_ts and (item[0] or 0) > end_ts:
             continue
-        key = (item[0], text)
+        key = _dedup_key(item)
         if key in seen:
             continue
         seen.add(key)
@@ -847,6 +948,30 @@ def api_logs():
         return jsonify({"error": "limit 参数无效（必须是整数）"}), 400
     merged = _merged_logs(limit)
     return jsonify({"logs": merged[-limit:], "level": log.get_level().value})
+
+
+@app.post("/api/logs/client")
+def api_log_client():
+    """前端 JS 异常上报：window.onerror/unhandledrejection 钩子回传，
+    写入结构化日志轨，日志页/文件日志直接可见（定位偶发页面脚本报错）。
+
+    字段全部来自浏览器运行时，按不可信输入处理：截断 + 去敏后再落盘。
+    """
+    data = request.get_json(silent=True) or {}
+    msg = str(data.get("message") or "")[:500]
+    if not msg:
+        return jsonify({"ok": False, "error": "message 为空"}), 400
+    parts = [msg]
+    src = str(data.get("source") or "")[:300]
+    if src:
+        loc = f"{data.get('line', '?')}:{data.get('col', '?')}"
+        parts.append(f"{src}@{loc}")
+    stack = str(data.get("stack") or "")[:2000]
+    if stack:
+        parts.append(stack)
+    kind = str(data.get("kind") or "error")[:20]
+    log.warn("ui", f"[前端{kind}] {log.desensitize_msg(' | '.join(parts))}")
+    return jsonify({"ok": True})
 
 
 @app.get("/api/logs/settings")
@@ -885,7 +1010,7 @@ def api_log_export():
 
 @app.get("/api/job")
 def api_job():
-    """返回当前任务状态（供前端轮询）。"""
+    """返回当前任务状态（供前端轮询）。progress 为结构化进度，日志归日志。"""
     with _lock:
         return jsonify({
             "running": _job["running"],
@@ -895,11 +1020,28 @@ def api_job():
             "logs": _job["logs"],
             "report": _job["report"],
             "error": _job["error"],
+            "progress": _job.get("progress") or {"pct": 0, "msg": ""},
         })
+
+
+@app.post("/api/job/cancel")
+def api_job_cancel():
+    """协作式取消当前任务。优雅停止：各检查点轮询，已完成部分保留。
+
+    响应 cancelling=True 只代表"取消请求已受理"，实际停止要等任务线程
+    走到最近的检查点（媒体解密一批之后、当前会话结束/下一会话开始前）。
+    无运行中任务时返回 409，前端据此置灰按钮。"""
+    with _lock:
+        if not _job["running"]:
+            return jsonify({"cancelling": False, "error": "当前没有运行中的任务"}), 409
+    _cancel_event.set()
+    _log(f"[{_job.get('mode')}] 收到取消请求——等待当前步骤收尾后停止（已完成部分保留）")
+    return jsonify({"cancelling": True})
 
 
 # ── 全量媒体备份（media_backup.py，设置页入口）───────────────────
 _backup_lock = threading.Lock()
+_backup_cancel = threading.Event()
 _backup_job = {"running": False, "done": False, "ok": False, "account": None,
                "out_dir": None, "logs": [], "report": None, "error": None}
 
@@ -907,10 +1049,14 @@ _backup_job = {"running": False, "done": False, "ok": False, "account": None,
 def _run_media_backup(account: str, out_dir, jlog):
     from siwx import media_backup
     try:
-        report = media_backup.backup_all(account, out_dir, log=jlog)
+        report = media_backup.backup_all(account, out_dir, log=jlog,
+                                         should_cancel=_backup_cancel.is_set)
         _backup_job["report"] = report
         _backup_job["ok"] = True
-        jlog("备份完成")
+        if report.get("cancelled"):
+            jlog("备份已取消（已完成部分保留）")
+        else:
+            jlog("备份完成")
     except Exception as e:
         _backup_job["ok"] = False
         _backup_job["error"] = f"{type(e).__name__}: {e}"
@@ -918,6 +1064,7 @@ def _run_media_backup(account: str, out_dir, jlog):
     finally:
         _backup_job["running"] = False
         _backup_job["done"] = True
+        _backup_cancel.clear()
 
 
 @app.post("/api/media/backup/start")
@@ -937,6 +1084,7 @@ def api_media_backup_start():
         _backup_job.update({"running": True, "done": False, "ok": False,
                             "account": account, "out_dir": str(out_dir),
                             "logs": [], "report": None, "error": None})
+    _backup_cancel.clear()
 
     def jlog(msg):
         _backup_job["logs"].append(str(msg))
@@ -946,6 +1094,17 @@ def api_media_backup_start():
     threading.Thread(target=_run_media_backup, args=(account, out_dir, jlog),
                      daemon=True).start()
     return jsonify({"started": True, "out_dir": str(out_dir)})
+
+
+@app.post("/api/media/backup/cancel")
+def api_media_backup_cancel():
+    """协作式取消全量媒体备份（逐文件检查点，已完成文件保留）。"""
+    with _backup_lock:
+        if not _backup_job["running"]:
+            return jsonify({"cancelling": False, "error": "当前没有运行中的备份"}), 409
+    _backup_cancel.set()
+    _backup_job["logs"].append("收到取消请求——当前文件处理完后停止（已完成部分保留）")
+    return jsonify({"cancelling": True})
 
 
 @app.get("/api/media/backup/status")

@@ -1,6 +1,12 @@
 /* 聊天统计页 —— 所有图表用内联 SVG 手绘，零外部依赖，沿用全局设计 token */
 
-.st-wrap { display: flex; flex-direction: column; gap: 18px; }
+/* 栏距 24px：指标卡行与图表面板行之间此前 18px 偏挤（用户实测反馈），
+   整体行间距统一放宽 */
+.st-wrap { display: flex; flex-direction: column; gap: 24px; }
+/* 指标卡与图表区都渲染在 #st-body 里，st-wrap 的 gap 管不到它们——
+   此处行与行之间实际为 0（用户反馈「第2与第3行间隔不够」的真正原因），
+   同步给 24px。 */
+#st-body { display: flex; flex-direction: column; gap: 24px; }
 
 /* ── 顶部工具条 ───────────────────────────────────────────── */
 .st-bar {
@@ -137,7 +143,9 @@
   flex: 1; height: 7px; border: 1px solid var(--line); border-radius: 999px;
   background: var(--card-alt); overflow: hidden; min-width: 60px;
 }
-.st-mini .fill { height: 100%; background: var(--accent); }
+/* fill 是 span（行内），width 对行内元素无效 → 填充永远 0 宽，
+   星期活跃度/排行表只剩灰色轨道（实测截图）。必须块化。 */
+.st-mini .fill { display: block; height: 100%; background: var(--accent); }
 
 .st-tip { font-size: 11.5px; color: var(--muted); margin-top: 10px; }
 .st-loading { color: var(--muted); text-align: center; padding: 50px 0; }

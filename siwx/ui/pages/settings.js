@@ -319,13 +319,23 @@ async function loadDatasources() {
       box.innerHTML = '<div class="empty">未发现数据目录 —— 可用下方「手动添加数据目录」指定</div>';
       return;
     }
-    box.innerHTML = accs.map((a, i) => `
+    box.innerHTML = accs.map((a, i) => {
+      const initials = esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase());
+      // 真实头像优先（head_image.db 本人头像，端点内含带后缀目录名回退），
+      // 加载失败移除 img 露出底下的首字母占位。
+      const ava = `/api/chat/avatar?account=${encodeURIComponent(a.wxid)}&username=${encodeURIComponent(a.wxid)}`;
+      return `
       <div class="acc" data-i="${i}">
-        <div class="avatar">${esc((a.wxid || '').replace(/^wxid_/, '').slice(0, 2).toUpperCase())}</div>
+        <div class="avatar">
+          <img class="acc-ava-img" src="${ava}" alt="" loading="lazy"
+               onerror="this.remove()">
+          <span>${initials}</span>
+        </div>
         <div class="acc-main"><b>${esc(a.wxid)}</b><span>${a.db_count || '?'} 个数据库</span></div>
         ${dsBadge(a.keys_cached, a.total_salts)}
         <button class="btn btn-sm" data-ds-run="${i}">重新提取</button>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     box.querySelectorAll('[data-ds-run]').forEach(btn => {
       btn.addEventListener('click', () => runExtract(accs[Number(btn.dataset.dsRun)], btn));
     });
@@ -569,7 +579,15 @@ export async function init() {
 let mbPoll = null;
 
 function renderBackupResult(st) {
-  el('s-mb-status').textContent = st.ok ? '备份完成' : `备份失败：${st.error || '未知错误'}`;
+  if (st.report && st.report.cancelled) {
+    el('s-mb-status').textContent = '备份已取消（已完成部分保留）';
+  } else {
+    el('s-mb-status').textContent = st.ok ? '备份完成' : `备份失败：${st.error || '未知错误'}`;
+  }
+  el('s-mb-cancel').classList.add('hidden');
+  const cb = el('s-mb-cancel');
+  cb.disabled = false;
+  cb.textContent = '取消备份';
   const r = st.report;
   if (!r) return;
   el('s-mb-result').innerHTML = `
@@ -616,6 +634,7 @@ async function initBackupCard() {
     const account = sel.value;
     if (!account) return;
     startBtn.disabled = true;
+    el('s-mb-cancel').classList.remove('hidden');
     el('s-mb-result').innerHTML = '';
     el('s-mb-open-row').classList.add('hidden');
     el('s-mb-log').textContent = '';
@@ -630,6 +649,19 @@ async function initBackupCard() {
     } catch (e) {
       el('s-mb-status').textContent = '启动失败：' + e.message;
       startBtn.disabled = false;
+      el('s-mb-cancel').classList.add('hidden');
+    }
+  });
+  // 协作式取消：受理后等当前文件处理完（逐文件检查点），状态栏随轮询更新
+  el('s-mb-cancel').addEventListener('click', async () => {
+    const b = el('s-mb-cancel');
+    b.disabled = true;
+    try {
+      await fetchJSON('/api/media/backup/cancel', { method: 'POST' });
+      b.textContent = '正在取消…';
+    } catch (e) {
+      b.disabled = false;
+      toast('取消失败：' + e.message, true);
     }
   });
   el('s-mb-open').addEventListener('click', async () => {
@@ -645,6 +677,7 @@ async function initBackupCard() {
     if (st.running) {
       el('s-mb-status').textContent = '备份运行中…';
       startBtn.disabled = true;
+      el('s-mb-cancel').classList.remove('hidden');
       pollBackup();
     } else if (st.done) {
       renderBackupResult(st);

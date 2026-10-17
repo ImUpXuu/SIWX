@@ -300,15 +300,36 @@ function sessionRow(s, extra = '') {
     </div>`;
 }
 
+/** 搜索关键词解析：含正则元字符时按正则匹配（忽略大小写），纯文本按子串匹配。
+ *  非法正则返回 bad，由调用方提示，避免输入 "([" 这类半截表达式时静默全空。 */
+function compileKw(kw) {
+  const k = (kw || '').trim();
+  if (!k) return { type: 'none' };
+  if (/[\\^$.*+?()[\]{}|]/.test(k)) {
+    try { return { type: 're', re: new RegExp(k, 'i') }; }
+    catch (e) { return { type: 'bad' }; }
+  }
+  return { type: 'sub', k: k.toLowerCase() };
+}
+
+function kwHit(s, ck) {
+  if (ck.type === 'none') return true;
+  if (ck.type === 'bad') return false;
+  if (ck.type === 'sub') {
+    return s.display.toLowerCase().includes(ck.k) || s.username.toLowerCase().includes(ck.k);
+  }
+  return ck.re.test(s.display || '') || ck.re.test(s.username || '');
+}
+
 function renderSessions(kw) {
-  const kwL = (kw || '').toLowerCase();
-  const visible = sessions.filter(s =>
-    !kwL || s.display.toLowerCase().includes(kwL) || s.username.toLowerCase().includes(kwL));
+  const ck = compileKw(kw);
+  const kwActive = ck.type !== 'none';
+  const visible = sessions.filter(s => kwHit(s, ck));
   const normal = visible.filter(s => !isOfficial(s));
   const official = visible.filter(s => isOfficial(s));
   const lines = [];
   if (official.length) {
-    const open = officialOpen || !!kwL;
+    const open = officialOpen || kwActive;
     const latest = Math.max(...official.map(s => s.last_time || 0));
     lines.push(`
       <div class="sess sess-group ${open ? 'open' : ''}" data-group="official"
@@ -323,7 +344,7 @@ function renderSessions(kw) {
   }
   lines.push(...normal.map(s => sessionRow(s)));
   el('c-sessions').innerHTML = lines.length ? lines.join('')
-    : '<div class="c-empty">没有匹配的会话</div>';
+    : `<div class="c-empty">${ck.type === 'bad' ? '正则语法有误，请检查表达式' : '没有匹配的会话'}</div>`;
   el('c-sessions').querySelectorAll('.sess').forEach(n => {
     const activate = () => {
       if (n.dataset.group === 'official') {
@@ -811,10 +832,15 @@ function bubble(m) {
       : (/^[\w.-]+\.[a-z]{2,}(?::\d+)?(?:[/?#]|$)/i.test(raw) ? 'https://' + raw : '');
     let host = '';
     try { host = new URL(full).hostname; } catch (e) {}
+    // desc（如「"xx"邀请你加入群聊"群名"…」）此前整段丢弃 → 邀请卡只剩标题
+    // 没有群名（用户实测反馈）。截断 120 字防长摘要撑爆气泡。
+    const ldesc = (m.link.desc || '').trim();
+    const descHtml = ldesc ? `<div class="m-link-desc">${esc(ldesc.slice(0, 120))}</div>` : '';
     inner = full
       ? `<div class="m-link"><a href="${esc(full)}" target="_blank" rel="noreferrer">${esc(m.link.title)}</a>` +
+        descHtml +
         (host ? `<div class="m-link-host">${esc(host)}</div>` : '') + `</div>`
-      : `<div class="m-link">${esc(m.link.title)}</div>`;
+      : `<div class="m-link">${esc(m.link.title)}${descHtml}</div>`;
   } else if (m.kind === 'voice') {
     const base = `/api/chat/media/voice?account=${encodeURIComponent(account)}` +
                  `&chat=${encodeURIComponent(currentChat.username)}` +

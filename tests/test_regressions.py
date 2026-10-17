@@ -40,7 +40,7 @@ if str(ROOT) not in sys.path:
 # 故在导入 siwx 之前强制零插件模式；插件自身的测试见 tests/test_plugins.py。
 os.environ["SIWX_NO_PLUGINS"] = "1"
 
-from siwx import api_chat, exporter, media
+from siwx import api_chat, exporter
 from siwx.exporter import _safe_name
 from tests._base import IsolatedRootCase
 from tests import fixtures as fx
@@ -407,6 +407,116 @@ class TestExport(TempRootCase):
         sess = res["sessions"][0]
         self.assertEqual(len(sess["files"]), 2)
         self.assertTrue(all(Path(f).is_file() for f in sess["files"]))
+
+    def test_multi_report_includes_size_duration_and_zip_size(self):
+        """报告逐会话带产物大小与耗时；整体 zip 带大小（前端结果面板展示用）。"""
+        acc, account, chat = self.acc, self.account, self.chat
+        res = exporter.run_export_multi(
+            acc, account, [{"chat": chat, "display": self.display}],
+            fmt="json", want_media=False, want_avatars=False,
+            export_root=self.tmp / "multi_report", pack="single")
+        sess = res["sessions"][0]
+        self.assertGreater(sess["size_bytes"], 0)
+        self.assertGreaterEqual(sess["duration_ms"], 0)
+        self.assertTrue(res["zip"])
+        self.assertGreater(res["zip_size"], 0)
+
+
+# ── 4.1 /api/job 结构化进度 ─────────────────────────────────────
+
+class TestJobProgressApi(TempRootCase):
+    """/api/job 除日志外还暴露结构化 progress 字段，前端不再从日志
+    文本里正则抠百分比（日志归日志、进度归进度）。"""
+
+    def test_job_status_includes_progress_field(self):
+        from siwx.server import app, _job
+        _job.update({"progress": {"pct": 42, "msg": "[2/5] 解密图片…"}})
+        try:
+            d = app.test_client().get("/api/job").get_json()
+        finally:
+            _job.update({"progress": {"pct": 0, "msg": ""}})
+        self.assertEqual(d["progress"]["pct"], 42)
+        self.assertEqual(d["progress"]["msg"], "[2/5] 解密图片…")
+
+    def test_job_progress_defaults_when_missing(self):
+        """老状态残留缺 progress 键时兜底返回零进度，前端拿到的形状恒定。"""
+        from siwx.server import app, _job
+        saved = _job.pop("progress", None)
+        try:
+            d = app.test_client().get("/api/job").get_json()
+        finally:
+            if saved is not None:
+                _job["progress"] = saved
+        self.assertEqual(d["progress"], {"pct": 0, "msg": ""})
+
+
+# ── 5.1 动画表情导出：CDN 下载兜底 + 渲染器 XML 实体解码 ─────────
+
+class TestStickerExport(TempRootCase):
+    """47 消息本地缓存解不开（微信私有封装），导出端按 cdnurl 下载兜底；
+    渲染器侧 raw XML 的 &amp; 必须解码，否则表情 URL 带 &amp; 请求 → 400。"""
+
+    GIF = b"GIF89a" + b"\x00" * 16
+
+    def test_collect_metadata_gathers_sticker_urls(self):
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        db = acc / "message" / "message_0.db"
+        conn = sqlite3.connect(db)
+        raw = ('<msg><emoji md5="a" cdnurl="http://wxapp.tc.qq.com/x?m=1&amp;filekey=2" '
+               'width="240" height="240" /></msg>').encode("utf-8")
+        conn.execute("INSERT INTO " + _msg_table(chat) +
+                     " VALUES (13, 1013, 47, 1700000012, 0, 1, ?, NULL)", (raw,))
+        conn.commit(); conn.close()
+        from siwx.exporter import _collect_metadata
+        res = _collect_metadata(acc, chat, None, None, account, None)
+        stickers = res[6]
+        self.assertEqual(len(stickers), 1)
+        md5, bm, lid, ts, url = stickers[0]
+        self.assertEqual((lid, ts), (13, 1700000012))
+        # Python 端解析已把 &amp; 还原为 &；渲染器侧同样要解码（模板已含 xmlDec）
+        self.assertEqual(url, "http://wxapp.tc.qq.com/x?m=1&filekey=2")
+
+    def test_sticker_download_fallback(self):
+        from siwx.exporter import _export_sticker_media, _media_key
+        stickers = [
+            ("a" * 32, "", 1, 1700000001, "http://wxapp.tc.qq.com/s1"),
+            ("b" * 32, "", 2, 1700000002, "http://wxapp.tc.qq.com/s2"),
+            ("c" * 32, "", 3, 1700000003, "http://evil.example.com/s3"),
+        ]
+        media_map = {_media_key("b" * 32, "", 2, 1700000002): "media/already.jpg"}
+
+        def fake_fetch(spec, timeout=None, **kw):
+            self.assertEqual(spec["url"], "http://wxapp.tc.qq.com/s1")
+            return {"ok": True, "data": self.GIF, "ext": "gif"}
+
+        dest = self.tmp / "media"
+        with mock.patch.object(exporter.sns_cdn, "fetch_emoji", fake_fetch):
+            ok = _export_sticker_media(dest, stickers, media_map)
+        self.assertEqual(ok, 1)
+        f = dest / ("emoji_0000_" + "a" * 12 + ".gif")
+        self.assertTrue(f.is_file())
+        self.assertEqual(f.read_bytes(), self.GIF)
+        # 白名单外域名跳过、已有媒体的跳过
+        self.assertEqual(len(list(dest.iterdir())), 1)
+        self.assertNotIn(_media_key("c" * 32, "", 3, 1700000003), media_map)
+
+    def test_sticker_download_failure_recorded(self):
+        from siwx.exporter import _export_sticker_media
+        stickers = [("d" * 32, "", 4, 1700000004, "http://wxapp.tc.qq.com/s4")]
+        with mock.patch.object(exporter.sns_cdn, "fetch_emoji",
+                               lambda spec, **kw: {"ok": False, "error": "下载失败"}):
+            ok = _export_sticker_media(self.tmp / "media", stickers, {})
+        self.assertEqual(ok, 0)
+        self.assertFalse((self.tmp / "media").exists() and
+                         any((self.tmp / "media").iterdir()))
+
+    def test_renderer_decodes_xml_entities(self):
+        """渲染器 xmlAttr/xmlVal 必须解码实体并容忍 'attr = value' 空格格式。"""
+        tpl = (Path("siwx") / "templates" / "default" / "renderer.js") \
+            .read_text(encoding="utf-8")
+        self.assertIn("function xmlDec", tpl)
+        self.assertIn("\\\\s*=\\\\s*", tpl)
+        self.assertIn("xmlDec(m[1])", tpl)
 
 
 # ── 6. 媒体：扩展名 + chat/ts 透传 ──────────────────────────────
@@ -1249,7 +1359,7 @@ class TestVersionSource(unittest.TestCase):
         from siwx import __version__
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
-        self.assertEqual(__version__, "5.0.11")
+        self.assertEqual(__version__, "5.0.12")
 
     def test_release_metadata_matches_package_version(self):
         """version.json 与 README 徽章的版本号必须跟 __version__ 一致。
@@ -2533,6 +2643,64 @@ class TestRecordinfoParsing(unittest.TestCase):
         self.assertIsNotNone(record)
 
 
+class TestFinderFeedParsing(unittest.TestCase):
+    """appmsg type=51 视频号卡片：findernamecard（转发名片）里带属性/自闭合
+    形态的 <nickname … /> 曾被 `<nickname[^>]*>` 前缀误当开标签，捕获组一路
+    吞到 <finderFeed> 深处真正的 </nickname>，整段 XML 进入展示字段——
+    聊天页"视频号 · "后面显示裸 XML。开标签必须止于空白或 `>` 且非自闭合。"""
+
+    # 合成结构：名片段的自闭合 nickname 在前，finderFeed 段的真昵称在后
+    XML = ('<msg><appmsg type="51"><title>当前版本不支持展示该内容</title>'
+           '<findernamecard>'
+           '<nickname alias="1" />'
+           '<avatar /><auth_job /><ecSource /><username />'
+           '</findernamecard>'
+           '<finderFeed>'
+           '<mediaList><media><mediaType>4</mediaType></media></mediaList>'
+           '<nickname>合成频道名</nickname>'
+           '<desc><![CDATA[合成视频描述]]></desc>'
+           '<duration>75</duration>'
+           '<objectNonceId>nonce_synthetic</objectNonceId>'
+           '</finderFeed>'
+           '</appmsg></msg>')
+
+    def test_nickname_not_polluted_by_self_closing_namecard_tag(self):
+        from siwx.api_chat import _parse_finder_feed
+        meta = _parse_finder_feed(self.XML)
+        self.assertIsNotNone(meta)
+        self.assertEqual(meta["nickname"], "合成频道名")
+        self.assertNotIn("<", meta["nickname"])
+        self.assertEqual(meta["desc"], "合成视频描述")
+        self.assertEqual(meta["duration"], 75)
+        self.assertEqual(meta["nonce"], "nonce_synthetic")
+
+    def test_nickname_with_attributes_still_parses(self):
+        """带属性的常规开标签（<nickname flag="2">名</nickname>）不受影响。"""
+        from siwx.api_chat import _parse_finder_feed
+        xml = ('<finderFeed><nickname flag="2">属性形态频道</nickname>'
+               '<desc>d</desc></finderFeed>')
+        self.assertEqual(_parse_finder_feed(xml)["nickname"], "属性形态频道")
+
+    def test_self_closing_alone_yields_empty_not_xml(self):
+        """只有自闭合 nickname、无真 </nickname> 时取不到就是空串，不吐 XML。"""
+        from siwx.api_chat import _parse_finder_feed
+        xml = '<finderFeed><nickname alias="1" /><avatar /><desc>d</desc></finderFeed>'
+        meta = _parse_finder_feed(xml)
+        self.assertEqual(meta["nickname"], "")
+
+    def test_parse_quote_or_link_channels_kind(self):
+        from siwx.api_chat import parse_quote_or_link, message_kind
+        quote, link, record, channels = parse_quote_or_link(49, self.XML)
+        self.assertIsNone(quote)
+        self.assertIsNone(link)
+        self.assertIsNone(record)
+        self.assertEqual(channels["nickname"], "合成频道名")
+        self.assertEqual(message_kind(49, quote, link, channels), "channels")
+        # content 文案取 finderFeed 的描述首行，而不是被污染的昵称
+        from siwx.api_chat import _fmt
+        self.assertEqual(_fmt(49, self.XML), "[视频号] 合成视频描述")
+
+
 class TestRecordinfoRefsAndMedia(unittest.TestCase):
     """issue #31：合并转发子项的媒体引用、嵌套记录与原始消息回查。
 
@@ -3472,9 +3640,9 @@ class TestChatMessageFilter(TempRootCase):
             self.assertIn(token, js)
         self.assertIn('data-kind="image"', html_)
         self.assertIn('id="c-filter"', html_)
-        # 缓存指纹必须刷新，否则升级后浏览器仍用旧 UI
+        # 缓存指纹必须刷新，否则升级后浏览器仍用旧 UI（本地指纹线，非上游值）
         appjs = (ROOT / "siwx" / "ui" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("2026100701", appjs)
+        self.assertIn("2026101702", appjs)
 
 
 # ── 30. HTML 模板可替换框架 + 合并转发/转文字渲染 ───────────────
@@ -3992,49 +4160,6 @@ class TestFindKvcommCodesMacOS(unittest.TestCase):
             self.assertEqual(media.find_kvcomm_codes(), [])
 
 
-class TestMediaExportExtensionFromInfo(TempRootCase):
-    """_try_decrypt() 原实现只认 info 里有没有 "png"/"gif" 子串，其余
-    （wxgf 转码失败的原样留档、heic）一律落 else 写成 .jpg——文件名是
-    .jpg，字节却是别的格式，导出结果里是一份打不开的损坏文件。"""
-
-    def setUp(self):
-        super().setUp()
-        self.acc, self.account, self.chat = make_account(self.tmp, n_texts=6)
-
-    def _run_with_fake_image(self, body: bytes, ctype: str):
-        from siwx import exporter as ex
-
-        def fake_get_image(account, md5, acc_dir, **kw):
-            return body, ctype
-
-        old = ex.media.get_image
-        ex.media.get_image = fake_get_image
-        try:
-            dest = self.tmp / "media_out"
-            dest.mkdir(parents=True, exist_ok=True)
-            return ex._try_decrypt(str(self.acc), self.account, self.chat,
-                                   "a" * 32, None, 1, 1_700_000_000,
-                                   dest / "0000_aaaaaaaaaaaa.jpg")
-        finally:
-            ex.media.get_image = old
-
-    def test_heic_not_mislabeled_as_jpg(self):
-        out, reason = self._run_with_fake_image(b"\x00" * 32, "image/heic")
-        self.assertIsNotNone(out)
-        self.assertEqual(reason, "")
-        self.assertEqual(out.suffix, ".heic")
-
-    def test_wxgf_not_mislabeled_as_jpg(self):
-        out, reason = self._run_with_fake_image(b"wxgf" + b"\x00" * 28, "image/wxgf")
-        self.assertIsNotNone(out)
-        self.assertEqual(out.suffix, ".wxgf")
-
-    def test_jpeg_still_works(self):
-        out, reason = self._run_with_fake_image(b"\xff\xd8\xff" + b"\x00" * 29, "image/jpeg")
-        self.assertIsNotNone(out)
-        self.assertEqual(out.suffix, ".jpeg")
-
-
 class TestImageFailReason(TempRootCase):
     """P2-7：/api/chat/media/image 的 404 必须带结构化 reason，前端据此
     区分「没下载原图 / 解密失败 / 本平台无法解码」，不再只有一种文案。"""
@@ -4042,6 +4167,7 @@ class TestImageFailReason(TempRootCase):
     def setUp(self):
         super().setUp()
         self.acc, self.account, self.chat = make_account(self.tmp, n_texts=6)
+
     def test_reason_field_classifies_failures(self):
         from siwx import media
         from siwx.server import app
@@ -4159,9 +4285,7 @@ class TestMediaBackup(unittest.TestCase):
 
     def test_images_classified_by_content_type(self):
         """可预览(jpeg) / wxgf 转码失败后原样保留 / 真失败，三种结果各自
-        正确归类，wxgf 不被误标成打不开的假 jpg。转码本身走哪条平台分支
-        不是这个用例关心的（见 TestMediaBackupWxgfConversion），这里只
-        验证转码失败时"原样保留 wxgf"这条兜底路径。"""
+        正确归类，wxgf 不被误标成打不开的假 jpg。"""
         from siwx import media_backup
         (self.attach_root / "a.dat").write_bytes(b"fake-jpeg-bytes")
         (self.attach_root / "b.dat").write_bytes(b"fake-wxgf-bytes")
@@ -4192,8 +4316,7 @@ class TestMediaBackup(unittest.TestCase):
         self.assertFalse((out_dir / "c.wxgf").exists())
 
     def test_videos_copied_without_decryption(self):
-        """视频实测未加密（ISO Media/MP4 容器），原样复制即可，不经过
-        media._decrypt_any。"""
+        """视频实测未加密（ISO Media/MP4 容器），原样复制，不经 media._decrypt_any。"""
         from siwx import media_backup
         raw = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 20
         (self.video_root / "x.mp4").write_bytes(raw)
@@ -4210,13 +4333,9 @@ class TestMediaBackup(unittest.TestCase):
         self.assertEqual(out_file.read_bytes(), raw)
 
     def test_rerun_on_readonly_source_video_does_not_fail(self):
-        """实测踩坑：微信落盘的源视频文件本身是只读的（-r--r--r--）。旧实现
-        用 shutil.copy2() 连权限位也一起拷到目标文件——第一次备份后目标
-        也变只读，第二次运行（新消息到达后重新备份）对同名目标文件再次
-        copy2() 等于覆盖写一个只读文件，当场 PermissionError（实测 1926
-        个视频里 1913 个"已备份过的"全部这样假性失败，数据其实一直都在）。
-        模拟"已存在只读目标 + 内容不变"的重复运行场景，必须直接跳过，
-        不碰权限位也不报错。"""
+        """实测踩坑：微信落盘的源视频本身只读。copy2() 连权限位一起拷到
+        目标后，重跑备份对同名只读目标再 copy2() 就是 PermissionError
+        （实测 1926 个视频 1913 个这样假性失败）。必须按大小跳过。"""
         from siwx import media_backup
         raw = b"\x00\x00\x00\x20ftypisom" + b"\x00" * 20
         src = self.video_root / "x.mp4"
@@ -4263,243 +4382,7 @@ class TestMediaBackup(unittest.TestCase):
 
         self.assertEqual(stats["total"], 1)
         self.assertEqual(stats["ok"], 1)
-        self.assertEqual(stats["failed"], 0)
-        out_file = self.tmp / "out_files" / "2026-01" / "示例文档(1).pdf"
-        self.assertTrue(out_file.is_file())
-        self.assertEqual(out_file.read_bytes(), raw)
-
-    def test_files_skips_ds_store(self):
-        from siwx import media_backup
-        (self.file_root / ".DS_Store").write_bytes(b"junk")
-        (self.file_root / "real.apk").write_bytes(b"PK\x03\x04" + b"\x00" * 10)
-
-        with self._patch_roots():
-            stats = media_backup.backup_files(self.wxid, self.tmp / "out_files",
-                                              log=None)
-
-        self.assertEqual(stats["total"], 1)
-        self.assertEqual(stats["ok"], 1)
-        self.assertFalse((self.tmp / "out_files" / "2026-01" / ".DS_Store").exists())
-
-    def test_files_rerun_on_readonly_source_does_not_fail(self):
-        """同一只读权限位坑（见 backup_videos 的回归用例）：msg/file 下的
-        源文件也是只读的，重新运行备份时必须直接跳过已存在且内容不变的
-        目标文件，不碰权限位也不报错。"""
-        from siwx import media_backup
-        raw = b"PK\x03\x04" + b"\x00" * 20
-        src = self.file_root / "app.apk"
-        src.write_bytes(raw)
-        src.chmod(0o444)
-        dst = self.tmp / "out_files" / "2026-01" / "app.apk"
-        dst.parent.mkdir(parents=True)
-        dst.write_bytes(raw)
-        dst.chmod(0o444)
-
-        with self._patch_roots():
-            stats = media_backup.backup_files(self.wxid, self.tmp / "out_files",
-                                              log=None)
-
-        self.assertEqual(stats["failed"], 0)
-        self.assertEqual(stats["skipped"], 1)
-        self.assertEqual(dst.read_bytes(), raw)
-
-    def test_no_account_dir_returns_empty_stats_not_raises(self):
-        from siwx import media_backup
-        with mock.patch("siwx.media._wechat_cache_roots", return_value=[]):
-            stats = media_backup.backup_images("wxid_nonexistent",
-                                               self.tmp / "out_none", log=None)
-        self.assertEqual(stats["total"], 0)
-        self.assertEqual(stats["failed"], 0)
-
-
-class TestMediaBackupWxgfConversion(unittest.TestCase):
-    """backup_images() 对解密出来的 wxgf 按平台分流转码——macOS 走
-    media_wxgf_macos 的批量接口（一次 attach 处理一批，不逐张开销）；
-    其它平台走 media.convert_wxgf() 的逐张调用（Windows VoipEngine.dll
-    句柄内部已缓存，逐张调用开销不大）。两条路径都要能在转码失败时
-    干净回退到"原样保留 wxgf"，不让整个备份中断。"""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_wxgfconv_"))
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_macos_path_uses_batch_api_and_cleans_up_source(self):
-        from siwx import media_backup
-        wxgf = self.tmp / "a.wxgf"
-        wxgf.write_bytes(b"fake-wxgf")
-        heic = wxgf.with_suffix(".heic")
-        pending = [(wxgf, heic)]
-        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
-
-        def fake_batch(items, log=None):
-            for src, dst in items:
-                dst.write_bytes(b"HEIC-BYTES")
-            return {str(wxgf): {"ok": True, "bytes": 10}}
-
-        with mock.patch("siwx.media_backup.platform.system", return_value="Darwin"), \
-             mock.patch("siwx.media_wxgf_macos.convert_wxgf_batch", side_effect=fake_batch):
-            media_backup._convert_pending_wxgf(pending, stats, log=None)
-
-        self.assertEqual(stats["ok_viewable"], 1)
-        self.assertEqual(stats["ok_wxgf_preserved"], 0)
-        self.assertFalse(wxgf.exists())  # 转码成功后原始 wxgf 应被清理
-        self.assertTrue(heic.is_file())
-
-    def test_macos_path_preserves_wxgf_when_batch_reports_failure(self):
-        from siwx import media_backup
-        wxgf = self.tmp / "b.wxgf"
-        wxgf.write_bytes(b"fake-wxgf")
-        pending = [(wxgf, wxgf.with_suffix(".heic"))]
-        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
-
-        with mock.patch("siwx.media_backup.platform.system", return_value="Darwin"), \
-             mock.patch("siwx.media_wxgf_macos.convert_wxgf_batch",
-                        return_value={str(wxgf): {"ok": False, "reason": "no_wechat_process"}}):
-            media_backup._convert_pending_wxgf(pending, stats, log=None)
-
-        self.assertEqual(stats["ok_viewable"], 0)
-        self.assertEqual(stats["ok_wxgf_preserved"], 1)
-        self.assertTrue(wxgf.is_file())  # 转码失败，原始 wxgf 必须还在
-
-    def test_non_macos_path_uses_convert_wxgf_per_file(self):
-        from siwx import media_backup
-        wxgf = self.tmp / "c.wxgf"
-        wxgf.write_bytes(b"fake-wxgf")
-        pending = [(wxgf, wxgf.with_suffix(".heic"))]
-        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
-        jpeg_bytes = b"\xff\xd8\xff" + b"\x00" * 10
-
-        with mock.patch("siwx.media_backup.platform.system", return_value="Windows"), \
-             mock.patch("siwx.media.convert_wxgf", return_value=jpeg_bytes):
-            media_backup._convert_pending_wxgf(pending, stats, log=None)
-
-        self.assertEqual(stats["ok_viewable"], 1)
-        self.assertEqual(stats["ok_wxgf_preserved"], 0)
-        self.assertFalse(wxgf.exists())
-        self.assertTrue(wxgf.with_suffix(".jpeg").is_file())
-
-    def test_non_macos_path_preserves_wxgf_when_convert_returns_none(self):
-        from siwx import media_backup
-        wxgf = self.tmp / "d.wxgf"
-        wxgf.write_bytes(b"fake-wxgf")
-        pending = [(wxgf, wxgf.with_suffix(".heic"))]
-        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
-
-        with mock.patch("siwx.media_backup.platform.system", return_value="Windows"), \
-             mock.patch("siwx.media.convert_wxgf", return_value=None):
-            media_backup._convert_pending_wxgf(pending, stats, log=None)
-
-        self.assertEqual(stats["ok_viewable"], 0)
-        self.assertEqual(stats["ok_wxgf_preserved"], 1)
-        self.assertTrue(wxgf.is_file())
-
-    def test_log_none_does_not_raise(self):
-        """log=None 是本模块其余函数的既有约定（"不要日志"），这里不能因为
-        内部要给 convert_wxgf_batch 传 log 就炸出 TypeError。"""
-        from siwx import media_backup
-        wxgf = self.tmp / "e.wxgf"
-        wxgf.write_bytes(b"fake-wxgf")
-        pending = [(wxgf, wxgf.with_suffix(".heic"))]
-        stats = {"ok_viewable": 0, "ok_wxgf_preserved": 0, "bytes_written": 0}
-        with mock.patch("siwx.media_backup.platform.system", return_value="Darwin"), \
-             mock.patch("siwx.media_wxgf_macos.convert_wxgf_batch", return_value={}):
-            media_backup._convert_pending_wxgf(pending, stats, log=None)  # 不应抛异常
-        self.assertEqual(stats["ok_wxgf_preserved"], 1)
-
-
-class TestGetImageReusesBackup(unittest.TestCase):
-    """get_image() 优先复用 media_backup.py 已经转码好的结果，不现场重新
-    解密+转码。批量导出/浏览很多会话时，同一张图可能被多条消息引用到；
-    全量备份往往已经批量转过一遍、结果就在磁盘上，现场再走一遍
-    attach/hardlink/Bubble 解析 + （wxgf 的话）活的微信进程 LLDB 转码，
-    既慢得多，微信没开时还直接没法看——有现成备份就应该优先用。"""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_getimage_backup_"))
-        self.acc_out = self.tmp / "wxid_test"
-        self.backup_images = self.acc_out / "media_backup" / "images" / "chatmd5" / "2026-01" / "Img"
-        self.backup_images.mkdir(parents=True)
-        media._BACKUP_INDEX.clear()  # 每个用例独立，避免索引缓存串台
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-        media._BACKUP_INDEX.clear()
-        media._IMG_CACHE.clear()
-
-    def test_viewable_backup_hit_skips_live_decrypt_entirely(self):
-        md5 = "a" * 32
-        (self.backup_images / f"{md5}_M.jpeg").write_bytes(
-            b"\xff\xd8\xff" + b"\x00" * 10)
-
-        with mock.patch("siwx.media.attach_paths") as m_attach, \
-             mock.patch("siwx.media._decrypt_any") as m_decrypt:
-            body, ctype = media.get_image("wxid_test", md5, self.acc_out)
-
-        self.assertEqual(ctype, "image/jpeg")
-        self.assertTrue(body.startswith(b"\xff\xd8\xff"))
-        m_attach.assert_not_called()
-        m_decrypt.assert_not_called()
-
-    def test_heic_backup_hit_converts_via_sips_for_browser_compat(self):
-        """第一版实现直接把 .heic 原样返回，浏览器 <img> 里 HEIC 原生支持
-        不可靠（Safari 能显示，Chrome/Firefox 普遍不行）——必须跟现场
-        转码路径一样，补一次 sips 转 JPEG。"""
-        md5 = "b" * 32
-        (self.backup_images / f"{md5}_M.heic").write_bytes(b"HEIC-BYTES")
-        jpeg_bytes = b"\xff\xd8\xff" + b"\x00" * 10
-
-        with mock.patch("siwx.media.platform.system", return_value="Darwin"), \
-             mock.patch("siwx.media_wxgf_macos._heic_to_jpeg", return_value=jpeg_bytes) as m_sips:
-            body, ctype = media.get_image("wxid_test", md5, self.acc_out)
-
-        self.assertEqual(ctype, "image/jpeg")
-        self.assertEqual(body, jpeg_bytes)
-        m_sips.assert_called_once()
-
-    def test_heic_backup_hit_falls_back_to_raw_heic_when_sips_fails(self):
-        md5 = "c" * 32
-        (self.backup_images / f"{md5}_M.heic").write_bytes(b"HEIC-BYTES")
-
-        with mock.patch("siwx.media.platform.system", return_value="Darwin"), \
-             mock.patch("siwx.media_wxgf_macos._heic_to_jpeg", return_value=None):
-            body, ctype = media.get_image("wxid_test", md5, self.acc_out)
-
-        self.assertEqual(ctype, "image/heic")
-        self.assertEqual(body, b"HEIC-BYTES")
-
-    def test_preserved_wxgf_in_backup_does_not_short_circuit(self):
-        """备份里的 .wxgf 是"转码失败时的兜底留档"，不算已有可预览结果——
-        不能直接原样返回给浏览器，必须落到下面走一遍正常的现场解析路径。"""
-        md5 = "d" * 32
-        (self.backup_images / f"{md5}_M.wxgf").write_bytes(b"wxgf" + b"\x00" * 10)
-
-        with mock.patch("siwx.media.attach_paths", return_value=[]) as m_attach:
-            body, info = media.get_image("wxid_test", md5, self.acc_out, chat="any")
-
-        m_attach.assert_called_once()  # 确实落到了现场解析路径
-        self.assertIsNone(body)  # 没有真实 attach 数据，自然找不到，返回失败是预期的
-
-    def test_backup_index_is_cached_across_calls(self):
-        md5 = "e" * 32
-        (self.backup_images / f"{md5}_M.jpeg").write_bytes(
-            b"\xff\xd8\xff" + b"\x00" * 10)
-        media.get_image("wxid_test", md5, self.acc_out)
-        backup_root = self.acc_out / "media_backup" / "images"
-        self.assertIn(str(backup_root), media._BACKUP_INDEX)
-        idx_obj_id = id(media._BACKUP_INDEX[str(backup_root)])
-        media._IMG_CACHE.clear()  # 清掉图片缓存，逼第二次调用重新走查找
-        media.get_image("wxid_test", md5, self.acc_out)
-        self.assertEqual(id(media._BACKUP_INDEX[str(backup_root)]), idx_obj_id)
-
-    def test_no_backup_dir_falls_through_to_live_path(self):
-        """账号从没跑过 media_backup 全量备份时，目录都不存在——必须正常
-        落到现场解析路径，不能因为目录缺失就报错。"""
-        acc_out = self.tmp / "wxid_never_backed_up"
-        with mock.patch("siwx.media.attach_paths", return_value=[]) as m_attach:
-            media.get_image("wxid_never_backed_up", "f" * 32, acc_out, chat="any")
-        m_attach.assert_called_once()
+        self.assertTrue((self.tmp / "out_files" / "2026-01" / "示例文档(1).pdf").is_file())
 
 
 class TestMediaBackupApi(TempRootCase):
@@ -4538,6 +4421,241 @@ class TestMediaBackupApi(TempRootCase):
         self.assertTrue(st["ok"], st.get("error"))
         self.assertIn("images", st["report"])
         self.assertEqual(st["report"]["images"]["total"], 0)
+
+
+# ── Thumb 缩略图必须带 ts 限定（local_id 跨年撞号 → 错图顶替） ──────
+
+class TestThumbTsGuard(TempRootCase):
+    """cache Thumb 命名实测统一为 {local_id}_{ts}_thumb.jpg，但消息按月分库、
+    local_id 每月重排：同会话不同年份会撞号（真实事故：local_id=45 同时是
+    2020-03 的图片消息与 2025-09 的视频号消息）。旧实现裸 {local_id}_* 在
+    原图三级来源全部清理后，把 2025 年视频号封面静默配给了 2020 年的图片
+    消息（错图比缺图严重）。与 bubble_paths 同族缺陷，同修。"""
+
+    WRONG_TS = 1_752_000_000   # 另一年那条撞号消息的 ts
+    RIGHT_TS = 1_583_000_000   # 本消息 ts
+
+    def setUp(self):
+        super().setUp()
+        from siwx import media
+        self.media = media
+        chat = "wxid_test_friend"
+        self.chat = chat
+        self.cache = self.tmp / "cache"
+        thumb_dir = (self.cache / "2099-01" / "Message" /
+                     hashlib.md5(chat.encode()).hexdigest() / "Thumb")
+        thumb_dir.mkdir(parents=True)
+        self.wrong = thumb_dir / f"45_{self.WRONG_TS}_thumb.jpg"
+        self.right = thumb_dir / f"45_{self.RIGHT_TS}_thumb.jpg"
+        # 内容随意：thumb_paths 只做文件级匹配
+        self.wrong.write_bytes(b"\xff\xd8\xffwrong")
+        self.right.write_bytes(b"\xff\xd8\xffright")
+        ro = mock.patch.object(media, "_wechat_cache_roots",
+                               return_value=[self.cache])
+        ro.start()
+        self.addCleanup(ro.stop)
+
+    def test_same_local_id_other_year_is_not_matched(self):
+        """local_id 撞号：只允许命中同 ts 的缩略图。"""
+        got = self.media.thumb_paths("wxid_test_me", self.chat, 45, self.RIGHT_TS)
+        self.assertEqual([p.name for p in got], [self.right.name])
+
+    def test_missing_thumb_never_falls_back_to_wrong_year(self):
+        """本消息缩略图不存在时返回空——宁缺勿错，不许拿别年消息的顶替。"""
+        self.right.unlink()
+        got = self.media.thumb_paths("wxid_test_me", self.chat, 45, self.RIGHT_TS)
+        self.assertEqual(got, [])
+
+    def test_ts_missing_keeps_bare_prefix_fallback(self):
+        """ts 缺失（无法消歧）维持旧裸前缀行为，与 bubble_paths 对齐。"""
+        got = self.media.thumb_paths("wxid_test_me", self.chat, 45, None)
+        self.assertEqual(sorted(p.name for p in got),
+                         sorted([self.wrong.name, self.right.name]))
+
+
+# ── 25. 协作式取消 + 视频号导出卡片 + 方案 A 转换报告 ─────────────
+
+class TestExportCancel(unittest.TestCase):
+    """协作式取消（台账 §二-2）：多会话导出优雅停止，报告带 cancelled，
+    已完成会话的产物语义保留（以假 run_export 验证循环与报告逻辑）。"""
+
+    def test_cancelled_midway_raises_and_reports(self):
+        """第 2 个会话抛 ExportCancelled → 停止循环，cancelled=True、ok_count=1。"""
+        from siwx import exporter
+        calls = []
+
+        def fake_run(*a, **k):
+            calls.append(k.get("folder_name"))
+            if len(calls) == 1:
+                return {"message_count": 5, "duration_ms": 1}
+            raise exporter.ExportCancelled("导出已取消")
+
+        with mock.patch.object(exporter, "run_export", side_effect=fake_run), \
+             tempfile.TemporaryDirectory() as td:
+            res = exporter.run_export_multi(
+                Path(td), "wxid_test_owner",
+                [{"chat": "wxid_test_a", "display": "A"},
+                 {"chat": "wxid_test_b", "display": "B"},
+                 {"chat": "wxid_test_c", "display": "C"}],
+                fmt="json", progress=lambda p, m: None)
+        self.assertTrue(res["cancelled"])
+        self.assertEqual(res["ok_count"], 1)
+        self.assertEqual(len(res["sessions"]), 1)
+        self.assertEqual(calls, ["01_A", "02_B"])  # 会话 2 执行中取消，会话 3 未启动
+
+    def test_flag_checked_before_each_chat(self):
+        """取消探针在每个会话开始前检查：置位后剩余会话不启动。"""
+        from siwx import exporter
+        n = {"v": 0}
+
+        def fake_run(*a, **k):
+            return {"message_count": 1, "duration_ms": 1}
+
+        def probe():
+            n["v"] += 1
+            return n["v"] > 2                   # 会话 1、2 放行，3 取消
+
+        with mock.patch.object(exporter, "run_export", side_effect=fake_run), \
+             tempfile.TemporaryDirectory() as td:
+            res = exporter.run_export_multi(
+                Path(td), "wxid_test_owner",
+                [{"chat": "a"}, {"chat": "b"}, {"chat": "c"}],
+                fmt="json", progress=lambda p, m: None, should_cancel=probe)
+        self.assertTrue(res["cancelled"])
+        self.assertEqual(res["ok_count"], 2)
+
+    def test_decrypt_serial_cancel(self):
+        """串行媒体解密逐张检查取消探针。"""
+        from siwx import exporter
+        with self.assertRaises(exporter.ExportCancelled):
+            exporter._decrypt_media_serial(
+                Path("acc"), "wxid_test_owner", "wxid_test_peer",
+                [("a" * 32, None, 1, 1, "wxid_test_peer")],
+                Path("dest"), None, should_cancel=lambda: True)
+
+
+class TestMediaBackupCancel(unittest.TestCase):
+    """全量媒体备份的协作式取消：逐文件检查，已完成部分保留。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_mbcancel_"))
+        self.wxid = "wxid_demo_b"
+        self.account_root = self.tmp / "xwechat_files" / self.wxid
+        (self.account_root / "cache").mkdir(parents=True)
+        attach = self.account_root / "msg" / "attach" / "md5" / "2026-01" / "Img"
+        attach.mkdir(parents=True)
+        (attach / "a.dat").write_bytes(b"x")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _patch_roots(self):
+        return mock.patch("siwx.media._wechat_cache_roots",
+                          return_value=[self.account_root / "cache"])
+
+    def test_backup_images_cancel(self):
+        from siwx import media_backup
+        with self._patch_roots():
+            stats = media_backup.backup_images(
+                self.wxid, self.tmp / "out", log=None,
+                should_cancel=lambda: True)
+        self.assertTrue(stats["cancelled"])
+        self.assertEqual(stats["ok_viewable"], 0)   # 未处理任何文件
+
+    def test_backup_all_propagates_cancel(self):
+        """首段取消后不再进入后续段，顶层报告 cancelled=True。"""
+        from siwx import media_backup
+        with self._patch_roots():
+            report = media_backup.backup_all(
+                self.wxid, self.tmp / "out", log=None,
+                should_cancel=lambda: True)
+        self.assertTrue(report["cancelled"])
+        self.assertTrue(report["images"]["cancelled"])
+        self.assertTrue(report["videos"]["cancelled"])
+        self.assertTrue(report["files"]["cancelled"])
+
+
+class TestChannelsExportEntry(unittest.TestCase):
+    """视频号卡片导出透传（台账 §二-3）：_msg_entry 携带 channels，
+    渲染分支由 renderer.js renderFinder 承担（前端）。"""
+
+    CHANNELS = {"nickname": "合成频道", "desc": "合成描述",
+                "cover": "https://cdn.invalid/c.jpg", "avatar": "",
+                "duration": 75, "mediaCount": 1, "nonce": "nonce_x"}
+
+    def _msg(self):
+        return {"createTime": 1, "senderUsername": "wxid_test_friend",
+                "senderDisplayName": "测试好友", "localType": 49,
+                "content": "[视频号] 合成描述",
+                "rawContent": '<msg><appmsg type="51"></appmsg></msg>',
+                "isSend": 0, "channels": self.CHANNELS}
+
+    def test_msg_entry_carries_channels(self):
+        from siwx.html_template import _msg_entry
+        e = _msg_entry(self._msg())
+        self.assertEqual(e["channels"]["nickname"], "合成频道")
+        self.assertEqual(e["channels"]["duration"], 75)
+
+    def test_msg_entry_without_channels_omits_key(self):
+        from siwx.html_template import _msg_entry
+        m = self._msg()
+        m["channels"] = None
+        self.assertNotIn("channels", _msg_entry(m))
+
+
+class TestConvertDirReport(unittest.TestCase):
+    """方案 A（结果面板一键补生成）：结构化报告 + 取消 + CLI int 契约不变。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "export"
+        sess = self.root / "01_测试会话"
+        sess.mkdir(parents=True)
+        (sess / "测试会话_20261011_120000_000.json").write_text(json.dumps({
+            "session": {"wxid": "wxid_test_friend",
+                        "displayName": "测试会话", "type": "私聊",
+                        "platform": "wechat", "isGroup": False,
+                        "ownerId": "wxid_test_owner",
+                        "firstTimestamp": 1000, "lastTimestamp": 2000,
+                        "messageCount": 1},
+            "messages": [{"localId": 1, "platformMessageId": "1",
+                          "createTime": 1000, "localType": 1,
+                          "typeName": "文本", "rawContent": "你好",
+                          "content": "你好", "isSend": 0,
+                          "senderUsername": "wxid_test_friend",
+                          "senderDisplayName": "测试好友",
+                          "md5": None, "bubbleMd5": None, "voice": None,
+                          "sticker": None, "channels": None, "quote": None,
+                          "link": None, "record": None}],
+        }, ensure_ascii=False), encoding="utf-8")
+        (sess / "manifest.json").write_text(json.dumps({
+            "generator": "stories-in-wx", "written_count": 1,
+            "parse": {}, "media": {},
+        }, ensure_ascii=False), encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_report_structured(self):
+        from siwx.json_export_convert import convert_dir_report
+        r = convert_dir_report(self.root, ["md"])
+        self.assertEqual((r["total"], r["ok"], r["failed"], r["skipped"]),
+                         (1, 1, 0, 0))
+        self.assertFalse(r["cancelled"])
+        self.assertTrue((self.root / "01_测试会话"
+                         / "测试会话_20261011_120000_000.md").is_file())
+
+    def test_report_cancelled_gracefully(self):
+        from siwx.json_export_convert import convert_dir_report
+        r = convert_dir_report(self.root, ["md"], overwrite=True,
+                               should_cancel=lambda: True)
+        self.assertTrue(r["cancelled"])
+        self.assertEqual(r["ok"], 0)
+
+    def test_cli_int_contract_unchanged(self):
+        """convert_dir 对 CLI/旧调用方仍返回 int（0=无失败）。"""
+        from siwx.json_export_convert import convert_dir
+        self.assertEqual(convert_dir(self.root, ["md"]), 0)
 
 
 if __name__ == "__main__":

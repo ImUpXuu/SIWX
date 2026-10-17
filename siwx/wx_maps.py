@@ -45,10 +45,11 @@ def reset():
     _disabled_until = 0.0
 
 
-# 逐属性解析（与渲染器 xmlAttr 一致，不依赖 x/y 在 XML 里的先后顺序）
+# 逐属性解析（与渲染器 xmlAttr 一致，不依赖 x/y 在 XML 里的先后顺序；
+# 同样兼容旧版 "attr = value" 等号带空格的写法）
 # x=纬度、y=经度（微信 XML 约定）
 def _xml_attr(raw: str, tag: str, attr: str) -> str:
-    m = re.search(r'<%s\b[^>]*?\s%s="([^"]*)"' % (tag, attr), raw)
+    m = re.search(r'<%s\b[^>]*?\s%s\s*=\s*"([^"]*)"' % (tag, attr), raw)
     return m.group(1) if m else ""
 
 

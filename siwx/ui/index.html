@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#f6f6f4">
 <title>stories-in-wx</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%2307c160'/%3E%3Ctext%20x='32'%20y='44'%20font-size='36'%20text-anchor='middle'%20fill='%23ffffff'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/app.css?v=2026100623">
+<link rel="stylesheet" href="/app.css?v=2026101702">
 </head>
 <body>
 <div class="shell">
@@ -48,7 +48,40 @@
   <main id="view" class="view"></main>
 </div>
 <script src="/vendor/vue.global.prod.js?v=2026100101"></script>
-<script src="/common.js?v=2026100623"></script>
-<script src="/app.js?v=2026100623"></script>
+<script>
+/* 前端异常上报：必须在所有业务脚本之前挂载，启动期错误也能被抓到。
+ * 上报走 /api/logs/client → 后端结构化日志轨，日志页直接可见；
+ * 上报本身静默失败（后端不在时不能再生新错误）。限流：同文案 30s 内只报一次。 */
+(function () {
+  var last = {};
+  function send(kind, message, source, line, col, stack) {
+    try {
+      var now = Date.now();
+      if (last[message] && now - last[message] < 30000) return;
+      last[message] = now;
+      fetch('/api/logs/client', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          kind: kind, message: String(message).slice(0, 500),
+          source: source || '', line: line || 0, col: col || 0,
+          stack: stack || '', href: location.hash
+        })
+      }).catch(function () {});
+    } catch (e) { /* 上报失败绝不影响页面 */ }
+  }
+  window.addEventListener('error', function (e) {
+    if (e && e.message) send('error', e.message, e.filename, e.lineno, e.colno,
+                             e.error && e.error.stack);
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    var r = e && e.reason;
+    send('rejection', (r && r.message) || String(r), '',
+         0, 0, r && r.stack);
+  });
+})();
+</script>
+<script src="/common.js?v=2026101702"></script>
+<script src="/app.js?v=2026101702"></script>
 </body>
 </html>

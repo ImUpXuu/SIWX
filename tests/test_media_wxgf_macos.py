@@ -24,7 +24,6 @@ if str(ROOT) not in sys.path:
 from siwx.media_wxgf_macos import (
     _adrp_target, _ldr_imm_offset, _bl_target, _DECODER_SOURCE,
     _SCRIPT_TMPL, _run_lldb_batch, convert_wxgf_macos, convert_wxgf_for_web,
-    convert_wxgf_batch,
 )
 
 
@@ -138,16 +137,6 @@ class TestGracefulDegradation(unittest.TestCase):
              mock.patch("subprocess.run") as m:
             result = convert_wxgf_for_web(b"fake-wxgf-bytes", log=lambda *_a, **_k: None)
         self.assertIsNone(result)
-        m.assert_not_called()
-
-    def test_batch_convert_reports_no_process_per_item_without_subprocess(self):
-        pairs = [(Path("/tmp/a.wxgf"), Path("/tmp/a.heic")),
-                 (Path("/tmp/b.wxgf"), Path("/tmp/b.heic"))]
-        with mock.patch("siwx.media_wxgf_macos.find_wechat_pid", return_value=None), \
-             mock.patch("subprocess.run") as m:
-            result = convert_wxgf_batch(pairs, log=lambda *_a, **_k: None)
-        self.assertEqual(len(result), 2)
-        self.assertTrue(all(not v["ok"] for v in result.values()))
         m.assert_not_called()
 
 

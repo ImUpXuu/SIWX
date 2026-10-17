@@ -2,13 +2,23 @@
   <aside class="e-list">
     <div class="e-top">
       <input id="e-search" placeholder="搜索会话…" aria-label="搜索会话">
+      <div class="e-filter-chips" id="e-filter-chips">
+        <button class="chip on" type="button" data-f="all">全部</button>
+        <button class="chip" type="button" data-f="chat">好友</button>
+        <button class="chip" type="button" data-f="group">群聊</button>
+        <button class="chip" type="button" data-f="official">公众号</button>
+      </div>
       <label class="e-selall"><input type="checkbox" id="e-selall"> 全选</label>
     </div>
     <div id="e-sessions"></div>
   </aside>
   <section class="e-side">
     <div class="card">
-      <div class="card-head"><h2>导出配置</h2><span class="hint" id="e-hint">已选 0 个会话</span></div>
+      <div class="card-head">
+        <h2>导出配置</h2>
+        <span class="hint" id="e-hint">已选 0 个会话</span>
+        <button id="e-roster-btn" class="mini-btn" type="button">查看名单</button>
+      </div>
       <div id="e-range-banner" class="e-range-banner hidden"></div>
       <div class="f-grid2">
         <label>导出格式<div id="e-fmt"></div></label>
@@ -22,18 +32,55 @@
         <label class="f-chk"><input type="checkbox" id="e-media"> 媒体图片（按需解密）</label>
         <label class="f-chk"><input type="checkbox" id="e-voice"> 语音（转 WAV，失败保留 SILK）</label>
         <label class="f-chk"><input type="checkbox" id="e-ava"> 联系人头像</label>
+        <label class="f-chk"><input type="checkbox" id="e-noofficial" checked> 排除公众号</label>
       </div>
       <div class="g-nav"><button id="e-run" class="btn btn-primary" disabled>开始导出</button></div>
     </div>
 
     <div class="card hidden" id="e-progress-card">
       <div class="progress"><div class="bar" id="e-bar" style="width:0%"></div></div>
+      <div class="e-prog-row">
+        <div class="e-prog-text" id="e-prog-text"></div>
+        <button id="e-cancel" class="mini-btn hidden" type="button">取消任务</button>
+      </div>
     </div>
 
     <div class="card e-logcard">
-      <div class="card-head"><h2>运行日志</h2></div>
+      <div class="card-head"><h2>运行日志</h2>
+        <span class="e-log-actions">
+          <button id="e-log-pause" class="mini-btn" type="button" aria-pressed="false">暂停</button>
+          <button id="e-log-copy" class="mini-btn" type="button">复制日志</button>
+        </span>
+      </div>
       <div class="console" id="e-log"></div>
       <div id="e-result"></div>
     </div>
   </section>
+</div>
+
+<div class="e-modal hidden" id="e-roster-modal" role="dialog" aria-modal="true" aria-labelledby="e-roster-title">
+  <div class="e-modal-card">
+    <div class="e-modal-head">
+      <b id="e-roster-title">导出名单</b>
+      <button id="e-roster-close" class="mini-btn" aria-label="关闭">×</button>
+    </div>
+    <div class="e-modal-toolbar">
+      <input id="e-roster-re" placeholder="排除正则（忽略大小写）：命中的昵称或微信号不导出，如 ^微信支付|^文件传输助手">
+      <div class="e-roster-tools">
+        <div class="e-roster-chips" id="e-roster-chips">
+          <button class="chip on" type="button" data-f="all">全部</button>
+          <button class="chip" type="button" data-f="in">将导出</button>
+          <button class="chip" type="button" data-f="ex">被排除</button>
+        </div>
+        <input id="e-roster-search" placeholder="名单内搜索…">
+        <button id="e-roster-reset" class="mini-btn" type="button" title="清掉所有手动勾选，恢复正则与公众号开关的默认判定">重置手动勾选</button>
+      </div>
+      <span class="hint" id="e-roster-hint"></span>
+    </div>
+    <div class="e-modal-body" id="e-roster-list"></div>
+    <div class="e-modal-foot">
+      <span class="hint" id="e-roster-count"></span>
+      <button id="e-roster-copy" class="btn btn-primary" type="button">复制整个名单</button>
+    </div>
+  </div>
 </div>

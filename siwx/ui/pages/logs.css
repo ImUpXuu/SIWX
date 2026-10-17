@@ -2,6 +2,10 @@
    日志级别的语义色（ok/warn/err）由全局 app.css 提供，这里只管布局。 */
 .logs { max-width: 980px; margin: 0 auto; }
 .log-actions { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.log-filter { min-height: 32px; padding: 4px 8px; font-size: 12.5px; }
+#log-text { width: 160px; }
+.log-actions .btn, .log-actions .chk { flex: none; }
+#log-download { text-decoration: none; display: inline-flex; align-items: center; }
 .log-actions .chk { font-size: 12.5px; color: var(--muted); cursor: pointer; margin-left: auto; display: flex; align-items: center; gap: 6px; user-select: none; }
 #log-box { height: calc(100vh - 210px); max-height: 640px; min-height: 260px; }
 @media (max-width: 640px) {
