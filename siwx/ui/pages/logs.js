@@ -109,6 +109,33 @@ export async function init() {
       if (box) box.scrollTop = box.scrollHeight;
     }
   });
+  // 粗略/精细切换（此前是静态文案）：读写 /api/logs/settings，落盘口径不变，
+  // 只改日志页展示——粗略隐藏 DEBUG 行（服务端 _merged_logs 同口径过滤）
+  el("log-mode")?.addEventListener("click", async () => {
+    const b = el("log-mode");
+    const next = b.textContent.trim() === "粗略模式" ? "detailed" : "rough";
+    b.disabled = true;
+    try {
+      const r = await fetchJSON("/api/logs/settings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ level: next }),
+      });
+      b.textContent = r.level === "detailed" ? "精细模式" : "粗略模式";
+      lastSig = "";         // 口径变了，强制重渲染
+      await poll();
+    } catch (e) {
+      toast("切换失败：" + e.message, true);
+    } finally {
+      b.disabled = false;
+    }
+  });
+  // 初始状态对齐服务端持久化的口径
+  try {
+    const s = await fetchJSON("/api/logs/settings");
+    const b = el("log-mode");
+    if (b) b.textContent = s.level === "detailed" ? "精细模式" : "粗略模式";
+  } catch (_) { /* 保持默认文案 */ }
   await poll();
   pollTimer = setInterval(poll, 1000);
 }

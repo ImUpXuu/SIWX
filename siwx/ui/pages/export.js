@@ -39,6 +39,9 @@ let logPaused = false;
 let lastLogs = [];
 // 本次运行的勾选/排除回显（页面刷新后丢失，仅当次会话展示）
 let lastRunStats = null;
+// 最近一次导出/转换的目录与模板：结果面板"补生成格式"（方案 A）要用
+let lastExportDir = null;
+let lastTemplate = '';
 // 头像 404 标记：失败过的头像不再反复请求（与聊天页同一策略）
 const avaFailed = new Set();
 
@@ -437,6 +440,7 @@ async function init() {
     b.setAttribute('aria-pressed', String(logPaused));
     if (!logPaused) renderLogs(lastLogs);
   });
+  el('e-cancel').addEventListener('click', requestCancel);
   el('e-log-copy').addEventListener('click', async () => {
     const text = lastLogs.map(entry => entry.length >= 4 ? entry[3] : entry[1]).join('\n');
     if (!text) { toast('日志为空', true); return; }
@@ -553,6 +557,67 @@ function updateCount() {
   renderRangeBanner();
 }
 
+function resetCancelButton() {
+  const b = el('e-cancel');
+  b.classList.remove('hidden');
+  b.disabled = false;
+  b.textContent = '取消任务';
+}
+
+/** 协作式取消：请求受理后等任务走到最近检查点才真正停止（优雅停止，
+ *  已完成会话保留）。409 = 任务刚好结束，无需处理。 */
+async function requestCancel() {
+  const b = el('e-cancel');
+  b.disabled = true;
+  b.textContent = '正在取消…';
+  try {
+    const r = await fetch('/api/job/cancel', { method: 'POST' });
+    if (r.status === 409) { resetCancelButton(); return; }
+    if (!r.ok) throw new Error('取消请求失败');
+  } catch (e) {
+    // 网络失败不回弹按钮：轮询很快会给终局，按钮随终局一起收起
+    toast(`取消请求失败：${e.message}`, true);
+  }
+}
+
+/** 方案 A：对最近一次 JSON 导出目录就地补生成格式（不重跑解密）。 */
+async function runConvert(formats, overwrite = false) {
+  if (running || !lastExportDir) return;
+  running = true;
+  updateCount();
+  el('e-log').innerHTML = '';
+  el('e-result').innerHTML = '';
+  el('e-progress-card').classList.remove('hidden');
+  el('e-bar').style.width = '0%';
+  el('e-prog-text').textContent = '准备补生成…';
+  resetCancelButton();
+  const body = {
+    mode: 'convert',
+    export_opts: {
+      dir: lastExportDir,
+      formats,
+      overwrite,
+      template: lastTemplate || undefined,
+    },
+  };
+  try {
+    const r = await fetch('/api/run', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.status === 409) throw new Error('已有任务在运行');
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      throw new Error(j.error || '启动失败');
+    }
+    poll();
+  } catch (e) {
+    running = false;
+    updateCount();
+    if (!gone()) el('e-log').innerHTML = `<div class="log-line err">${esc(e.message)}</div>`;
+  }
+}
+
 async function run() {
   if (running || !selected.size) return;
   const fmts = Array.isArray(fmtDrop.value) ? fmtDrop.value : [fmtDrop.value];
@@ -588,11 +653,13 @@ async function run() {
   };
   running = true;
   updateCount();
+  lastTemplate = tplDrop.value || '';
   el('e-log').innerHTML = '';
   el('e-result').innerHTML = '';
   el('e-progress-card').classList.remove('hidden');
   el('e-bar').style.width = '0%';
   el('e-prog-text').textContent = '准备中…';
+  resetCancelButton();
   try {
     const r = await fetch('/api/run', {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -627,11 +694,13 @@ function poll() {
         pollTimer = null;
         running = false;
         updateCount();
+        el('e-cancel').classList.add('hidden');
         el('e-bar').style.width = '100%';
         const card = el('e-progress-card');
         setTimeout(() => { if (card.isConnected) card.classList.add('hidden'); }, 600);
         renderResult(job);
-        if (job.ok) toast('导出完成');
+        const kind = job.report && job.report.kind;
+        if (job.ok) toast(kind === 'convert' ? '格式补生成完成' : '导出完成');
         else toast(job.error || '导出失败', true);
       }
     } catch (e) {
@@ -751,6 +820,30 @@ function renderResult(job) {
     return;
   }
   const r = job.report || {};
+  if (r.kind === 'convert') {
+    // 方案 A 结果：转换摘要 + 继续补其他格式/覆盖重跑的入口
+    lastExportDir = r.dir || lastExportDir;
+    const st = r.cancelled
+      ? `<div class="res-row res-part">⏹ 已取消：本次补生成 ${r.ok} 个会话（已完成部分保留）</div>`
+      : `<div class="res-row ${r.failed ? 'res-part' : 'res-ok'}">` +
+        `✔ 补生成完成：${r.ok}/${r.total} 个会话` +
+        (r.skipped ? `，已有跳过 ${r.skipped}` : '') +
+        (r.failed ? `，失败 ${r.failed}` : '') + '</div>';
+    lines.push(st);
+    if (r.missing_media) {
+      lines.push(`<div class="res-meta res-part">⚠ 媒体引用缺失 ${r.missing_media} 处（导出时未下载成功或目录被改动），对应位置会显示占位</div>`);
+    }
+    if (r.failed) {
+      lines.push(`<div class="res-actions"><a class="btn" href="#" data-convert="md,html" data-convert-ow="1">↻ 覆盖重跑（含失败会话）</a></div>`);
+    }
+    lines.push(convertActionsHtml(['md', 'html']));
+    lines.push(`<details class="res-logs-detail"><summary>运行日志（${logs.length} 条）</summary>`);
+    lines.push(logLines(logs, 'dim'));
+    lines.push('</details>');
+    box.innerHTML = lines.join('');
+    bindResultActions(box);
+    return;
+  }
   if (!r.sessions) {
     // 任务完成了却没有 report：多半是后端异常或任务被别的操作打断，重试可直接再来一次
     lines.push(`<div class="res-row res-err">⚠️ 无导出结果</div>`);
@@ -764,16 +857,25 @@ function renderResult(job) {
   }
   const failed = r.sessions.filter(s => s.error);
   const dur = ((r.duration_ms || 0) / 1000).toFixed(1);
-  lines.push(`<div class="res-row ${failed.length ? 'res-part' : 'res-ok'}">` +
-    `✔ 导出完成：${r.ok_count}/${r.sessions.length} 个会话` +
+  lastExportDir = r.total_dir || lastExportDir;
+  lines.push(`<div class="res-row ${r.cancelled ? 'res-part' : (failed.length ? 'res-part' : 'res-ok')}">` +
+    (r.cancelled ? '⏹ 已取消：' : '✔ 导出完成：') +
+    `${r.ok_count}/${r.sessions.length} 个会话` +
     (failed.length ? `（${failed.length} 个失败）` : '') +
-    `，共 ${r.message_count} 条消息，图片 ${r.image_count || 0}，语音 ${r.voice_count || 0}，头像 ${r.avatar_count}（${dur}s）</div>`);
+    `，共 ${r.message_count} 条消息，图片 ${r.image_count || 0}，语音 ${r.voice_count || 0}，头像 ${r.avatar_count}（${dur}s）` +
+    (r.cancelled ? '（已完成部分的产物保留）' : '') + '</div>');
   if (echo) lines.push(echo);
   if (r.total_dir) {
     lines.push(`<div class="res-meta">目录：<span class="mono">${esc(r.total_dir)}</span></div>`);
     // 路径只放 data 属性，点击时再从 dataset 读取——内联 onclick 拼
     // Windows 路径会被 JS 转义吃掉反斜杠（D:\x → D:x），后端必然拒绝
     lines.push(`<div class="res-actions"><a class="btn" href="#" data-open-path="${esc(r.total_dir)}">📂 打开目录</a></div>`);
+  }
+  // 方案 A：本次导出含 JSON 时，结果面板可就地补生成 Markdown/HTML
+  // （转换器吃的是会话 JSON；不含 JSON 的导出没有可转换对象，不显示）
+  const fmts = Array.isArray(r.format) ? r.format : [r.format];
+  if (r.total_dir && fmts.some(f => String(f).toLowerCase() === 'json')) {
+    lines.push(convertActionsHtml(['md', 'html']));
   }
   if (r.zip) {
     lines.push(`<div class="res-actions"><a class="btn" href="/api/export/download?path=${encodeURIComponent(r.zip)}">📥 下载整体 ZIP${r.zip_size ? `（${fmtSize(r.zip_size)}）` : ''}</a></div>`);
@@ -802,9 +904,24 @@ function renderResult(job) {
 
 /** 结果框里的按钮：重试（失败路径）、打开目录（只读 dataset，避免路径被
  *  JS 转义吃掉反斜杠）、失败信息一键复制 */
+/** 方案 A 入口按钮组：从当前导出目录补生成 Markdown / HTML */
+function convertActionsHtml(formats) {
+  const btns = formats.map(f =>
+    `<a class="btn" href="#" data-convert="${f}">${f === 'md' ? '📝 补生成 Markdown' : '🌐 补生成 HTML'}</a>`
+  ).join('');
+  return `<div class="res-actions">${btns}` +
+    `<a class="btn" href="#" data-convert="md,html" data-convert-ow="1">↻ 覆盖重跑两种</a></div>`;
+}
+
 function bindResultActions(box) {
   box.querySelectorAll('[data-retry]').forEach(a => {
     a.addEventListener('click', (ev) => { ev.preventDefault(); run(); });
+  });
+  box.querySelectorAll('[data-convert]').forEach(a => {
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      runConvert(a.dataset.convert.split(','), a.dataset.convertOw === '1');
+    });
   });
   box.querySelectorAll('[data-open-path]').forEach(a => {
     a.addEventListener('click', (ev) => {

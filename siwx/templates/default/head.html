@@ -208,6 +208,20 @@ button.type-tag{font:inherit}
 /* issue #31：合并转发子项里的图片与嵌套记录 */
 .msg-record-img{max-width:120px;max-height:120px;border-radius:6px;display:block;margin:3px 0}
 .msg-record-nested .msg-record{max-width:none;margin:4px 0 0}
+/* 视频号卡片（type=51）：与聊天页同口径；封面直链过期裂图由渲染器隐藏 */
+.finder-card{max-width:280px;border:1px solid var(--border);border-radius:10px;
+             overflow:hidden;background:var(--media-bg)}
+.finder-cover{position:relative;display:block;background:#000;min-height:60px}
+.finder-cover img{display:block;max-width:100%;max-height:300px;margin:0 auto}
+.finder-play{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+             font-size:34px;color:rgba(255,255,255,.88);
+             text-shadow:0 1px 6px rgba(0,0,0,.55);pointer-events:none}
+.finder-dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.55);color:#fff;
+            font-size:11px;padding:1px 6px;border-radius:4px}
+.finder-body{padding:8px 10px}
+.finder-desc{font-size:13px;white-space:pre-line;word-break:break-word}
+.finder-author{font-size:11px;color:var(--sub);margin-top:4px}
+.finder-ava{width:18px;height:18px;border-radius:4px;vertical-align:-4px;margin-right:4px}
 .wx-transfer .wx-card-left{background:rgba(255,255,255,.2);color:#fff}
 .chat-footer{background:var(--bg);text-align:center;padding:10px;font-size:12px;
              color:var(--sub);border-top:1px solid var(--border);flex-shrink:0}

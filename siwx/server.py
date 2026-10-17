@@ -159,6 +159,9 @@ _lock = threading.Lock()
 _job = {"running": False, "mode": None, "done": False, "ok": False,
         "logs": [], "report": None, "error": None,
         "progress": {"pct": 0, "msg": ""}}
+# 协作式取消：/api/job/cancel 置位，任务循环在各检查点轮询。优雅停止——
+# 已完成会话/文件的产物保留，报告带 cancelled=True，与失败（error）区分。
+_cancel_event = threading.Event()
 _LOG_RING: list = []          # 环形日志缓冲（供日志页展示）
 _LOG_RING_MAX = 2000
 
@@ -328,6 +331,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 _log(f"[job] 收割完成, 预置 {len(preset)} 个密钥")
             accounts = []
             for wxid, db in dirs:
+                if _cancel_event.is_set():
+                    _log("[job] 已按用户请求取消：剩余账号跳过")
+                    break
                 _log(f"[job] 提取账号 {wxid}…")
                 accounts.append(extract.extract_keys_for_dir(
                     db, _log, preset=preset,
@@ -342,6 +348,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _log(f"[job] 解密输出目录: {out_root}")
             accounts = []
             for wxid, db in dirs:
+                if _cancel_event.is_set():
+                    _log("[job] 已按用户请求取消：剩余账号跳过")
+                    break
                 _log(f"[job] 解密账号 {wxid}…")
                 accounts.append({"wxid": wxid,
                                  "decrypt": extract.decrypt_dir(
@@ -357,6 +366,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _log(f"[job] 全自动: 输出目录={out_root}")
             accounts = []
             for wxid, db in dirs:
+                if _cancel_event.is_set():
+                    _log("[job] 已按用户请求取消：剩余账号跳过")
+                    break
                 _log(f"[job] 账号 {wxid}: 提取密钥…")
                 rep = extract.extract_keys_for_dir(db, _log)
                 _log(f"[job] 账号 {wxid}: 密钥 {rep['verified']}/{rep['total_salts']}")
@@ -376,6 +388,9 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             if not dirs:
                 raise RuntimeError("未找到微信数据目录")
             for wxid, db in dirs:
+                if _cancel_event.is_set():
+                    _log("[sync] 已按用户请求取消：剩余账号跳过")
+                    break
                 _log(f"[sync] 同步 {wxid}…")
                 entries = collect_db_files(db)
                 rep = extract.extract_keys_for_dir(db, _log,
@@ -431,14 +446,61 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 export_root=_paths.exports_root(),
                 pack=data.get("pack", "folder"),
                 template=data.get("template"),
-                progress=_export_progress)
-            _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
-                 f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"
-                 f"耗时 {res.get('duration_ms', 0)}ms")
+                progress=_export_progress,
+                should_cancel=_cancel_event.is_set)
+            if res.get("cancelled"):
+                _log(f"[export] 已按用户请求取消：完成 {res.get('ok_count', 0)} 个会话，"
+                     f"已完成部分的产物保留在 {res.get('total_dir', '')}")
+            else:
+                _log(f"[export] 全部完成：{res.get('ok_count', 0)}/{len(chats)} 个会话，"
+                     f"消息 {res.get('message_count', 0)}，媒体 {res.get('media_count', 0)}，"
+                     f"耗时 {res.get('duration_ms', 0)}ms")
             report = {"kind": "export", **res}
+
+        elif mode == "convert":
+            # 方案 A：对已有 JSON 导出目录就地补生成 Markdown/HTML（不重跑解密）。
+            # 目录来自请求体，必须位于导出根目录内（防任意目录读/写原语）。
+            from siwx import json_export_convert
+            data = export_opts or {}
+            d = str(data.get("dir") or "")
+            if not d or not validate.within(d, _paths.exports_root()):
+                raise RuntimeError("convert 目录无效（必须位于导出根目录内）")
+            root = Path(d)
+            if not root.is_dir():
+                raise RuntimeError(f"导出目录不存在: {d}")
+            formats = [str(f).strip().lower()
+                       for f in (data.get("formats") or ["md", "html"])]
+            formats = [f for f in formats if f in ("md", "html")]
+            if not formats:
+                raise RuntimeError("formats 里没有受支持的格式（md/html）")
+            _log(f"[convert] 目录={root.name} 格式={','.join(formats)} "
+                 f"overwrite={bool(data.get('overwrite'))}")
+
+            def _convert_progress(done, total, msg):
+                pct = int(done * 100 / total) if total else 0
+                with _lock:
+                    _job["progress"] = {"pct": pct, "msg": str(msg or "")}
+                _log(f"[convert] {done}/{total} {msg or ''}")
+
+            stats = json_export_convert.convert_dir_report(
+                root, formats,
+                template=data.get("template"),
+                overwrite=bool(data.get("overwrite")),
+                log=_log, progress=_convert_progress,
+                should_cancel=_cancel_event.is_set)
+            if stats.get("cancelled"):
+                _log("[convert] 已按用户请求取消：已完成会话的产物保留")
+            report = {"kind": "convert", "dir": d, "formats": formats, **stats}
 
         else:
             raise RuntimeError(f"未知模式: {mode}")
+
+        if _cancel_event.is_set() and isinstance(report, dict) \
+                and not report.get("cancelled"):
+            # keys/decrypt/auto/sync 在账号循环中途取消会走到这里：
+            # 部分结果保留，显式标注 cancelled，前端按"已取消"而非失败呈现
+            report = dict(report, cancelled=True)
+            _log("[job] 任务已取消（已完成部分保留）")
 
         with _lock:
             _job["ok"] = True
@@ -465,6 +527,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         with _lock:
             _job["running"] = False
             _job["done"] = True
+        _cancel_event.clear()
         log.detailed("server", f"[{jid}] job 状态: running=False mode={mode} done=True")
         log.set_job_id("")  # 线程归还线程池/复用前清掉，防跨任务串 ID
 
@@ -690,6 +753,7 @@ def run():
     jid = _next_job_id()
     log.detailed("server", f"[{jid}] job 状态: running=True "
                            f"mode={data.get('mode', '')} done=False")
+    _cancel_event.clear()
     args = (data.get("mode", ""), data.get("db_dir"), data.get("out_dir"),
             bool(data.get("no_cache")), data.get("workers"),
             data.get("export_opts") or {}, jid)
@@ -960,8 +1024,24 @@ def api_job():
         })
 
 
+@app.post("/api/job/cancel")
+def api_job_cancel():
+    """协作式取消当前任务。优雅停止：各检查点轮询，已完成部分保留。
+
+    响应 cancelling=True 只代表"取消请求已受理"，实际停止要等任务线程
+    走到最近的检查点（媒体解密一批之后、当前会话结束/下一会话开始前）。
+    无运行中任务时返回 409，前端据此置灰按钮。"""
+    with _lock:
+        if not _job["running"]:
+            return jsonify({"cancelling": False, "error": "当前没有运行中的任务"}), 409
+    _cancel_event.set()
+    _log(f"[{_job.get('mode')}] 收到取消请求——等待当前步骤收尾后停止（已完成部分保留）")
+    return jsonify({"cancelling": True})
+
+
 # ── 全量媒体备份（media_backup.py，设置页入口）───────────────────
 _backup_lock = threading.Lock()
+_backup_cancel = threading.Event()
 _backup_job = {"running": False, "done": False, "ok": False, "account": None,
                "out_dir": None, "logs": [], "report": None, "error": None}
 
@@ -969,10 +1049,14 @@ _backup_job = {"running": False, "done": False, "ok": False, "account": None,
 def _run_media_backup(account: str, out_dir, jlog):
     from siwx import media_backup
     try:
-        report = media_backup.backup_all(account, out_dir, log=jlog)
+        report = media_backup.backup_all(account, out_dir, log=jlog,
+                                         should_cancel=_backup_cancel.is_set)
         _backup_job["report"] = report
         _backup_job["ok"] = True
-        jlog("备份完成")
+        if report.get("cancelled"):
+            jlog("备份已取消（已完成部分保留）")
+        else:
+            jlog("备份完成")
     except Exception as e:
         _backup_job["ok"] = False
         _backup_job["error"] = f"{type(e).__name__}: {e}"
@@ -980,6 +1064,7 @@ def _run_media_backup(account: str, out_dir, jlog):
     finally:
         _backup_job["running"] = False
         _backup_job["done"] = True
+        _backup_cancel.clear()
 
 
 @app.post("/api/media/backup/start")
@@ -999,6 +1084,7 @@ def api_media_backup_start():
         _backup_job.update({"running": True, "done": False, "ok": False,
                             "account": account, "out_dir": str(out_dir),
                             "logs": [], "report": None, "error": None})
+    _backup_cancel.clear()
 
     def jlog(msg):
         _backup_job["logs"].append(str(msg))
@@ -1008,6 +1094,17 @@ def api_media_backup_start():
     threading.Thread(target=_run_media_backup, args=(account, out_dir, jlog),
                      daemon=True).start()
     return jsonify({"started": True, "out_dir": str(out_dir)})
+
+
+@app.post("/api/media/backup/cancel")
+def api_media_backup_cancel():
+    """协作式取消全量媒体备份（逐文件检查点，已完成文件保留）。"""
+    with _backup_lock:
+        if not _backup_job["running"]:
+            return jsonify({"cancelling": False, "error": "当前没有运行中的备份"}), 409
+    _backup_cancel.set()
+    _backup_job["logs"].append("收到取消请求——当前文件处理完后停止（已完成部分保留）")
+    return jsonify({"cancelling": True})
 
 
 @app.get("/api/media/backup/status")

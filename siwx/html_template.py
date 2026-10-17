@@ -111,6 +111,10 @@ def _msg_entry(m):
     # 由 export_stream.parse_quote_or_link 预解析（全量原文，不受截断影响）
     if m.get("record"):
         entry["record"] = m["record"]
+    # 视频号卡片（appmsg type=51 finderFeed）：作者/描述/封面/时长，
+    # 与聊天页同口径；cover/avatar 是腾讯 CDN 公网直链，过期裂图不碍文字
+    if m.get("channels"):
+        entry["channels"] = m["channels"]
     return entry
 
 

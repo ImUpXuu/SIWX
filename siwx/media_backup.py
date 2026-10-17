@@ -37,13 +37,17 @@ def _account_root(wxid_full: str) -> Path | None:
     return roots[0].parent
 
 
-def backup_images(wxid_full: str, out_dir: Path, log=print) -> dict:
+def backup_images(wxid_full: str, out_dir: Path, log=print,
+                  should_cancel=None) -> dict:
     """解密 msg/attach 下全部 .dat → out_dir，保留原有目录结构（便于溯源）。
 
     两段式：第一遍只做解密分类，wxgf 格式先原样写出（不在逐文件循环里
     转码——macOS 的转码要附加到活的微信进程，每张图单独 attach/detach
     对几千张图片来说慢到不可用）；第二遍对所有 wxgf 一次性批量转码
     （同一次 attach 会话处理一批，开销只摊销一次）。
+
+    should_cancel：协作式取消探针，逐文件检查；触发时返回已完成部分，
+    统计带 cancelled=True（已写出的文件保留，不算失败）。
 
     返回统计：total / ok_viewable（可直接预览的格式，含转码成功的 wxgf）/
     ok_wxgf_preserved（转码失败或当前平台不支持，原始 wxgf 字节原样保留，
@@ -63,6 +67,12 @@ def backup_images(wxid_full: str, out_dir: Path, log=print) -> dict:
     stats["total"] = len(files)
     wxgf_pending = []  # [(待转码文件路径, 最终 heic 路径)]
     for i, f in enumerate(files):
+        if should_cancel is not None and should_cancel():
+            stats["cancelled"] = True
+            if log:
+                log(f"[media_backup] 图片备份已取消（处理到 {i}/{len(files)}，"
+                    f"已写出的文件保留）")
+            break
         try:
             data = f.read_bytes()
             body, ctype = media._decrypt_any(data, wxid_full)
@@ -148,7 +158,8 @@ def _convert_pending_wxgf(pending: list, stats: dict, log) -> None:
     log(f"[media_backup] wxgf 转码完成: {converted}/{len(pending)}")
 
 
-def backup_videos(wxid_full: str, out_dir: Path, log=print) -> dict:
+def backup_videos(wxid_full: str, out_dir: Path, log=print,
+                  should_cancel=None) -> dict:
     """复制 msg/video 下全部 .mp4（未加密）→ out_dir，保留原有目录结构。
 
     Bug 修复：shutil.copy2() 连元数据一起复制，而微信自己落盘的源视频文件
@@ -172,6 +183,11 @@ def backup_videos(wxid_full: str, out_dir: Path, log=print) -> dict:
     files = list(video_root.rglob("*.mp4"))
     stats["total"] = len(files)
     for i, f in enumerate(files):
+        if should_cancel is not None and should_cancel():
+            stats["cancelled"] = True
+            if log:
+                log(f"[media_backup] 视频备份已取消（处理到 {i}/{len(files)}）")
+            break
         try:
             rel = f.relative_to(video_root)
             dst = out_dir / rel
@@ -192,7 +208,8 @@ def backup_videos(wxid_full: str, out_dir: Path, log=print) -> dict:
     return stats
 
 
-def backup_files(wxid_full: str, out_dir: Path, log=print) -> dict:
+def backup_files(wxid_full: str, out_dir: Path, log=print,
+                 should_cancel=None) -> dict:
     """复制 msg/file 下全部文件消息附件（未加密，原文件名/扩展名原样
     保留——实测 PDF/APK/PNG 等头部签名完好）→ out_dir，保留原有目录结构。
 
@@ -214,6 +231,11 @@ def backup_files(wxid_full: str, out_dir: Path, log=print) -> dict:
     files = [f for f in file_root.rglob("*") if f.is_file() and not f.name.startswith(".")]
     stats["total"] = len(files)
     for i, f in enumerate(files):
+        if should_cancel is not None and should_cancel():
+            stats["cancelled"] = True
+            if log:
+                log(f"[media_backup] 文件备份已取消（处理到 {i}/{len(files)}）")
+            break
         try:
             rel = f.relative_to(file_root)
             dst = out_dir / rel
@@ -234,9 +256,27 @@ def backup_files(wxid_full: str, out_dir: Path, log=print) -> dict:
     return stats
 
 
-def backup_all(wxid_full: str, out_dir: Path, log=print) -> dict:
-    """images/ + videos/ + files/ 一次性全量备份，返回合并统计。"""
-    img_stats = backup_images(wxid_full, out_dir / "images", log=log)
-    vid_stats = backup_videos(wxid_full, out_dir / "videos", log=log)
-    file_stats = backup_files(wxid_full, out_dir / "files", log=log)
-    return {"images": img_stats, "videos": vid_stats, "files": file_stats}
+def backup_all(wxid_full: str, out_dir: Path, log=print,
+               should_cancel=None) -> dict:
+    """images/ + videos/ + files/ 一次性全量备份，返回合并统计。
+
+    should_cancel：协作式取消探针，逐段/逐文件检查；取消返回已完成段，
+    各段统计带 cancelled=True。"""
+    img_stats = backup_images(wxid_full, out_dir / "images", log=log,
+                              should_cancel=should_cancel)
+    if not img_stats.get("cancelled"):
+        vid_stats = backup_videos(wxid_full, out_dir / "videos", log=log,
+                                  should_cancel=should_cancel)
+    else:
+        vid_stats = {"total": 0, "ok": 0, "skipped": 0, "failed": 0,
+                     "bytes_written": 0, "failures": [], "cancelled": True}
+    if not vid_stats.get("cancelled"):
+        file_stats = backup_files(wxid_full, out_dir / "files", log=log,
+                                  should_cancel=should_cancel)
+    else:
+        file_stats = {"total": 0, "ok": 0, "skipped": 0, "failed": 0,
+                      "bytes_written": 0, "failures": [], "cancelled": True}
+    return {"images": img_stats, "videos": vid_stats, "files": file_stats,
+            "cancelled": bool(img_stats.get("cancelled")
+                              or vid_stats.get("cancelled")
+                              or file_stats.get("cancelled"))}

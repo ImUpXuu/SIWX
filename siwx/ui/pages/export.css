@@ -110,7 +110,10 @@
 .f-chk { font-size: 13px; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px; }
 .f-chk input { width: 15px; height: 15px; accent-color: var(--accent); }
 .g-nav { margin-top: 16px; }
-.e-logcard { flex: 1; min-height: 190px; display: flex; flex-direction: column; }
+/* 日志卡溢出修复：flex:1 + 固定 min-height 在 overflow-y 容器内会把卡片
+   撑破圆角边框——收缩下限交给 .console 的 min-height 承担，卡片本身允许
+   收缩并裁剪溢出（台账 §二-1，2026-10-17 实机截图复现） */
+.e-logcard { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 .e-logcard .console { flex: 1; min-height: 130px; max-height: 360px; }
 .e-log-actions { display: flex; gap: 8px; }
 /* 进度条文字行 */
@@ -118,6 +121,9 @@
   margin-top: 8px; font-size: 12.5px; color: var(--muted);
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
+/* 进度行：文字 + 取消按钮两端对齐 */
+.e-prog-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.e-prog-row .e-prog-text { flex: 1; min-width: 0; }
 #e-result { margin-top: 12px; }
 .res-row { font-size: 13px; font-weight: 700; padding: 6px 0; }
 .res-ok { color: var(--accent-fg); }

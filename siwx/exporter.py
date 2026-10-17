@@ -32,6 +32,13 @@ EXPORT_VERSION = "1.0"
 # 语音媒体在组合键 media_map 里的槽位前缀（与图片槽位隔离）
 _VOICE_KEY = "\x00voice"
 
+
+class ExportCancelled(Exception):
+    """协作式取消：should_cancel() 返回 True 时在最近的检查点抛出。
+
+    取消是优雅停止：已完成会话的产物保留，报告带 cancelled=True；
+    与异常失败（error 项）严格区分。"""
+
 # 兜底文案精确集合（P2 修复）：判定"content 恰好等于兜底标签原文"才算兜底。
 # 此前用 startswith 前缀匹配——合法解析成功的链接卡是 "[链接] 标题"、
 # 转账是 "[转账] 标题"、合并转发是 "[聊天记录] 标题（N 条…）"，全部被误计
@@ -252,12 +259,14 @@ def _log_media_failures(kind: str, failures: list, total: int) -> None:
                         ring=False)
 
 
-def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=None):
+def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=None,
+                            should_cancel=None):
     """并行解密媒体图片。CPU 密集型 AES → 多进程池。
 
     images 每项是 (md5, bubble_md5, local_id, ts, msg_chat)——msg_chat 是该
     媒体所属的会话（顶层消息就是 chat；合并转发子项可能是原始消息所在的
     另一个会话，issue #31），attach/Bubble/Thumb 三级来源都按它定位。
+    should_cancel：协作式取消探针，在结果消费循环里逐批检查。
     """
     dest.mkdir(parents=True, exist_ok=True)
     if not images:
@@ -277,7 +286,8 @@ def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=N
     n = min(os.cpu_count() or 4, len(tasks), 8)
     if n <= 1:
         # 串行兜底
-        return _decrypt_media_serial(acc_out_dir, account, chat, images, dest, progress)
+        return _decrypt_media_serial(acc_out_dir, account, chat, images, dest,
+                                     progress, should_cancel=should_cancel)
 
     from multiprocessing import Pool
 
@@ -285,6 +295,9 @@ def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=N
     failures = []
     with Pool(n) as pool:
         for i, result in enumerate(pool.imap_unordered(_decrypt_one, tasks)):
+            if should_cancel is not None and should_cancel():
+                pool.terminate()
+                raise ExportCancelled("媒体解密已取消")
             key, rel_path, ok, reason = result
             if ok:
                 media_map[key] = rel_path
@@ -298,11 +311,14 @@ def _decrypt_media_parallel(acc_out_dir, account, chat, images, dest, progress=N
     return media_map
 
 
-def _decrypt_media_serial(acc_out_dir, account, chat, images, dest, progress=None):
+def _decrypt_media_serial(acc_out_dir, account, chat, images, dest, progress=None,
+                          should_cancel=None):
     """串行解密（单核兜底）。"""
     media_map = {}
     failures = []
     for i, (md5, bubble_md5, local_id, ts, msg_chat) in enumerate(images):
+        if should_cancel is not None and should_cancel():
+            raise ExportCancelled("媒体解密已取消")
         fn = f"{i:04d}_{(md5 or 'img')[:12]}.jpg"
         dst = dest / fn
         out, reason = _try_decrypt(acc_out_dir, account, msg_chat or chat, md5,
@@ -508,8 +524,11 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                export_root: Path = None, pack: str = "zip",
                folder_name: str = None,
                template: str | None = None,
-               progress=lambda pct, msg: None) -> dict:
+               progress=lambda pct, msg: None,
+               should_cancel=None) -> dict:
     t0 = time.time()
+    if should_cancel is not None and should_cancel():
+        raise ExportCancelled("导出已取消")
     progress(1, f"开始导出: 账号={account}, 会话={chat}, 格式={fmt}")
     logger.detailed(
         "export",
@@ -554,6 +573,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     avatar_map = {}
     stats_ava = 0
     if want_avatars and count > 0:
+        if should_cancel is not None and should_cancel():
+            raise ExportCancelled("导出已取消")
         progress(15, "提取头像…")
         dest = export_dir / "avatars"
         dest.mkdir(exist_ok=True)
@@ -567,22 +588,29 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     stats_sticker = 0
     media_map = {}
     if (want_media and (images or stickers)) or (want_voice and voices):
+        if should_cancel is not None and should_cancel():
+            raise ExportCancelled("导出已取消")
         media_dest = export_dir / "media"
         img_total = len(images) if want_media else 0
         voice_total = len(voices) if want_voice else 0
         if want_media and images:
             progress(35, f"解密图片（{len(images)} 张）…")
             image_map = _decrypt_media_parallel(acc_out_dir, account, chat, images,
-                                                media_dest, progress)
+                                                media_dest, progress,
+                                                should_cancel=should_cancel)
             media_map.update(image_map)
             stats_media = len(image_map)
         if want_voice and voices:
+            if should_cancel is not None and should_cancel():
+                raise ExportCancelled("导出已取消")
             progress(55, f"转码语音（{len(voices)} 条）…")
             voice_map = _export_voice_media(acc_out_dir, account, chat, voices,
                                             media_dest, progress)
             media_map.update(voice_map)
             stats_voice = len(voice_map)
         if want_media and stickers:
+            if should_cancel is not None and should_cancel():
+                raise ExportCancelled("导出已取消")
             progress(65, f"下载表情（{len(stickers)} 个）…")
             stats_sticker = _export_sticker_media(media_dest, stickers,
                                                   media_map, progress)
@@ -605,6 +633,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     written_total = 0
     stats_manifest = None
     for fi, one_fmt in enumerate(fmts):
+        if should_cancel is not None and should_cancel():
+            raise ExportCancelled("导出已取消")
         progress(75 + int(fi * 12 / len(fmts)),
                  f"写入文件（{one_fmt}，{fi + 1}/{len(fmts)}）…")
         plugin_writer = _plugin_export_format(one_fmt)
@@ -1029,8 +1059,10 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
                      want_avatars=False,
                      export_root: Path = None, pack: str = "folder",
                      template: str | None = None,
-                     progress=lambda pct, msg: None) -> dict:
-    """多会话批量导出。"""
+                     progress=lambda pct, msg: None,
+                     should_cancel=None) -> dict:
+    """多会话批量导出。should_cancel：协作式取消探针——每个会话开始前、
+    每个阶段检查点生效；取消是优雅停止，已完成会话的产物保留。"""
     t0 = time.time()
     n = max(len(chats), 1)
     # P3：毫秒级时间戳，防同秒批量导出目录名冲突（同因 as run_export）
@@ -1041,7 +1073,12 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
     progress(1, f"共 {n} 个会话 · 输出目录 {total_dir.name}/ · 打包={pack}")
 
     results, ok_n = [], 0
+    cancelled = False
     for i, item in enumerate(chats):
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            progress(int(100 * i / n), f"已取消（完成 {i}/{n}）")
+            break
         chat = item.get("chat") if isinstance(item, dict) else str(item)
         display = (item.get("display") or "") if isinstance(item, dict) else ""
         base, endp = int(100 * i / n), int(100 * (i + 1) / n)
@@ -1060,7 +1097,8 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
                              folder_name=f"{i + 1:02d}_{display or chat}",
                              pack=("zip" if pack == "each" else "none"),
                              template=template,
-                             progress=sub)
+                             progress=sub,
+                             should_cancel=should_cancel)
             ok_n += 1
             files_out = list(res.get("files") or [])
             if res.get("file"):
@@ -1083,6 +1121,10 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
                             "size_bytes": size_bytes,
                             "duration_ms": res.get("duration_ms", 0)})
             progress(endp, f"[{i + 1}/{n}] ✔ {display or chat} ({res.get('message_count', 0)} 条)")
+        except ExportCancelled:
+            cancelled = True
+            progress(endp, f"[{i + 1}/{n}] 已取消（会话 {display or chat} 未完成）")
+            break
         except Exception as e:
             logger.error("export",
                          f"{logger.job_prefix()}会话导出失败 chat={chat}: "
@@ -1091,16 +1133,17 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
             progress(endp, f"[{i + 1}/{n}] ✗ {display or chat}: {e}")
 
     zip_path, zips = None, []
-    if pack == "each":
-        zips = sorted(str(p) for p in total_dir.glob("*.zip"))
-        progress(97, f"每会话 zip 共 {len(zips)} 个")
-    elif pack == "single":
-        progress(96, "打包整体 zip…")
-        zip_path = shutil.make_archive(str(root / total_dir.name), "zip",
-                                       root_dir=total_dir)
-        progress(98, f"zip 完成: {Path(zip_path).stat().st_size / 1048576:.1f} MB")
+    if not cancelled:
+        if pack == "each":
+            zips = sorted(str(p) for p in total_dir.glob("*.zip"))
+            progress(97, f"每会话 zip 共 {len(zips)} 个")
+        elif pack == "single":
+            progress(96, "打包整体 zip…")
+            zip_path = shutil.make_archive(str(root / total_dir.name), "zip",
+                                           root_dir=total_dir)
+            progress(98, f"zip 完成: {Path(zip_path).stat().st_size / 1048576:.1f} MB")
 
-    progress(100, "导出完成")
+    progress(100, "已取消，已完成部分保留" if cancelled else "导出完成")
     zip_size = None
     if zip_path:
         try:
@@ -1111,6 +1154,7 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
         "total_dir": str(total_dir), "zip": zip_path, "zips": zips,
         "zip_size": zip_size,
         "pack": pack, "format": fmt, "sessions": results, "ok_count": ok_n,
+        "cancelled": cancelled,
         "message_count": sum(r.get("message_count", 0) for r in results),
         "media_count": sum(r.get("media_count", 0) for r in results),
         "image_count": sum(r.get("image_count", 0) for r in results),

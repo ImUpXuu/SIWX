@@ -294,6 +294,9 @@
     if (t === 49) {
       // D5 导出侧：合并转发（recordinfo）逐条展开，不再只显示 "[链接] 标题"
       if (msg.record) return renderRecord(msg.record);
+      // 视频号卡片（type=51 finderFeed）：与聊天页同口径，不再落链接卡兜底
+      // （占位 title"当前版本不支持展示该内容"就是从这里漏出去的）
+      if (msg.channels) return renderFinder(msg.channels);
       // 引用消息（外层 49、内层 57）：正文走纯文本，引用块由 .msg-quote 呈现，
       // 不再落入链接卡片分支（此前被错挂图片时整卡被顶掉）
       if (msg.quote) return fmtText(content) || '<em style="opacity:.5">引用</em>';
@@ -370,6 +373,24 @@
     if (!items.length) h += '<div class="msg-record-item"><span class="rt">子消息详情未包含在导出数据中</span></div>';
     h += '</div><div class="msg-record-count">'+(rec.count || items.length)+' 条消息</div></div>';
     return h;
+  }
+
+  // 视频号卡片（type=51）：还原客户端可见信息（描述/作者/封面/时长）。
+  // cover/avatar 是腾讯 CDN 公网直链，离线打开可能已过期——裂图即隐藏，
+  // 文字信息（描述+作者）始终可用。播放不强求（scheme 无公开格式）。
+  function renderFinder(ch) {
+    var dur = ch.duration ? '<span class="finder-dur">'+
+      Math.floor(ch.duration/60)+':'+String(ch.duration%60).padStart(2,'0')+'</span>' : '';
+    var cover = ch.cover ? '<div class="finder-cover">'+
+      '<img loading="lazy" src="'+esc(ch.cover)+'" alt="" '+
+      'onerror="this.parentNode.style.display=\'none\'"><span class="finder-play">▶</span>'+dur+'</div>' : '';
+    var ava = ch.avatar ? '<img class="finder-ava" loading="lazy" src="'+esc(ch.avatar)+
+      '" alt="" onerror="this.style.display=\'none\'">' : '';
+    var author = ch.nickname ? '<div class="finder-author">'+ava+'视频号 · '+
+      esc(ch.nickname)+(ch.mediaCount > 1 ? ' · '+ch.mediaCount+' 个视频' : '')+'</div>' : '';
+    var desc = ch.desc ? '<div class="finder-desc">'+esc(ch.desc)+'</div>' : '';
+    return '<div class="finder-card">'+cover+
+      '<div class="finder-body">'+desc+author+'</div></div>';
   }
 
   // ── 窗口式渲染引擎 ──

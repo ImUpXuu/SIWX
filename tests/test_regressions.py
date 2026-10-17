@@ -3642,7 +3642,7 @@ class TestChatMessageFilter(TempRootCase):
         self.assertIn('id="c-filter"', html_)
         # 缓存指纹必须刷新，否则升级后浏览器仍用旧 UI（本地指纹线，非上游值）
         appjs = (ROOT / "siwx" / "ui" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("2026101103", appjs)
+        self.assertIn("2026101702", appjs)
 
 
 # ── 30. HTML 模板可替换框架 + 合并转发/转文字渲染 ───────────────
@@ -4471,6 +4471,191 @@ class TestThumbTsGuard(TempRootCase):
         got = self.media.thumb_paths("wxid_test_me", self.chat, 45, None)
         self.assertEqual(sorted(p.name for p in got),
                          sorted([self.wrong.name, self.right.name]))
+
+
+# ── 25. 协作式取消 + 视频号导出卡片 + 方案 A 转换报告 ─────────────
+
+class TestExportCancel(unittest.TestCase):
+    """协作式取消（台账 §二-2）：多会话导出优雅停止，报告带 cancelled，
+    已完成会话的产物语义保留（以假 run_export 验证循环与报告逻辑）。"""
+
+    def test_cancelled_midway_raises_and_reports(self):
+        """第 2 个会话抛 ExportCancelled → 停止循环，cancelled=True、ok_count=1。"""
+        from siwx import exporter
+        calls = []
+
+        def fake_run(*a, **k):
+            calls.append(k.get("folder_name"))
+            if len(calls) == 1:
+                return {"message_count": 5, "duration_ms": 1}
+            raise exporter.ExportCancelled("导出已取消")
+
+        with mock.patch.object(exporter, "run_export", side_effect=fake_run), \
+             tempfile.TemporaryDirectory() as td:
+            res = exporter.run_export_multi(
+                Path(td), "wxid_test_owner",
+                [{"chat": "wxid_test_a", "display": "A"},
+                 {"chat": "wxid_test_b", "display": "B"},
+                 {"chat": "wxid_test_c", "display": "C"}],
+                fmt="json", progress=lambda p, m: None)
+        self.assertTrue(res["cancelled"])
+        self.assertEqual(res["ok_count"], 1)
+        self.assertEqual(len(res["sessions"]), 1)
+        self.assertEqual(calls, ["01_A", "02_B"])  # 会话 2 执行中取消，会话 3 未启动
+
+    def test_flag_checked_before_each_chat(self):
+        """取消探针在每个会话开始前检查：置位后剩余会话不启动。"""
+        from siwx import exporter
+        n = {"v": 0}
+
+        def fake_run(*a, **k):
+            return {"message_count": 1, "duration_ms": 1}
+
+        def probe():
+            n["v"] += 1
+            return n["v"] > 2                   # 会话 1、2 放行，3 取消
+
+        with mock.patch.object(exporter, "run_export", side_effect=fake_run), \
+             tempfile.TemporaryDirectory() as td:
+            res = exporter.run_export_multi(
+                Path(td), "wxid_test_owner",
+                [{"chat": "a"}, {"chat": "b"}, {"chat": "c"}],
+                fmt="json", progress=lambda p, m: None, should_cancel=probe)
+        self.assertTrue(res["cancelled"])
+        self.assertEqual(res["ok_count"], 2)
+
+    def test_decrypt_serial_cancel(self):
+        """串行媒体解密逐张检查取消探针。"""
+        from siwx import exporter
+        with self.assertRaises(exporter.ExportCancelled):
+            exporter._decrypt_media_serial(
+                Path("acc"), "wxid_test_owner", "wxid_test_peer",
+                [("a" * 32, None, 1, 1, "wxid_test_peer")],
+                Path("dest"), None, should_cancel=lambda: True)
+
+
+class TestMediaBackupCancel(unittest.TestCase):
+    """全量媒体备份的协作式取消：逐文件检查，已完成部分保留。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="siwx_test_mbcancel_"))
+        self.wxid = "wxid_demo_b"
+        self.account_root = self.tmp / "xwechat_files" / self.wxid
+        (self.account_root / "cache").mkdir(parents=True)
+        attach = self.account_root / "msg" / "attach" / "md5" / "2026-01" / "Img"
+        attach.mkdir(parents=True)
+        (attach / "a.dat").write_bytes(b"x")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _patch_roots(self):
+        return mock.patch("siwx.media._wechat_cache_roots",
+                          return_value=[self.account_root / "cache"])
+
+    def test_backup_images_cancel(self):
+        from siwx import media_backup
+        with self._patch_roots():
+            stats = media_backup.backup_images(
+                self.wxid, self.tmp / "out", log=None,
+                should_cancel=lambda: True)
+        self.assertTrue(stats["cancelled"])
+        self.assertEqual(stats["ok_viewable"], 0)   # 未处理任何文件
+
+    def test_backup_all_propagates_cancel(self):
+        """首段取消后不再进入后续段，顶层报告 cancelled=True。"""
+        from siwx import media_backup
+        with self._patch_roots():
+            report = media_backup.backup_all(
+                self.wxid, self.tmp / "out", log=None,
+                should_cancel=lambda: True)
+        self.assertTrue(report["cancelled"])
+        self.assertTrue(report["images"]["cancelled"])
+        self.assertTrue(report["videos"]["cancelled"])
+        self.assertTrue(report["files"]["cancelled"])
+
+
+class TestChannelsExportEntry(unittest.TestCase):
+    """视频号卡片导出透传（台账 §二-3）：_msg_entry 携带 channels，
+    渲染分支由 renderer.js renderFinder 承担（前端）。"""
+
+    CHANNELS = {"nickname": "合成频道", "desc": "合成描述",
+                "cover": "https://cdn.invalid/c.jpg", "avatar": "",
+                "duration": 75, "mediaCount": 1, "nonce": "nonce_x"}
+
+    def _msg(self):
+        return {"createTime": 1, "senderUsername": "wxid_test_friend",
+                "senderDisplayName": "测试好友", "localType": 49,
+                "content": "[视频号] 合成描述",
+                "rawContent": '<msg><appmsg type="51"></appmsg></msg>',
+                "isSend": 0, "channels": self.CHANNELS}
+
+    def test_msg_entry_carries_channels(self):
+        from siwx.html_template import _msg_entry
+        e = _msg_entry(self._msg())
+        self.assertEqual(e["channels"]["nickname"], "合成频道")
+        self.assertEqual(e["channels"]["duration"], 75)
+
+    def test_msg_entry_without_channels_omits_key(self):
+        from siwx.html_template import _msg_entry
+        m = self._msg()
+        m["channels"] = None
+        self.assertNotIn("channels", _msg_entry(m))
+
+
+class TestConvertDirReport(unittest.TestCase):
+    """方案 A（结果面板一键补生成）：结构化报告 + 取消 + CLI int 契约不变。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "export"
+        sess = self.root / "01_测试会话"
+        sess.mkdir(parents=True)
+        (sess / "测试会话_20261011_120000_000.json").write_text(json.dumps({
+            "session": {"wxid": "wxid_test_friend",
+                        "displayName": "测试会话", "type": "私聊",
+                        "platform": "wechat", "isGroup": False,
+                        "ownerId": "wxid_test_owner",
+                        "firstTimestamp": 1000, "lastTimestamp": 2000,
+                        "messageCount": 1},
+            "messages": [{"localId": 1, "platformMessageId": "1",
+                          "createTime": 1000, "localType": 1,
+                          "typeName": "文本", "rawContent": "你好",
+                          "content": "你好", "isSend": 0,
+                          "senderUsername": "wxid_test_friend",
+                          "senderDisplayName": "测试好友",
+                          "md5": None, "bubbleMd5": None, "voice": None,
+                          "sticker": None, "channels": None, "quote": None,
+                          "link": None, "record": None}],
+        }, ensure_ascii=False), encoding="utf-8")
+        (sess / "manifest.json").write_text(json.dumps({
+            "generator": "stories-in-wx", "written_count": 1,
+            "parse": {}, "media": {},
+        }, ensure_ascii=False), encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_report_structured(self):
+        from siwx.json_export_convert import convert_dir_report
+        r = convert_dir_report(self.root, ["md"])
+        self.assertEqual((r["total"], r["ok"], r["failed"], r["skipped"]),
+                         (1, 1, 0, 0))
+        self.assertFalse(r["cancelled"])
+        self.assertTrue((self.root / "01_测试会话"
+                         / "测试会话_20261011_120000_000.md").is_file())
+
+    def test_report_cancelled_gracefully(self):
+        from siwx.json_export_convert import convert_dir_report
+        r = convert_dir_report(self.root, ["md"], overwrite=True,
+                               should_cancel=lambda: True)
+        self.assertTrue(r["cancelled"])
+        self.assertEqual(r["ok"], 0)
+
+    def test_cli_int_contract_unchanged(self):
+        """convert_dir 对 CLI/旧调用方仍返回 int（0=无失败）。"""
+        from siwx.json_export_convert import convert_dir
+        self.assertEqual(convert_dir(self.root, ["md"]), 0)
 
 
 if __name__ == "__main__":

@@ -122,29 +122,46 @@ def _update_manifest(session_dir: Path, added: dict) -> None:
         print(f"  [warn] manifest 更新失败: {e}")
 
 
-def convert_dir(root: Path, formats, only: str | None = None,
-                template: str | None = None, overwrite: bool = False) -> int:
+def convert_dir_report(root: Path, formats, only: str | None = None,
+                       template: str | None = None, overwrite: bool = False,
+                       log=print, progress=None, should_cancel=None) -> dict:
+    """convert_dir 的结构化版本：供 server 的 mode=convert（方案 A）复用。
+
+    progress(done, total, msg)；should_cancel 为真时优雅停止（已完成会话
+    保留），报告带 cancelled=True。返回
+    {"total","ok","skipped","failed","missing_media","cancelled"}。"""
     import json
 
     if not root.is_dir():
-        print(f"导出目录不存在: {root}")
-        return 1
+        log(f"导出目录不存在: {root}")
+        return {"total": 0, "ok": 0, "skipped": 0, "failed": 0,
+                "missing_media": 0, "cancelled": False, "error": "目录不存在"}
     want_md = "md" in formats
     want_html = "html" in formats
     if not (want_md or want_html):
-        print("--formats 里没有任何受支持的格式（md/html）")
-        return 1
+        log("--formats 里没有任何受支持的格式（md/html）")
+        return {"total": 0, "ok": 0, "skipped": 0, "failed": 0,
+                "missing_media": 0, "cancelled": False,
+                "error": "没有受支持的格式"}
 
     total = ok = skipped = failed = 0
     missing_total = 0
-    for i, (d, jf) in enumerate(_session_dirs(root), 1):
+    cancelled = False
+    dirs = list(_session_dirs(root))
+    for i, (d, jf) in enumerate(dirs, 1):
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            log(f"已取消（处理到 {i - 1}/{len(dirs)} 个会话，已完成部分保留）")
+            break
+        if progress:
+            progress(i - 1, len(dirs), d.name)
         if only and only not in d.name:
             continue
         total += 1
         try:
             data = json.loads(jf.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
-            print(f"[fail] {d.name}: 会话 JSON 读取失败: {e}")
+            log(f"[fail] {d.name}: 会话 JSON 读取失败: {e}")
             failed += 1
             continue
         session, msgs = data.get("session") or {}, data.get("messages") or []
@@ -168,7 +185,7 @@ def convert_dir(root: Path, formats, only: str | None = None,
                         out, template)
                     added["formats"].append("html")
         except Exception as e:  # noqa: BLE001 单会话失败不拖垮整批
-            print(f"[fail] {d.name}: {type(e).__name__}: {e}")
+            log(f"[fail] {d.name}: {type(e).__name__}: {e}")
             failed += 1
             continue
         if added["formats"]:
@@ -177,14 +194,23 @@ def convert_dir(root: Path, formats, only: str | None = None,
         else:
             skipped += 1
         if i % 50 == 0:
-            print(f"…已处理 {i} 个会话（成功 {ok} / 跳过 {skipped} / 失败 {failed}）")
+            log(f"…已处理 {i} 个会话（成功 {ok} / 跳过 {skipped} / 失败 {failed}）")
 
-    print(f"\n完成：会话 {total}，补生成 {ok}，已有跳过 {skipped}，失败 {failed}；"
-          f"媒体引用缺失 {missing_total} 处"
-          + ("（导出时未下载成功或目录被改动）" if missing_total else ""))
+    log(f"\n完成：会话 {total}，补生成 {ok}，已有跳过 {skipped}，失败 {failed}；"
+        f"媒体引用缺失 {missing_total} 处"
+        + ("（导出时未下载成功或目录被改动）" if missing_total else ""))
     if failed:
-        print("失败会话见上方 [fail] 行，可修复后加 --overwrite 重跑。")
-    return 0 if not failed else 2
+        log("失败会话见上方 [fail] 行，可修复后加 --overwrite 重跑。")
+    return {"total": total, "ok": ok, "skipped": skipped, "failed": failed,
+            "missing_media": missing_total, "cancelled": cancelled}
+
+
+def convert_dir(root: Path, formats, only: str | None = None,
+                template: str | None = None, overwrite: bool = False) -> int:
+    """CLI 入口：返回 0（无失败）/ 2（有失败）。结构化结果走 convert_dir_report。"""
+    r = convert_dir_report(root, formats, only=only, template=template,
+                           overwrite=overwrite)
+    return 0 if not r["failed"] else 2
 
 
 def main(argv=None) -> int:
