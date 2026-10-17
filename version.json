@@ -1,12 +1,12 @@
 {
   "version": "5.0.12",
-  "date": "2026-10-18 00:30:00",
+  "date": "2026-10-17 16:22:00",
   "notes": "## 导出 HTML 渲染器重做 + 任务取消 + 吸收上游 v5.0.11\n\n> 无破坏性变更，无需迁移。全量测试 475 通过 / 1 跳过。\n\n### 任务可取消（新）\n\n- **协作式取消**：导出、解密、密钥提取、全自动、增量同步、全量媒体备份、格式补生成——所有长任务运行中都可以点「取消」，当前步骤收尾后优雅停止，**已完成部分的产物保留**，报告明确区分「已取消」与「失败」\n- 导出页进度条旁与设置页备份卡片新增取消按钮\n\n### 导出 HTML 渲染器重做\n\n- **窗口式渲染**：大会话（数万条）不再一次性构建整页 DOM——默认打开定位到最新一屏（微信习惯），滚动到边缘双向扩窗、超出上限双向裁剪；日期跳转与搜索可直达任意下标，9 万条会话不再\"永远停在第一屏\"\n- **视频号卡片**：导出 HTML 补齐 type=51 视频号消息的完整卡片（描述/作者/封面/时长），不再显示\"当前版本不支持展示该内容\"占位\n- **连续消息合并展示**：同一发送者、同一天、间隔 ≤5 分钟的连续消息合并为一条，群聊刷屏不再满屏头像\n- **媒体占位卡**：图片/视频/表情/语音缺失时给出具体原因——\"本次导出未包含媒体\"与\"解密失败/源缺失\"分开说清楚\n- **统计/筛选改模态框**：不再下推消息流；生效中的筛选条件以胶囊常显、可单独移除\n- **导出页日志区溢出修复**：运行日志内容较长时不再撑破卡片边框\n\n### 结果面板一键补生成格式（新）\n\n- 仅导出 JSON 的目录，导出完成后可在结果面板一键**就地补生成 Markdown / HTML**（不重跑解密），支持覆盖重跑；媒体缺失引用会计入提示\n\n### 日志页\n\n- **粗略/精细模式切换**真正可用：粗略隐藏 DEBUG 行，精细全部显示（只改展示口径，落盘内容不受影响）\n\n### 吸收上游（ImUpXuu/SIWX v5.0.11）\n\n- **合并转发子消息完整提取**（issue #31）：此前合并转发只显示文本占位（图片永远是\"[图片]\"）、嵌套记录被当普通文件丢弃。现在完整解析每条子消息，嵌套记录递归解析最多 3 层；按 server_id 跨会话回查原始消息补全 md5；导出时子项图片按原始会话定位解密回填；聊天页与导出 HTML 均可渲染子项图片与嵌套记录，筛选新增\"聊天记录\"分类\n- **macOS 版本门槛笔误修复**（issue #30/#32）：v5.0.9 引入的前置判定把基线 4.1.8.0 误写成 (4,1,80)，导致所有 macOS 用户在 attach 之前就被拦下、恒定 0/N。基线改回 4.1.8，低于基线只警告不再硬拦\n\n### 工程与文档\n\n- 上游对比通道修正：`upstream` remote 由过期的本地临时克隆改为指向 GitHub 仓库\n- 媒体研究文档回填采样结论：聊天视频为明文 MP4 未加密，难点在消息↔文件 md5 匹配与微信自动清理造成的存量缺失\n- Markdown 导出维持不转义（格式天性，转义会显著降低源文件可读性）",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.9/stories-in-wx-v5.0.9-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.9/stories-in-wx-v5.0.9-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.12/stories-in-wx-v5.0.12-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.12/stories-in-wx-v5.0.12-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.9/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.12/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
