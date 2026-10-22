@@ -12,6 +12,7 @@ from siwx import paths as _paths
 
 WECHAT_PROCESSES_WIN = ("weixin.exe", "wechat.exe")
 WECHAT_PROCESSES_MAC = ("WeChat",)
+WECHAT_PROCESSES_LINUX = ("wechat", "weixin", "wechat-bin")
 
 
 def manual_paths_file() -> Path:
@@ -112,6 +113,8 @@ def find_wechat_pids():
         target_names = WECHAT_PROCESSES_WIN
     elif system == "Darwin":
         target_names = WECHAT_PROCESSES_MAC
+    elif system == "Linux":
+        target_names = WECHAT_PROCESSES_LINUX
     else:
         return []
 
@@ -187,6 +190,19 @@ def find_wechat_data_dirs():
                         continue
             except OSError as e:
                 _slog.detailed("discover", f"枚举 {users_dir} 失败: {e}")
+    elif system == "Linux":
+        home = Path.home()
+        roots.append(home / "Documents" / "xwechat_files")
+        roots.append(home / "xwechat_files")
+        # 桌面版把文档目录本地化（中文系统是 ~/文档），读 XDG 配置兜住
+        xdg = home / ".config" / "user-dirs.dirs"
+        try:
+            for line in xdg.read_text(errors="replace").splitlines():
+                if line.startswith("XDG_DOCUMENTS_DIR="):
+                    val = line.split("=", 1)[1].strip().strip('"')
+                    roots.append(Path(val.replace("$HOME", str(home))) / "xwechat_files")
+        except OSError:
+            pass
     else:
         roots = []
 

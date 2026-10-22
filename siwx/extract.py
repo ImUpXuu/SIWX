@@ -208,7 +208,11 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
         # 审计 §3.1:174-179：磁盘满/权限等 OSError 不应炸穿整个提取
         try:
             keystore.save(store)
-            log("[keystore] 密钥已保存到 DPAPI 加密密钥库")
+            # 非 Windows 走明文 JSON 兜底（0600），别在这里报成 DPAPI 加密
+            if platform.system() == "Windows":
+                log("[keystore] 密钥已保存到 DPAPI 加密密钥库")
+            else:
+                log(f"[keystore] 密钥已保存到 {keystore.store_path()}（明文 JSON，权限 0600）")
         except OSError as exc:
             _slog.error("keystore", f"密钥库保存失败: {exc}")
 

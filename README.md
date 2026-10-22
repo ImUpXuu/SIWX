@@ -7,7 +7,7 @@
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](./LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB.svg)](https://www.python.org/)
 [![Version](https://img.shields.io/badge/version-5.0.12-success.svg)](./version.json)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-lightgrey.svg)](#平台支持)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](#平台支持)
 [![Docs](https://img.shields.io/badge/docs-siwx--docs.vercel.app-175fe0.svg)](https://siwx-docs.vercel.app)
 
 [快速开始](#快速开始) · [在线文档](https://siwx-docs.vercel.app) · [核心功能](#核心功能) · [朋友圈](#朋友圈) · [MCP 接入](#让-ai-读取你的聊天记录mcp) · [免责声明](#免责声明--法律声明)
@@ -62,6 +62,7 @@
 | ------- | ------------ | ----------------------------- |
 | Windows | 完整支持（推荐）     | 密钥提取、数据库解密、Web 控制台、导出、MCP 全功能 |
 | macOS   | 支持微信 4.1.x（4.1.13 实测） | 通过 LLDB 断点捕获密钥，提取时需微信处于登录状态   |
+| Linux   | 实验性（4.1.13.23 实测） | 进程内 INT3 钩子捕获密钥，需一次性 root + 系统编译器 |
 
 ### macOS 重要说明
 
@@ -71,6 +72,17 @@ macOS 版使用 LLDB 捕获微信内存中的密钥：
 - 密钥未缓存时，点击"提取并解密"后请在 **60 秒内重新登录微信**，确保密钥出现在内存中。
 
 详见 [MACOS\_SUPPORT.md](./MACOS_SUPPORT.md)。
+
+### Linux 重要说明
+
+Linux 不走外部 ptrace（微信 4.1.2x 内置的 Chromium crashpad 会自己 ptrace 附加，
+一个进程只能有一个 tracer，抢不到就 `abort()`）。改为在微信进程内打 `INT3` 断点：
+
+- 注入走 `/etc/ld.so.preload`，因此**需要一次性 root 权限**，结束后自动恢复原文件；
+- 现场用系统 `cc`/`gcc` 构建 shim，不新增 Python 依赖；
+- 需要扫码登录一次（或微信已登录、由策略重启微信后建连触发）。
+
+详见 [LINUX\_SUPPORT.md](./LINUX_SUPPORT.md)。
 
 ---
 
