@@ -19,6 +19,9 @@ let selected = new Set();       // 已勾选 username 集合
 let chatPreset = null;
 let chatRange = null;           // 聊天页多选带入的范围 {account, chat, display, start, end, count}
 let running = false;
+// 本页最近一次发起任务的 mode（export / convert）：取消前先核对，
+// 避免把别的页面（如设置页同步）发起的任务一并取消
+let currentRunMode = null;
 let pollTimer = null;
 let fmtDrop = null;
 let packDrop = null;
@@ -565,13 +568,26 @@ function resetCancelButton() {
 }
 
 /** 协作式取消：请求受理后等任务走到最近检查点才真正停止（优雅停止，
- *  已完成会话保留）。409 = 任务刚好结束，无需处理。 */
+ *  已完成会话保留）。409 = 任务刚好结束，无需处理。
+ *  取消是全局的：POST 前必须先核对当前任务的 mode，避免误杀其他页面
+ *  发起的任务（设置页同步、MCP 等）。 */
 async function requestCancel() {
   const b = el('e-cancel');
   b.disabled = true;
   b.textContent = '正在取消…';
   try {
-    const r = await fetch('/api/job/cancel', { method: 'POST' });
+    const job = await (await fetch('/api/job')).json();
+    if (!job.running) { resetCancelButton(); return; }
+    if (currentRunMode && job.mode && job.mode !== currentRunMode) {
+      toast('当前运行的任务不是本页面发起的，未取消', true);
+      resetCancelButton();
+      return;
+    }
+    const r = await fetch('/api/job/cancel', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: currentRunMode }),
+    });
     if (r.status === 409) { resetCancelButton(); return; }
     if (!r.ok) throw new Error('取消请求失败');
   } catch (e) {
@@ -580,10 +596,21 @@ async function requestCancel() {
   }
 }
 
+/** 启动失败（409 / 网络错误）后的回收：进度卡与取消按钮随任务一起消失，
+ *  日志里保留错误行，避免界面上留下一个指向别的任务的取消按钮。 */
+function clearRunUiOnStartFailure(message) {
+  if (gone()) return;
+  resetCancelButton();
+  el('e-cancel').classList.add('hidden');
+  el('e-progress-card').classList.add('hidden');
+  el('e-log').innerHTML = `<div class="log-line err">${esc(message)}</div>`;
+}
+
 /** 方案 A：对最近一次 JSON 导出目录就地补生成格式（不重跑解密）。 */
 async function runConvert(formats, overwrite = false) {
   if (running || !lastExportDir) return;
   running = true;
+  currentRunMode = 'convert';
   updateCount();
   el('e-log').innerHTML = '';
   el('e-result').innerHTML = '';
@@ -613,8 +640,9 @@ async function runConvert(formats, overwrite = false) {
     poll();
   } catch (e) {
     running = false;
+    currentRunMode = null;
     updateCount();
-    if (!gone()) el('e-log').innerHTML = `<div class="log-line err">${esc(e.message)}</div>`;
+    clearRunUiOnStartFailure(e.message);
   }
 }
 
@@ -652,6 +680,7 @@ async function run() {
     },
   };
   running = true;
+  currentRunMode = 'export';
   updateCount();
   lastTemplate = tplDrop.value || '';
   el('e-log').innerHTML = '';
@@ -673,8 +702,9 @@ async function run() {
     poll();
   } catch (e) {
     running = false;
+    currentRunMode = null;
     updateCount();
-    if (!gone()) el('e-log').innerHTML = `<div class="log-line err">${esc(e.message)}</div>`;
+    clearRunUiOnStartFailure(e.message);
   }
 }
 
@@ -693,6 +723,7 @@ function poll() {
         clearInterval(pollTimer);
         pollTimer = null;
         running = false;
+        currentRunMode = null;
         updateCount();
         el('e-cancel').classList.add('hidden');
         el('e-bar').style.width = '100%';
@@ -709,8 +740,10 @@ function poll() {
         clearInterval(pollTimer);
         pollTimer = null;
         running = false;
+        currentRunMode = null;
         if (!gone()) {
           updateCount();
+          el('e-cancel').classList.add('hidden');
           el('e-log').insertAdjacentHTML('beforeend',
             `<div class="log-line err">与后端失去联系（${esc(e.message)}），已停止轮询，请刷新重试</div>`);
         }

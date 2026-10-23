@@ -913,6 +913,23 @@ _FILE_LINE_RE = re.compile(
     re.DOTALL)
 
 
+def _log_item_level(item) -> str:
+    """混合形状日志条目的级别（P2-19，粗略模式过滤用）。
+
+    - 结构化轨 [ts, level, module, msg]：级别在元组第 2 项，直接取；
+    - 文件轨 [ts, "YYYY-mm-dd HH:MM:SS[,ms] [LEVEL] siwx: ..."]：解析前缀；
+    - MCP 轨（"[MCP] " 前缀）与纯文本：无法判定 → 空串（不参与过滤，
+      避免把无级别信息的行误杀）。
+    """
+    try:
+        if len(item) >= 4:
+            return str(item[1]).upper()
+        m = _FILE_LINE_RE.match(str(item[1] or ""))
+    except (TypeError, IndexError):
+        return ""
+    return m.group(1).upper() if m else ""
+
+
 def _dedup_key(item) -> tuple:
     """跨轨归一化去重键（秒级时间 + 模块 + 消息正文）。
 
@@ -957,7 +974,10 @@ def _merged_logs(limit: int, *, desensitize: bool = True,
 
     # 去重：同一条任务日志会同时进入 _LOG_RING 和 siwx.log。
     # P0 后 siwx.log 恒收 DEBUG（detailed 始终落盘），ROUGH 模式下日志页
-    # 按开关口径过滤文件轨里的 DEBUG 行——开关只控展示，留存不受影响。
+    # 按开关口径过滤文件轨/结构化轨里的 DEBUG 行——开关只控展示，留存不受
+    # 影响。级别判定走 _log_item_level：文件轨是 "[DEBUG] siwx:"、结构化轨
+    # 在元组第 2 项，旧的 "] [DEBUG]" 子串匹配对两轨都不命中（P2-19）。
+    # 每次调用现读 get_level：切换后不重启即生效，不缓存。
     rough = log.get_level() == log.LogLevel.ROUGH
     seen = set()
     merged = []
@@ -966,7 +986,7 @@ def _merged_logs(limit: int, *, desensitize: bool = True,
         text = _log_item_text(item)
         if "404 Not Found" in text:
             continue
-        if rough and "] [DEBUG]" in text:
+        if rough and _log_item_level(item) == "DEBUG":
             continue
         if start_ts and (item[0] or 0) < start_ts:
             continue
@@ -1087,12 +1107,29 @@ def api_job_cancel():
 
     响应 cancelling=True 只代表"取消请求已受理"，实际停止要等任务线程
     走到最近的检查点（媒体解密一批之后、当前会话结束/下一会话开始前）。
-    无运行中任务时返回 409，前端据此置灰按钮。"""
+    无运行中任务时返回 409，前端据此置灰按钮。
+
+    P2-16：可选 JSON body `{"mode": "export"|"convert"}`。全局 job 槽是
+    共享的，导出页的取消按钮可能打到设置页转换任务上——调用方声明自己的
+    页面模式后，与运行中任务的 mode 不一致就拒绝（409），且不置位取消事件，
+    避免误停别的任务。不传 mode 保持旧行为（脚本/旧客户端兼容）。"""
+    data = request.get_json(silent=True) or {}
+    req_mode = data.get("mode") if isinstance(data, dict) else ""
+    if not isinstance(req_mode, str):
+        req_mode = ""
     with _lock:
         if not _job["running"]:
             return jsonify({"cancelling": False, "error": "当前没有运行中的任务"}), 409
+        job_mode = _job.get("mode") or ""
+    if req_mode and job_mode and req_mode != job_mode:
+        log.warn("server", f"拒绝取消请求: 运行中 mode={job_mode}, "
+                           f"请求 mode={req_mode}")
+        return jsonify({
+            "cancelling": False,
+            "error": f"当前运行的是 {job_mode} 任务，不是本页面发起的任务",
+        }), 409
     _cancel_event.set()
-    _log(f"[{_job.get('mode')}] 收到取消请求——等待当前步骤收尾后停止（已完成部分保留）")
+    _log(f"[{job_mode}] 收到取消请求——等待当前步骤收尾后停止（已完成部分保留）")
     return jsonify({"cancelling": True})
 
 

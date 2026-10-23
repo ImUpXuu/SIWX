@@ -30,6 +30,7 @@ let filterActive = false;   // 任一筛选条件生效即进入筛选模式：�
 let filterQ = '';           // 关键词（大小写不敏感）
 let filterKind = '';        // 类型筛选：''=全部
 let filterTotal = 0;        // 最近一次筛选的匹配总数（服务端精确返回）
+let filterError = '';       // 最近一次筛选的失败原因（'' = 正常）：消息区显示重试入口
 // 头像 404 标记：失败过的头像不再反复请求（几百会话 = 几百次请求的风暴源）
 const avaFailed = new Set();
 
@@ -241,7 +242,8 @@ async function init() {
     if (!filterActive || selectionMode) return;
     const hit = ev.target.closest('.m-row');
     if (!hit || ev.target.closest('button, a, img, .m-copy')) return;
-    jumpToTs(Number(hit.dataset.ts) || 0, hit.dataset.key || '');
+    jumpToTs(Number(hit.dataset.ts) || 0, hit.dataset.key || '')
+      .catch(e => toast('跳转失败：' + (e.message || e), true));
   });
   bindFilterBar();
 
@@ -471,11 +473,17 @@ async function loadMessages(fresh, opts = {}) {
     rangeAnchorKey = null;
     loadedMessages = data.messages.slice();
     if (data.filtered) filterTotal = data.total || 0;
+    filterError = '';        // 成功的筛选响应即清除失败态（含“先打开会话”的提示）
     const emptyText = filterActive
       ? '没有匹配的消息<br><span class="c-empty-sub">换个关键词或类型，退出筛选看全部</span>'
       : '这个会话没有消息';
     box.innerHTML = renderMessageList(loadedMessages) || `<div class="c-empty">${emptyText}</div>`;
-    if (filterActive) highlightMatches(box);
+    if (filterActive) {
+      highlightMatches(box);
+      // 计数用本次响应写回的 filterTotal：runFilteredLoad 在请求前刷过一次，
+      // 不在这里再刷就会一直显示上一次（首次为 0）的数字
+      updateFilterInfo();
+    }
     if (opts.stick) {
       startBottomFollow(box);
       jumpToBottom(box);
@@ -576,11 +584,31 @@ function bindFilterBar() {
 }
 
 function runFilteredLoad() {
+  filterError = '';
   el('c-filter-exit').classList.remove('hidden');
   updateFilterInfo();
+  if (!currentChat) {
+    // 没开会话时 loadMessages 会直接返回 false（不是抛错），不拦就会停在这里的“搜索中…”
+    filterError = '请先打开一个会话';
+    el('c-msgs').innerHTML = '<div class="c-empty">先打开一个会话再搜索<br>' +
+      '<button class="btn" id="c-filter-retry" type="button">重试</button></div>';
+    el('c-filter-retry')?.addEventListener('click', () => runFilteredLoad());
+    updateFilterInfo();
+    return;
+  }
   el('c-msgs').innerHTML = '<div class="c-loading">搜索中…</div>';
-  loadMessages(true).catch((e) => {
-    toast('搜索失败: ' + (e.message || e), true);
+  const pending = loadMessages(true);
+  const seq = loadSeq;      // loadMessages 已同步递增代数：过期失败不得覆盖新搜索
+  pending.catch((e) => {
+    if (gone() || seq !== loadSeq) return;
+    filterError = (e && e.message) || String(e) || '未知错误';
+    // 失败也不能停在“搜索中…”：消息区给空态 + 重试入口，筛选条保持原样，
+    // 不静默切回未筛选列表
+    el('c-msgs').innerHTML = `<div class="c-empty">搜索失败：${esc(filterError)}<br>` +
+      '<button class="btn" id="c-filter-retry" type="button">重试</button></div>';
+    el('c-filter-retry')?.addEventListener('click', () => runFilteredLoad());
+    updateFilterInfo();
+    toast('搜索失败: ' + filterError, true);
   });
 }
 
@@ -588,6 +616,7 @@ function exitFilter(reload) {
   filterActive = false;
   filterQ = '';
   filterKind = '';
+  filterError = '';
   el('c-msg-q').value = '';
   el('c-filter-exit').classList.add('hidden');
   el('c-filter-info').classList.add('hidden');
@@ -601,6 +630,11 @@ function exitFilter(reload) {
 function updateFilterInfo() {
   const info = el('c-filter-info');
   if (!filterActive) { info.classList.add('hidden'); return; }
+  if (filterError) {
+    info.innerHTML = `搜索失败：${esc(filterError)} · 可重试或退出筛选`;
+    info.classList.remove('hidden');
+    return;
+  }
   const parts = [];
   if (filterQ) parts.push(`“${esc(filterQ)}”`);
   if (filterKind) {
@@ -646,6 +680,7 @@ async function jumpToTs(ts, key) {
   filterActive = false;
   filterQ = '';
   filterKind = '';
+  filterError = '';
   el('c-msg-q').value = '';
   el('c-filter-exit').classList.add('hidden');
   el('c-filter-info').classList.add('hidden');
