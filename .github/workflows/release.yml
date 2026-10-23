@@ -36,8 +36,39 @@ jobs:
             exit 1
           fi
 
-  build-windows:
+  # 发布闸门（P1-6）：tag ↔ siwx.__version__ 的校验必须发生在 build/release 之前，
+  # 否则 tag 与版本号不匹配时会先把 Release 公开、最后才失败。
+  # 注意不能给本 job 加 job 级 if：一旦它被 skip，needs 它的 build-* 会被连带 skip
+  # （PR / push main 上就再也测不到打包），所以本 job 始终运行，只在 tag ref 时做真校验。
+  version-guard:
     needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 校验 tag 与 siwx.__version__ 一致
+        env:
+          REF: ${{ github.ref }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF" != refs/tags/v* ]]; then
+            echo "非 tag 事件（event=${{ github.event_name }}, ref=$REF），跳过 tag 与版本号校验"
+            exit 0
+          fi
+          # siwx/__init__.py 只含版本号字面量，无需安装项目依赖
+          VERSION=$(python -c "from siwx import __version__; print(__version__)")
+          if [ "v${VERSION#v}" != "$TAG" ]; then
+            echo "tag $TAG 与 siwx.__version__=$VERSION 不一致，在构建前终止" >&2
+            exit 1
+          fi
+          echo "tag $TAG 与 siwx.__version__=$VERSION 一致"
+
+  build-windows:
+    needs: [test, version-guard]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
@@ -61,11 +92,21 @@ jobs:
           path: dist/*.exe
 
   build-macos:
-    needs: [test]
+    needs: [test, version-guard]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      # 交付物明确为 arm64-only（packaging/siwx-mac.spec 声明 target_arch="arm64"）。
+      # macos-latest 的架构随 runner 镜像漂移；这里断言失败而不是静默产出 x86_64 包。
+      - name: 断言 runner 架构为 arm64
+        run: |
+          ARCH="$(uname -m)"
+          echo "runner arch: $ARCH"
+          if [ "$ARCH" != "arm64" ]; then
+            echo "macOS 产物仅支持 Apple Silicon（arm64），当前 runner 为 $ARCH；请确认 macos-latest 是否切换了架构" >&2
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -134,27 +175,19 @@ jobs:
           body_path: release/RELEASE_NOTES.md
           generate_release_notes: false
 
+  # version.json 写的是「已发布资产」的下载地址：必须在 Release 产出资产之后再生成/提交，
+  # 否则自动更新链会指向 404。因此这里保留 needs: [release] 的时序（与清单“生成前移”的
+  # 表述不同：tag ↔ 版本号校验已经前移到 version-guard，Release 之前的闸门由它负责）。
+  # 条件收紧为仅 tag ref：workflow_dispatch 时 github.ref_name 是分支名（如 main），
+  # 用它生成 version.json 会写入错误版本并提交到 main。
   version-json:
     needs: [release]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: 校验 tag 与 siwx.__version__ 一致
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          VERSION=$(python3 - << 'PY'
-          from siwx import __version__
-          print(__version__)
-          PY
-          )
-          if [ "v${VERSION#v}" != "$TAG" ]; then
-            echo "tag $TAG 与 siwx.__version__=$VERSION 不一致" >&2
-            exit 1
-          fi
       - name: 生成 version.json（自动更新用）
         env:
           TAG: ${{ github.ref_name }}

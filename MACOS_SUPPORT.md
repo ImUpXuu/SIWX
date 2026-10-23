@@ -10,9 +10,31 @@
 
 ## 依赖
 
-- macOS（已实测 12.7.6）
+- macOS（已实测：源码运行 Intel Mac 12.7.6 与 Apple Silicon；Release DMG 仅 arm64）
 - LLDB 命令行工具（Xcode Command Line Tools 自带）
 - Python 3.10+
+
+## 下载安装（未签名 DMG）
+
+Release 页面的 macOS 产物是 `stories-in-wx-v*-macos.dmg`（`version.json` 的 `macos_dmg` 字段与自动更新链都指向这个文件名，未改名），它是 **Apple Silicon (arm64) 专用**构建：
+
+- **仅 arm64**：`packaging/siwx-mac.spec` 声明 `target_arch="arm64"`，CI 在 `macos-latest` 上构建前还会断言 `uname -m` 为 `arm64`；Intel Mac 无法直接运行该 DMG。
+- **未签名、未公证**：构建链没有 codesign 与 Apple notarization，首次打开会被 Gatekeeper 拦下，提示"无法验证开发者"或"已损坏，无法打开"——文件并未损坏，按下述步骤放行即可。
+
+### Apple Silicon 安装步骤
+
+1. 双击 DMG，把 `stories-in-wx.app` 拖进「应用程序」。
+2. 解除 Gatekeeper 隔离（二选一）：
+   - 在「应用程序」里 **右键（或 Control + 点击）→ 打开**，弹窗中再点一次「打开」，之后即可正常双击启动；
+   - 或在终端执行（路径按实际安装位置调整）：
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/stories-in-wx.app
+     ```
+3. 首次运行仍需先按下文「注意事项」关闭 SIP 并允许 LLDB 调试，密钥提取才能工作。
+
+### Intel Mac
+
+当前 DMG 不含 x86_64 切片，Intel Mac 请改用源码运行：见下方[从源码运行](#使用)一节的 `pip install -r requirements.txt` 与 `python run.py ...` 步骤（需 Python 3.10+，LLDB 由 Xcode Command Line Tools 提供）。
 
 ## 使用
 
@@ -51,6 +73,6 @@ python run.py decrypt --db-dir ~/Library/Containers/com.tencent.xinWeChat/Data/D
 ## 测试状态
 
 - [x] WeChat 4.1.13 (Apple Silicon, macOS 26.6.2) — PR #26 作者实测，31/31 salt 验证通过
-- [x] WeChat 4.1.8 (Intel Mac, macOS 12.7.6) — 早期文档记录（原文写作 "4.1.80"，应为 4.1.8.0 笔误）
+- [x] WeChat 4.1.8 (Intel Mac, macOS 12.7.6) — 早期文档记录，**源码运行**实测，不是当前 DMG（DMG 仅 arm64）（原文写作 "4.1.80"，应为 4.1.8.0 笔误）
 - [ ] WeChat 4.1.8.106 / 4.1.15 (Apple Silicon, macOS 15.7.4) — issue #30/#32 报告版本；修复前被版本门槛误拦，待复测
 - [ ] 更高版本微信

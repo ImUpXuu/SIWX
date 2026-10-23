@@ -118,8 +118,18 @@ def _convert_pending_wxgf(pending: list, stats: dict, log) -> None:
         log = lambda *_a, **_k: None
     log(f"[media_backup] {len(pending)} 张 wxgf 待转码为可预览格式…")
     if platform.system() == "Darwin":
-        from siwx import media_wxgf_macos
-        results = media_wxgf_macos.convert_wxgf_batch(pending, log=log)
+        # P1-2：媒体转码模块的导入/调用整段兜异常。macOS .app 打包后没有
+        # .py 源文件，旧实现在模块导入时执行 inspect.getsource 直接抛
+        # OSError，会让整段备份转码中断。异常时按"转码失败"处理：原始
+        # .wxgf 字节已在第一遍原样保留，该批全部计入 ok_wxgf_preserved。
+        try:
+            from siwx import media_wxgf_macos
+            results = media_wxgf_macos.convert_wxgf_batch(pending, log=log)
+        except Exception as e:
+            log(f"[media_backup] macOS wxgf 批量转码异常（原始 wxgf 已保留）: "
+                f"{type(e).__name__}: {e}")
+            stats["ok_wxgf_preserved"] += len(pending)
+            return
         for wxgf_path, heic_path in pending:
             r = results.get(str(wxgf_path))
             if r and r.get("ok") and heic_path.is_file():

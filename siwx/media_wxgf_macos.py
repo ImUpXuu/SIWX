@@ -75,7 +75,9 @@ _LOCK_WAIT_TIMEOUT = 45  # 排队等锁的上限；超时宁可报失败也不�
 # tests/test_media_wxgf_macos.py），也会通过 inspect.getsource() 原样
 # 注入进下面的 LLDB 内嵌脚本里执行——LLDB 跑的是它自带的独立 Python
 # 解释器（不在我们的 venv 里，import siwx 不可行），只有这一份源码，
-# 避免手动维护两份逻辑导致漂移。各自的编码细节见 ARM64 ISA 手册：
+# 避免手动维护两份逻辑导致漂移（frozen 下取不到源码时才用下面的
+# _DECODER_FALLBACK，测试会归一化比对两份，防止漂移）。各自的编码细节
+# 见 ARM64 ISA 手册：
 #   ADRP:  bit31=op(1)  bits30:29=immlo  bits28:24=10000  bits23:5=immhi  bits4:0=Rd
 #   LDR:   bits31:24=0xF9(size=64位+111+V=0+01)  bits23:22=01(opc)  bits21:10=imm12(×8)
 #   BL:    bits31:26=100101  bits25:0=imm26（带符号，×4）
@@ -106,8 +108,50 @@ def _bl_target(insn, pc):
     return pc + (imm26 << 2)
 
 
-_DECODER_SOURCE = "\n".join(
-    inspect.getsource(fn) for fn in (_adrp_target, _ldr_imm_offset, _bl_target))
+# P1-2：frozen（PyInstaller 打包）后没有 .py 源文件，inspect.getsource 抛
+# OSError，而旧实现是在模块导入时执行——整个模块导入失败会让单图请求 500、
+# 备份转码中断。这里保留一份与上面三个函数等价的源码常量作为回退；
+# tests/test_media_wxgf_macos.py 会归一化比对两份源码，防止手改漂移。
+_DECODER_FALLBACK = '''\
+def _adrp_target(insn, pc):
+    if (insn >> 31) & 1 != 1 or (insn >> 24) & 0x1f != 0x10:
+        return None
+    immlo = (insn >> 29) & 0b11
+    immhi = (insn >> 5) & 0x7ffff
+    imm = (immhi << 2) | immlo
+    if imm & (1 << 20):
+        imm -= (1 << 21)
+    return (pc & ~0xfff) + (imm << 12)
+
+
+def _ldr_imm_offset(insn):
+    if (insn >> 24) & 0xff != 0xf9 or (insn >> 22) & 0b11 != 0b01:
+        return None
+    imm12 = (insn >> 10) & 0xfff
+    return imm12 * 8
+
+
+def _bl_target(insn, pc):
+    if (insn >> 26) != 0b100101:
+        return None
+    imm26 = insn & 0x3ffffff
+    if imm26 & (1 << 25):
+        imm26 -= (1 << 26)
+    return pc + (imm26 << 2)
+'''
+
+
+def _decoder_source() -> str:
+    """取三个解码函数的源码；源码不可得（frozen）时回退到模块内常量。"""
+    try:
+        return "\n".join(
+            inspect.getsource(fn)
+            for fn in (_adrp_target, _ldr_imm_offset, _bl_target))
+    except (OSError, TypeError):
+        return _DECODER_FALLBACK
+
+
+_DECODER_SOURCE = _decoder_source()
 
 _SCRIPT_TMPL = r"""
 import lldb, sys, struct
@@ -215,6 +259,17 @@ def main():
         v, e = ev("(long)malloc(%d)" % n)
         return v
 
+    def free_ptr(ptr):
+        # P1-3：只 free 非空指针——分配失败分支里没分到的指针是 0/None，
+        # 跳过即天然避免 double free；本函数在 Detach 之前调用才有效
+        # （Detach 后表达式求值不可用）。
+        if not ptr:
+            return
+        try:
+            ev("(void)free(%d)" % ptr)
+        except Exception:
+            pass
+
     def call9(addr, a0, a1, a2, a3, a4, a5, a6, a7, a8):
         expr = ("((long(*)(long,long,long,long,long,long,long,long,long))0x%x)"
                 "(%d,%d,%d,%d,%d,%d,%d,%d,%d)") % (addr, a0, a1, a2, a3, a4, a5, a6, a7, a8)
@@ -228,61 +283,76 @@ def main():
     outlen_ptr = alloc(8)
     cfg_ptr = alloc(64)
     if not (in_ptr and out_ptr and outlen_ptr and cfg_ptr):
+        # 分配失败也要把已成功的缓冲区还回去，否则这条失败退出路径照样泄漏
+        free_ptr(in_ptr)
+        free_ptr(out_ptr)
+        free_ptr(outlen_ptr)
+        free_ptr(cfg_ptr)
         print("FAIL:AllocFailed")
         process.Detach()
         return
 
-    werr = lldb.SBError()
-    process.WriteMemory(cfg_ptr, (4).to_bytes(4, "little") + bytes(60), werr)
-
-    manifest = json.load(open(MANIFEST_PATH))
-    results = []
-    for item in manifest:
-        in_path = item["in"]
-        out_path = item["out"]
-        try:
-            data = open(in_path, "rb").read()
-        except Exception as e:
-            results.append({{"in": in_path, "ok": False, "reason": "read:%s" % e}})
-            continue
-        if len(data) > IN_CAP:
-            results.append({{"in": in_path, "ok": False, "reason": "too_large"}})
-            continue
-        werr = lldb.SBError()
-        process.WriteMemory(in_ptr, data, werr)
-        if werr.Fail():
-            results.append({{"in": in_path, "ok": False, "reason": "write_fail:%s" % werr}})
-            continue
-        process.WriteMemory(outlen_ptr, (OUT_CAP).to_bytes(8, "little"), lldb.SBError())
-        r, e = call9(inner_addr, in_ptr, len(data), out_ptr, outlen_ptr, cfg_ptr, 0, 0, 0, 0)
-        if r != 0:
-            results.append({{"in": in_path, "ok": False, "reason": "ret=%s err=%s" % (r, e)}})
-            continue
-        lerr = lldb.SBError()
-        outlen_bytes = process.ReadMemory(outlen_ptr, 8, lerr)
-        outlen = struct.unpack("<Q", outlen_bytes)[0] if not lerr.Fail() else 0
-        if outlen <= 0 or outlen > OUT_CAP:
-            results.append({{"in": in_path, "ok": False, "reason": "bad_outlen:%d" % outlen}})
-            continue
-        oerr = lldb.SBError()
-        body = process.ReadMemory(out_ptr, outlen, oerr)
-        if oerr.Fail() or not body:
-            results.append({{"in": in_path, "ok": False, "reason": "read_output_fail:%s" % oerr}})
-            continue
-        try:
-            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-            open(out_path, "wb").write(body)
-        except Exception as e:
-            results.append({{"in": in_path, "ok": False, "reason": "write_out:%s" % e}})
-            continue
-        results.append({{"in": in_path, "ok": True, "bytes": len(body)}})
-
-    json.dump(results, open(MANIFEST_PATH + ".result", "w"))
-    print("DONE:%d" % len(results))
+    # 正常结束与脚本中途异常都由 finally 统一回收；free 必须在 Detach 之前。
+    # 已知残余：宿主侧 subprocess.run timeout 后 kill 掉 lldb 子进程时，
+    # 脚本执行不到 finally，这四个缓冲区会留在目标微信进程里——该路径无法
+    # 在脚本内回收（需要另一次 attach 才能 free），接受此残余、不改超时机制。
     try:
-        process.Detach()
-    except Exception:
-        pass
+        werr = lldb.SBError()
+        process.WriteMemory(cfg_ptr, (4).to_bytes(4, "little") + bytes(60), werr)
+
+        manifest = json.load(open(MANIFEST_PATH))
+        results = []
+        for item in manifest:
+            in_path = item["in"]
+            out_path = item["out"]
+            try:
+                data = open(in_path, "rb").read()
+            except Exception as e:
+                results.append({{"in": in_path, "ok": False, "reason": "read:%s" % e}})
+                continue
+            if len(data) > IN_CAP:
+                results.append({{"in": in_path, "ok": False, "reason": "too_large"}})
+                continue
+            werr = lldb.SBError()
+            process.WriteMemory(in_ptr, data, werr)
+            if werr.Fail():
+                results.append({{"in": in_path, "ok": False, "reason": "write_fail:%s" % werr}})
+                continue
+            process.WriteMemory(outlen_ptr, (OUT_CAP).to_bytes(8, "little"), lldb.SBError())
+            r, e = call9(inner_addr, in_ptr, len(data), out_ptr, outlen_ptr, cfg_ptr, 0, 0, 0, 0)
+            if r != 0:
+                results.append({{"in": in_path, "ok": False, "reason": "ret=%s err=%s" % (r, e)}})
+                continue
+            lerr = lldb.SBError()
+            outlen_bytes = process.ReadMemory(outlen_ptr, 8, lerr)
+            outlen = struct.unpack("<Q", outlen_bytes)[0] if not lerr.Fail() else 0
+            if outlen <= 0 or outlen > OUT_CAP:
+                results.append({{"in": in_path, "ok": False, "reason": "bad_outlen:%d" % outlen}})
+                continue
+            oerr = lldb.SBError()
+            body = process.ReadMemory(out_ptr, outlen, oerr)
+            if oerr.Fail() or not body:
+                results.append({{"in": in_path, "ok": False, "reason": "read_output_fail:%s" % oerr}})
+                continue
+            try:
+                Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+                open(out_path, "wb").write(body)
+            except Exception as e:
+                results.append({{"in": in_path, "ok": False, "reason": "write_out:%s" % e}})
+                continue
+            results.append({{"in": in_path, "ok": True, "bytes": len(body)}})
+
+        json.dump(results, open(MANIFEST_PATH + ".result", "w"))
+        print("DONE:%d" % len(results))
+    finally:
+        free_ptr(in_ptr)
+        free_ptr(out_ptr)
+        free_ptr(outlen_ptr)
+        free_ptr(cfg_ptr)
+        try:
+            process.Detach()
+        except Exception:
+            pass
 
 try:
     from pathlib import Path

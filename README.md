@@ -81,9 +81,11 @@ macOS 版使用 LLDB 捕获微信内存中的密钥：
 1. 打开 [Releases](https://github.com/ImUpXuu/SIWX/releases)。
 2. 下载对应平台产物：
    - Windows：`stories-in-wx-v*-windows-x64.exe`
-   - macOS：`stories-in-wx-v*-macos.dmg`
+   - macOS：`stories-in-wx-v*-macos.dmg`（仅 Apple Silicon）
 3. 双击运行，程序会自动打开浏览器进入 Web 控制台。
 4. 按引导页完成：欢迎检查 → 选择账号 → 提取密钥并解密。
+
+> macOS 提示：DMG 只包含 **Apple Silicon (arm64)** 构建，且**未签名、未公证**，首次打开需右键「打开」（或 `xattr -dr com.apple.quarantine`）绕过 Gatekeeper；Intel Mac 请按下方「方式二：源码运行」。安装细节见 [MACOS\_SUPPORT.md](./MACOS_SUPPORT.md)。
 
 ### 方式二：源码运行
 

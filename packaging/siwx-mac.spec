@@ -55,10 +55,14 @@ exe = EXE(
     name="stories-in-wx",
     console=True,
     upx=False,
+    # 交付物仅面向 Apple Silicon：与 .github/workflows/release.yml 中 build-macos 的
+    # `uname -m == arm64` 断言配套，runner 漂移时直接失败而不是静默产出 x86_64 包。
+    target_arch="arm64",
 )
 app = BUNDLE(
     exe,
     name="stories-in-wx.app",
+    # BUNDLE 从 EXE 继承 target_arch（PyInstaller 不读取本参数），只需上面声明。
     info_plist={
         "CFBundleName": "stories-in-wx",
         "CFBundleDisplayName": "stories-in-wx",

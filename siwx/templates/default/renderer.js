@@ -848,6 +848,22 @@
   document.getElementById('searchInput').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') jumpSearch(e.shiftKey ? -1 : 1);
   });
+  // P1-5：搜索栏默认 display:none，页头放大镜是唯一入口（button 的 Enter
+  // 天然触发 click）；再点一次收起，收起时与 searchClose 同口径清空条件，
+  // 避免留下看不见的过滤。
+  document.getElementById('searchToggle').addEventListener('click', function() {
+    var bar = document.getElementById('searchBar');
+    var open = bar.classList.toggle('active');
+    var input = document.getElementById('searchInput');
+    if (open) {
+      input.focus();
+      input.select();
+    } else if (searchKw) {
+      input.value = '';
+      searchKw = '';
+      applyFilter();
+    }
+  });
   document.getElementById('searchClose').addEventListener('click', function() {
     // 关闭搜索栏必须连条件一起清——隐藏着的过滤条件比没有条件更难排查
     var bar = document.getElementById('searchBar');

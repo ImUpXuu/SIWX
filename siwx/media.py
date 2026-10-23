@@ -279,6 +279,21 @@ def _find_voip_dll():
     return None
 
 
+def _wxgf_worker_cmd(dll):
+    """wxgf 转码 worker 子进程的命令行。
+
+    源码态：`python -c <worker 源码> <dll>`，worker 源码是唯一事实来源。
+    PyInstaller 打包后 sys.executable 是本程序的 exe，`-c` 会被 CLI 的
+    argparse 当成未知参数（P1-1：打包版 wxgf 转码永远失败），因此改走
+    run.py 里的 `--wxgf-worker` 独立入口——不带 `-c`，参数原样透传给
+    run.py 执行的同一个 `_WXGF_WORKER` 字符串。
+    """
+    import sys as _sys
+    if getattr(_sys, "frozen", False):
+        return [_sys.executable, "--wxgf-worker", str(dll)]
+    return [_sys.executable, "-c", _WXGF_WORKER, str(dll)]
+
+
 def convert_wxgf(data: bytes):
     """wxgf → JPEG/PNG（微信官方解码器，子进程隔离）。失败返回 None。
 
@@ -288,6 +303,7 @@ def convert_wxgf(data: bytes):
     import subprocess
     import sys as _sys
 
+    frozen = bool(getattr(_sys, "frozen", False))
     dll = _find_voip_dll()
     if dll is None:
         global _VOIP_DLL_MISSING
@@ -301,13 +317,14 @@ def convert_wxgf(data: bytes):
     for attempt in (1, 2):
         try:
             proc = subprocess.run(
-                [_sys.executable, "-c", _WXGF_WORKER, str(dll)],
+                _wxgf_worker_cmd(dll),
                 input=data, capture_output=True, timeout=30,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except (OSError, subprocess.TimeoutExpired) as e:
             try:
-                _media_logger.detailed("media",
-                                       f"wxgf 转码子进程异常: {type(e).__name__}")
+                _media_logger.detailed(
+                    "media",
+                    f"wxgf 转码子进程异常: {type(e).__name__} frozen={frozen}")
             except Exception:
                 pass
             continue
@@ -319,7 +336,7 @@ def convert_wxgf(data: bytes):
         try:
             _media_logger.detailed(
                 "media",
-                f"wxgf 转码失败(第{attempt}次) rc={proc.returncode} "
+                f"wxgf 转码失败(第{attempt}次) frozen={frozen} rc={proc.returncode} "
                 f"{len(data)}B stderr={proc.stderr[:120]!r}", ring=False)
         except Exception:
             pass
@@ -567,8 +584,21 @@ def _finalize(body: bytes, ext: str, ctype: str):
             # media_wxgf_macos.py 顶部说明）。需要微信正在运行且 SIP 关闭，
             # 任一不满足就优雅返回 None，走"转码失败"的既有兜底，不影响
             # 其余图片的正常展示。（P0-1，吸收自 PR #28）
-            from siwx import media_wxgf_macos
-            result = media_wxgf_macos.convert_wxgf_for_web(body, log=event)
+            #
+            # P1-2：导入/调用整段兜异常——macOS .app 打包后没有 .py 源文件，
+            # 旧实现在模块导入时执行 inspect.getsource 直接抛 OSError，会把
+            # 单图请求打成 500。这里降级为"转码失败"（返回 None），由调用方
+            # 落到下一级候选或按失败处理。
+            try:
+                from siwx import media_wxgf_macos
+                result = media_wxgf_macos.convert_wxgf_for_web(body, log=event)
+            except Exception as e:
+                result = None
+                try:
+                    event(f"macOS wxgf 转码模块异常，按转码失败处理: "
+                          f"{type(e).__name__}: {e}")
+                except Exception:
+                    pass
             if result:
                 jpeg_body, jpeg_ctype = result
                 return jpeg_body, "jpeg", jpeg_ctype

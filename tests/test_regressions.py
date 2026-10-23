@@ -31,6 +31,11 @@ from unittest import mock
 from contextlib import redirect_stdout
 from pathlib import Path
 
+try:
+    import tomllib            # Python 3.11+；3.10 无标准库 TOML 解析器
+except ModuleNotFoundError:   # pragma: no cover
+    tomllib = None
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -368,6 +373,37 @@ class TestExport(TempRootCase):
         self.assertNotIn("_avatar_map", d["session"])
         for k in d["session"]:
             self.assertFalse(k.startswith("_"), f"内部键泄漏: {k}")
+
+    def test_toml_export_is_parseable(self):
+        """P1-4：旧实现把 bool 拼成 Python 的 True/False，tomllib 直接报错。"""
+        if tomllib is None:
+            self.skipTest("tomllib 需要 Python 3.11+")
+        res = self._export("toml")
+        data = tomllib.loads(Path(res["file"]).read_text(encoding="utf-8"))
+        self.assertIs(data["session"]["isGroup"], False)
+        self.assertEqual(data["session"]["messageCount"], 12)
+        self.assertEqual(len(data["messages"]), 12)
+        for msg in data["messages"]:
+            self.assertIsInstance(msg["isSend"], int)
+            self.assertIsInstance(msg["localId"], int)
+            self.assertIn("第 ", msg["content"])
+        self.assertIn("第 0 条消息", [m["content"] for m in data["messages"]])
+
+    def test_toml_group_session_keeps_boolean_type(self):
+        """群聊 isGroup=true 必须是 TOML 布尔，而不是被序列化成字符串。"""
+        if tomllib is None:
+            self.skipTest("tomllib 需要 Python 3.11+")
+        acc, account, chat = make_account(
+            self.tmp / "group_root", chat=fx.DEMO_GROUP_IDS[0], n_texts=3)
+        res = exporter.run_export(
+            acc, account, chat, "群聊A", "toml",
+            want_messages=True, want_media=False, want_avatars=False,
+            export_root=self.tmp / "toml_group", pack="none")
+        data = tomllib.loads(Path(res["file"]).read_text(encoding="utf-8"))
+        self.assertIs(data["session"]["isGroup"], True)
+        self.assertEqual(len(data["messages"]), 3)
+        self.assertTrue(all(isinstance(m["isSend"], int)
+                            for m in data["messages"]))
 
     def test_multi_export_creates_separate_dirs(self):
         """修复前所有会话都写进同一个 "_" 目录。"""

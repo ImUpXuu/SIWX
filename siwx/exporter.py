@@ -931,19 +931,33 @@ def _write_batch(path, fmt, session, acc_dir, chat, start_ts, end_ts, account, n
         return _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats)
 
 
+def _toml_value(v) -> str:
+    """TOML 标量序列化。
+
+    TOML 只接受小写 ``true``/``false``，Python 的 ``str(True)`` 会拼出
+    ``isGroup = True`` 让 ``tomllib`` 直接报错；数值原样输出；字符串走
+    ``json.dumps``（JSON 字符串转义是 TOML basic string 的子集）；
+    TOML 没有 null，None 退化为空字符串。调用方仍需跳过 dict 等复合值。
+    """
+    if v is None:
+        return '""'
+    if isinstance(v, bool):          # 必须在 int 之前：bool 是 int 的子类
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    return json.dumps(str(v), ensure_ascii=False)
+
+
 def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None):
-    def toml_str(s):
-        return json.dumps(str(s), ensure_ascii=False)
-    header = ["[exportInfo]", f'version = {toml_str("1.0")}',
-              f'generator = {toml_str(GENERATOR)}', f'exportedAt = {int(time.time())}',
+    header = ["[exportInfo]", f'version = {_toml_value("1.0")}',
+              f'generator = {_toml_value(GENERATOR)}',
+              f'exportedAt = {_toml_value(int(time.time()))}',
               "", "[session]"]
     for k, v in session.items():
-        if isinstance(v, str):
-            header.append(f'{k} = {toml_str(v)}')
-        elif isinstance(v, dict):
+        if isinstance(v, dict):
             pass
         else:
-            header.append(f'{k} = {v}')
+            header.append(f'{k} = {_toml_value(v)}')
     header.append("")
     count = 0
     # 逐条写盘：旧实现把整篇 messages 先 append 进 lines 列表、最后一次 write_text，
@@ -958,14 +972,14 @@ def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, n
                 stats.observe(msg)
             count += 1
             block = ["[[messages]]",
-                     f"localId = {msg['localId']}",
-                     f"createTime = {toml_str(datetime.fromtimestamp(msg['createTime']).strftime('%Y-%m-%d %H:%M:%S'))}",
-                     f"type = {toml_str(msg['typeName'])}",
-                     f"sender = {toml_str(msg['senderDisplayName'])}",
-                     f"isSend = {msg['isSend']}",
-                     f"content = {toml_str(msg['content'])}"]
+                     f"localId = {_toml_value(msg['localId'])}",
+                     f"createTime = {_toml_value(datetime.fromtimestamp(msg['createTime']).strftime('%Y-%m-%d %H:%M:%S'))}",
+                     f"type = {_toml_value(msg['typeName'])}",
+                     f"sender = {_toml_value(msg['senderDisplayName'])}",
+                     f"isSend = {_toml_value(msg['isSend'])}",
+                     f"content = {_toml_value(msg['content'])}"]
             if msg.get("mediaFile"):
-                block.append(f"mediaFile = {toml_str(msg['mediaFile'])}")
+                block.append(f"mediaFile = {_toml_value(msg['mediaFile'])}")
             block.append("")
             f.write("\n".join(block))
             f.write("\n")
