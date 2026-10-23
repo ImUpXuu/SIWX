@@ -280,6 +280,8 @@ def _fake_process_memory(blob: bytes) -> dict:
     }
 
 
+@unittest.skipIf(os.name != "nt",
+                 "config_cipher/winproc 仅 Windows 可用（模块级 ctypes.WinDLL）")
 class TestConfigCipherMultiPid(IsolatedRootCase):
     """两个微信实例各持一个 salt 的密钥：第一个命中后必须继续扫第二个。"""
 

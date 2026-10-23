@@ -1948,12 +1948,21 @@ class TestTempFileUniqueness(unittest.TestCase):
                               + bytes((j + marker) % 256 for j in range(PAGE_SZ - 16)))
                 targets.append((p, marker))
 
-            # 强制走「复制到临时文件」的回退分支
+            # 强制走「复制到临时文件」的回退分支。只让每个目标**首次** open
+            # 失败（模拟瞬时占用）：回退里的 shutil.copy2 还要再 open 一次源
+            # 文件——若每次都失败，只有 3.12+/Windows（copyfile 的 CopyFile2
+            # 快路径不经过 builtins.open）能通过，3.10/3.11/macOS 必然返回
+            # None，测试就变成了钉 CPython copyfile 的实现细节。改为首次失败
+            # 后放行，所有平台都稳定走到 mkstemp 唯一临时名的并发复制路径，
+            # 这才是本用例要验证的机制。
             real_open = builtins.open
             locked = {str(p) for p, _ in targets}
+            failed_once = set()
 
             def flaky_open(file, *a, **kw):
-                if str(file) in locked:
+                key = str(file)
+                if key in locked and key not in failed_once:
+                    failed_once.add(key)
                     raise OSError(13, "simulated lock")
                 return real_open(file, *a, **kw)
 
