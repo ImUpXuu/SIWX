@@ -9,7 +9,7 @@
   faces/maps 从消息重提取，头像按 avatars/md5(username).jpg 确定性规则
   重建映射，渲染器（templates/default/renderer.js）与原生导出完全同一条。
 
-口径约束（docs/deferred-improvements-2026-10-11.md §三/§四）：
+口径约束（本模块设计时的既定口径）：
 - 逐会话 json.load、写完即释放（防大会话 OOM；不做增量数组解析）；
 - manifest 沿用原 parse/media 段，只追加 converted 段（parse 统计与
   媒体失败分布无法从 JSON 重算）；
