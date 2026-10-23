@@ -22,8 +22,8 @@
 
 | 项目 | 要求 |
 |---|---|
-| Python | 3.10+（CI 使用 3.12；本地建议 3.11 / 3.12） |
-| 操作系统 | Windows（完整支持）或 macOS（4.1.80+） |
+| Python | 3.10+（CI 在 Windows 上跑 3.10 / 3.11 / 3.12，macOS 上跑 3.12；本地建议 3.11 / 3.12） |
+| 操作系统 | Windows（完整支持）或 macOS（需微信 4.1.8+，低于基线只警告、不硬拦） |
 | 依赖 | `pip install -r requirements.txt` |
 
 ```bash
@@ -97,10 +97,12 @@ python -m unittest tests.test_regressions
 python -m unittest tests.test_regressions.TestVersionSource
 ```
 
-前端改动请顺带做语法检查：
+前端改动请顺带做语法检查。项目没有 `package.json`（不存在 `type=module`），
+直接对 `.js` 跑 `node --check` 会按 CommonJS 解析而误报 `import`/`export`；
+先复制成临时 `.mjs` 再检查（CI 的「前端 JS 语法检查」步骤就是这么做的）：
 
 ```bash
-node --check siwx/ui/pages/<改动的文件>.js
+tmp="$(mktemp -d)"; cp siwx/ui/pages/<改动的文件>.js "$tmp/check.mjs"; node --check "$tmp/check.mjs"
 ```
 
 写测试时注意：
@@ -120,7 +122,8 @@ node --check siwx/ui/pages/<改动的文件>.js
 
 ### macOS
 
-- 需要微信 4.1.80+，密钥通过 LLDB 断点捕获。
+- 需要微信 4.1.8+（基线；**低于基线只警告、不硬拦**，仍会尝试），密钥通过 LLDB 断点捕获。
+- 早期文档把基线误写成 `4.1.80`（"4.1.8.0" 的笔误），曾导致 macOS 用户被版本判定直接拦下。
 - 提取时微信需处于登录状态；密钥未缓存时建议在 60 秒内重新登录微信。
 - 详见 [MACOS_SUPPORT.md](./MACOS_SUPPORT.md)。
 

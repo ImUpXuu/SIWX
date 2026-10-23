@@ -522,13 +522,19 @@ class TestConditions(unittest.TestCase):
 
     def test_explain(self):
         from siwx.plugins import conditions
-        ctx = self._ctx()
-        self.assertEqual(conditions.explain({}, ctx), "无显示条件")
-        self.assertEqual(conditions.explain({"requires_decrypted": True}, ctx),
-                         "条件已满足" if False else conditions.explain(
-                             {"requires_decrypted": True}, ctx))
+        # 空条件
+        self.assertEqual(conditions.explain({}, self._ctx()), "无显示条件")
+        # 满足：有已解密账号，requires_decrypted 通过
+        self.assertEqual(
+            conditions.explain({"requires_decrypted": True},
+                               self._ctx(decrypted_accounts=["wxid_a"])),
+            "条件已满足")
+        # 不满足：逐条列出未满足的键（此前这里是恒真断言，等于没测）
+        self.assertEqual(
+            conditions.explain({"requires_decrypted": True}, self._ctx()),
+            "未满足: requires_decrypted")
         msg = conditions.explain({"requires_decrypted": True,
-                                  "platform": "plan9"}, ctx)
+                                  "platform": "plan9"}, self._ctx())
         self.assertIn("未满足", msg)
 
 

@@ -14,16 +14,48 @@ jobs:
   # 测试闸门：旧配置里 CI 根本没有测试 job，任何 tag 都能在红测试上切出来；
   # 打包/发布/回写 version.json 全部 needs 本 job，测试不过就打不出包。
   test:
-    runs-on: windows-latest
+    # 覆盖声明的最低版本（3.10）与 macOS：旧配置只有 Windows + 3.12，
+    # 3.10 专有语法/标准库差异和 macOS 路径/编码差异都测不到。
+    # fail-fast=false：一个平台红了也要看到其余平台的结果。
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.10"
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
+      # 语法门禁：项目没有 package.json（不存在 type=module），直接对 .js 跑
+      # `node --check` 会按 CommonJS 解析而误报 import/export。复制成临时 .mjs
+      # 后再检查，才是这些浏览器 ES 模块的真实语法环境。runner 自带 node。
+      - name: 前端 JS 语法检查
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --version
+          tmpdir="$(mktemp -d)"
+          for f in siwx/ui/app.js siwx/ui/common.js siwx/ui/pages/*.js \
+                   siwx/templates/default/renderer.js; do
+            [ -f "$f" ] || { echo "缺少文件: $f" >&2; exit 1; }
+            tmp="$tmpdir/$(echo "$f" | tr '/' '_').mjs"
+            cp "$f" "$tmp"
+            node --check "$tmp"
+            echo "ok: $f"
+          done
       - name: 全量测试
         run: python -m pytest -q -rs
       - name: issue 模板校验不得被静默跳过
@@ -79,9 +111,14 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt -r requirements-build.txt
       - name: PyInstaller 打包 (exe)
         run: pyinstaller --clean -y packaging/siwx-win.spec
+      # 冒烟：产物连 --help 都跑不起来时，后面再算 SHA256 / 发 Release 毫无意义。
+      # 用 bash 而不是 PowerShell，省掉 $LASTEXITCODE 手工判断（bash -e 直接失败）。
+      - name: 产物冒烟（--help）
+        shell: bash
+        run: dist/stories-in-wx.exe --help
       - name: 重命名产物
         run: |
           $tag = "${{ github.ref_name }}"
@@ -113,9 +150,12 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt -r requirements-build.txt
       - name: PyInstaller 打包 (.app)
         run: pyinstaller --clean -y packaging/siwx-mac.spec
+      # 冒烟：直接跑 .app 内部二进制（Launcher 之外的真实入口），--help 必须为 0。
+      - name: 产物冒烟（--help）
+        run: dist/stories-in-wx.app/Contents/MacOS/stories-in-wx --help
       - name: 生成 DMG
         run: |
           mkdir -p dist/dmg-staging

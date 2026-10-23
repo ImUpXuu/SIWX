@@ -1,0 +1,7 @@
+# 构建专用依赖（只有 PyInstaller 打包 exe / .app 时才需要，运行时不需要）。
+# 用法（CI 的 build-windows / build-macos 与此一致）：
+#   pip install -r requirements.txt -r requirements-build.txt
+# PyInstaller 锁定到本机验证过的版本：打包结果对 minor 版本敏感（spec 解析、
+# target_arch 处理、BUNDLE 信息都变过），放 `>=` 会让同一个 tag 在不同日期
+# 打出不同产物，破坏可复现性。升级时请在本机完整打一次包并跑 --help 冒烟。
+pyinstaller==6.19.0

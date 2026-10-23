@@ -20,6 +20,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import struct
@@ -1344,7 +1345,50 @@ class TestDecryptAtomic(unittest.TestCase):
 
 # ── 9. CLI --json ───────────────────────────────────────────────
 
-class TestLogsApi(unittest.TestCase):
+class _TempAppDirsCase(TempRootCase):
+    """P3-25：SIWX_ROOT 之外，把 siwx.log 的文件 handler 也临时指向 tmp/logs。
+
+    logging_setup 在 server 首次导入时就把 app_root()/logs/siwx.log 固化进
+    RotatingFileHandler（全量套件里早于本用例），只切 SIWX_ROOT 不够——日志
+    仍会写进真实安装目录。这里就地改路径、用例结束还原，不重建 server 单例。
+    """
+
+    def setUp(self):
+        super().setUp()
+        from siwx import server
+        self._log_handlers = []
+        log_dir = self.tmp / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        for h in server._siwx_logger.handlers:
+            base = getattr(h, "baseFilename", None)
+            if not base:
+                continue
+            self._log_handlers.append((h, base))
+            self._retarget(h, str(log_dir / Path(base).name))
+
+    @staticmethod
+    def _retarget(handler, path: str) -> None:
+        """就地换文件：关旧流 → 改 baseFilename → 重开（handler 不摘除）。"""
+        handler.acquire()
+        try:
+            if getattr(handler, "stream", None) is not None:
+                handler.stream.close()
+                handler.stream = None
+            handler.baseFilename = path
+            handler.stream = handler._open()
+        finally:
+            handler.release()
+
+    def tearDown(self):
+        for handler, original in getattr(self, "_log_handlers", []):
+            try:
+                self._retarget(handler, original)
+            except OSError:
+                pass
+        super().tearDown()
+
+
+class TestLogsApi(_TempAppDirsCase):
     """/api/logs 条目是**混合形状**的：
 
     旧/文件日志 → [ts_ms, text]；结构化日志（siwx.logger）→ [ts_ms, level, module, text]。
@@ -1889,6 +1933,10 @@ class TestTempFileUniqueness(unittest.TestCase):
         from siwx.sqlcipher import PAGE_SZ, _read_page1
 
         tmp = Path(tempfile.mkdtemp(prefix="siwx_p1_"))
+        # P3-25：把 mkstemp 的落点也限定到本测试目录——否则残留断言是在扫
+        # 全局 TEMP，既可能是别的进程/别的用例留下的，也可能被瞬时占用误判。
+        old_tempdir = tempfile.tempdir
+        tempfile.tempdir = str(tmp)
         try:
             n = 8
             targets = []
@@ -1939,9 +1987,10 @@ class TestTempFileUniqueness(unittest.TestCase):
                     results.get(str(path)), bytes([marker]) * 16,
                     f"{path.parent.name} 读到的 page1 不匹配（并发串扰）")
 
-            residue = list(Path(tempfile.gettempdir()).glob("siwx_p1_*.tmp"))
+            residue = list(tmp.glob("siwx_p1_*.tmp"))
             self.assertEqual(residue, [], f"临时文件残留: {residue}")
         finally:
+            tempfile.tempdir = old_tempdir
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_source_uses_mkstemp(self):
@@ -2571,7 +2620,7 @@ class TestLogDesensitize(unittest.TestCase):
 
 # ── 20. 日志级别切换：开关只控展示，文件通道恒 DEBUG ────────────
 
-class TestLogLevelSwitchAffectsFileLog(unittest.TestCase):
+class TestLogLevelSwitchAffectsFileLog(_TempAppDirsCase):
     """P0 留存改造后的语义：detailed 埋点始终写 siwx.log（文件通道恒
     DEBUG），"先开 Debug 再复现"的范式废弃——偶发问题事后可在文件里找到
     当时记录。开关只控制环形缓冲/UI 展示（logger.get_level）。"""
@@ -3768,9 +3817,16 @@ class TestChatMessageFilter(TempRootCase):
             self.assertIn(token, js)
         self.assertIn('data-kind="image"', html_)
         self.assertIn('id="c-filter"', html_)
-        # 缓存指纹必须刷新，否则升级后浏览器仍用旧 UI（本地指纹线，非上游值）
+        # 缓存指纹必须刷新，否则升级后浏览器仍用旧 UI（本地指纹线，非上游值）。
+        # 不硬编码具体串：从 app.js 读取当前 UI_VERSION，再校验 index.html
+        # 的引用与之一致（指纹本身由 tests/test_version_sync.py 统一钉住）。
         appjs = (ROOT / "siwx" / "ui" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("2026101702", appjs)
+        m = re.search(r"UI_VERSION\s*=\s*'([^']+)'", appjs)
+        self.assertIsNotNone(m, "app.js 缺少 UI_VERSION")
+        ver = m.group(1)
+        index = (ROOT / "siwx" / "ui" / "index.html").read_text(encoding="utf-8")
+        self.assertIn(f"/app.js?v={ver}", index)
+        self.assertIn(f"/common.js?v={ver}", index)
 
 
 # ── 30. HTML 模板可替换框架 + 合并转发/转文字渲染 ───────────────

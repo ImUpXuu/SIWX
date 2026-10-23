@@ -342,8 +342,10 @@ siwx/
 ## 构建发布
 
 ```bash
+# 安装锁定的构建依赖
+pip install -r requirements-build.txt
+
 # Windows
-pip install pyinstaller
 pyinstaller packaging/siwx-win.spec
 
 # macOS
