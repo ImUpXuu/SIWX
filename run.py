@@ -40,6 +40,16 @@ def _run_wxgf_worker(dll: str) -> int:
 
 
 if __name__ == "__main__":
+    # 控制台编码兜底：cp1252 等西文控制台编不了中文——argparse 打印 --help
+    # 会直接 UnicodeEncodeError 崩掉（CI 冒烟与英语区 Windows 用户都会踩）。
+    # 只把不可编码字符降级为替换符，不改变 UTF-8 控制台的行为。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            if _stream is not None and (_stream.encoding or "").lower() not in (
+                    "utf-8", "utf8"):
+                _stream.reconfigure(errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
     # PyInstaller 打包后必须最先调用：multiprocessing 子进程以本 exe
     # 重新拉起时，由 freeze_support 分流到 spawn_main，避免整包重跑 CLI
     from multiprocessing import freeze_support
