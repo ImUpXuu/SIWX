@@ -9,12 +9,18 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 from siwx import logger as _slog
 
 _ENTROPY = b"stories-in-wx::keystore::v1"
+
+# 进程内写锁：Web API 是多线程，同一进程内两个写者同时 os.replace 同一目标
+# 在 Windows 上会撞 WinError 5（MOVEFILE_REPLACE_EXISTING 共享冲突）。唯一
+# 临时名只解决"临时文件互踩"，目标文件本身的替换仍需串行化。
+_SAVE_LOCK = threading.Lock()
 
 _USE_DPAPI = sys.platform == "win32"
 
@@ -150,13 +156,31 @@ def load() -> dict:
 
 
 def save(store: dict) -> None:
+    """原子保存密钥库（唯一临时名 + os.replace）。
+
+    P3-2：旧实现用固定的 `keystore.tmp`——导出是多进程、Web API 是多线程，
+    两个写者同时保存会互相覆盖：后写者可能已把临时文件 rename 走，先写者
+    的 `os.replace` 拿到 FileNotFoundError（Windows 上还有 PermissionError），
+    或双方交错写出半个 JSON。`tempfile.mkstemp` 保证每个写者独占自己的
+    临时文件，`os.replace` 本身仍是原子的（读方永远看到完整文件）。
+    """
     p = store_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
+    # 序列化/DPAPI 加密放在建临时文件之前：失败时不留下任何残留
+    payload = _protect(json.dumps(store, ensure_ascii=False).encode("utf-8"))
+    fd, tmp_name = tempfile.mkstemp(dir=str(p.parent),
+                                    prefix=p.name + ".", suffix=".tmp")
     try:
-        tmp.write_bytes(_protect(json.dumps(store, ensure_ascii=False).encode("utf-8")))
-        os.replace(tmp, p)
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        with _SAVE_LOCK:
+            os.replace(tmp_name, p)
     except OSError as e:
+        # 异常清理自己的临时文件；别人的临时文件不碰（并发写者各自负责）
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
         # 审计 §3.5:142-147：只补日志，不改异常传播语义（记完仍抛出），
         # 不要吞掉写入失败而掩盖数据丢失
         _slog.error("keystore", f"保存失败 path={p}: {e}")

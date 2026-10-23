@@ -39,6 +39,16 @@
     if (/^(https?:|\/|\.\/|\.\.\/|#)/i.test(s)) return s;
     return '';
   }
+  function safeMedia(u) {
+    // 媒体路径是导出目录内的相对路径（media/xxx.jpg），safeUrl 的白名单要求
+    // 显式前缀，裸相对路径会被判空——先用 safeUrl 判一次，未命中时再放行
+    // "无 scheme、不以 // 开头"的纯相对路径；javascript:/data:/file: 一律拒绝
+    var s = safeUrl(u);
+    if (s) return s;
+    var raw = String(u == null ? '' : u).trim();
+    if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.slice(0, 2) === '//') return '';
+    return raw;
+  }
   function fmtDate(ts) { var d = new Date(ts*1000); return d.getFullYear()+'年'+(d.getMonth()+1)+'月'+d.getDate()+'日'; }
   function fmtTime(ts) { var d = new Date(ts*1000); var p = function(n){return String(n).padStart(2,'0')}; return p(d.getHours())+':'+p(d.getMinutes()); }
   function fmtFull(ts) { return fmtDate(ts)+' '+fmtTime(ts); }
@@ -516,9 +526,12 @@
     gallery.length = 0;
     for (var i = 0; i < filtered.length; i++) {
       var m = filtered[i], src = null, kind = '';
-      if (m.type === 3 && m.mediaPath) { src = m.mediaPath; kind = 'image'; }
+      // 图源一律过白名单：路径来自导出数据（可能被改动）与对端 CDN 属性，
+      // 不放行 javascript:/data: 之类 scheme；判空即跳过，不进图库
+      if (m.type === 3 && m.mediaPath) { src = safeMedia(m.mediaPath); kind = 'image'; }
       else if (m.type === 47) {
-        src = m.mediaPath || xmlAttr(m.rawContent || '', 'emoji', 'cdnurl');
+        src = safeMedia(m.mediaPath) ||
+          safeMedia(xmlAttr(m.rawContent || '', 'emoji', 'cdnurl'));
         if (src) kind = 'sticker';
       }
       if (!src) continue;
@@ -537,16 +550,28 @@
     if (!gallery.length) return;
     lbPos = (pos + gallery.length) % gallery.length;
     var it = gallery[lbPos];
-    document.getElementById('lightboxImg').src = it.src;
+    // 二次白名单：图库已过滤过，这里再兜一次，确保 src/href 不会是 javascript:
+    var src = safeMedia(it.src);
+    var img = document.getElementById('lightboxImg');
+    var dl = document.getElementById('lbDownload');
+    if (src) {
+      img.src = src;
+      dl.href = src;                       // 下载链接同走白名单
+      dl.setAttribute('download', it.name);
+      dl.style.display = '';
+    } else {
+      // 源不可用：不给可点的 href（无 href 的 <a> 不触发导航），下载入口隐藏
+      img.removeAttribute('src');
+      dl.removeAttribute('href');
+      dl.removeAttribute('download');
+      dl.style.display = 'none';
+    }
     document.getElementById('lbCounter').textContent = (lbPos + 1) + ' / ' + gallery.length;
     document.getElementById('lbCaption').textContent = it.label;
-    var dl = document.getElementById('lbDownload');
-    dl.href = it.src;
-    dl.setAttribute('download', it.name);
     var one = gallery.length <= 1;
     document.getElementById('lbPrev').style.display = one ? 'none' : '';
     document.getElementById('lbNext').style.display = one ? 'none' : '';
-    document.getElementById('lightboxImg').classList.remove('lb-zoom');
+    img.classList.remove('lb-zoom');
     document.getElementById('lightbox').classList.add('active');
   }
   function hideLb() {

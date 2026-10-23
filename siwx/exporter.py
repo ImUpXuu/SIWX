@@ -29,6 +29,17 @@ from siwx.export_stream import (
 GENERATOR = "stories-in-wx"
 EXPORT_VERSION = "1.0"
 
+# 文本截断阈值（P3-8）。此前各格式互不一致（CSV 2000 / HTML 8000 / SQLite 8000
+# / XLSX 30000）且 manifest 无记录；现统一到命名常量，并把每格式实际截断条数
+# 写进 manifest["truncated"] 与 run_export 返回值。
+# - HTML/SQLite 8000：html_template._msg_entry 对 rawContent 也按 8000 截断，
+#   两处必须同步；超过 8000 字的单条消息实测极少。
+# - XLSX 30000：Excel 单元格硬上限 32767 字符，留出余量。
+# - CSV/JSON/TXT/Markdown/TOML 不截断（CSV 标准无单元格长度限制）。
+HTML_RAW_CONTENT_LIMIT = 8000
+SQLITE_RAW_CONTENT_LIMIT = 8000
+XLSX_CELL_LIMIT = 30000
+
 # 语音媒体在组合键 media_map 里的槽位前缀（与图片槽位隔离）
 _VOICE_KEY = "\x00voice"
 
@@ -82,15 +93,19 @@ def collect_avatars(acc_out_dir: Path, usernames: list, dest: Path, progress=Non
     """从 head_image.db 提取头像 → avatars/<md5(username)>.jpg。
 
     审计 §4.1：写失败原为未处理异常，会让 run_export 的头像阶段整体崩溃；
-    现逐条包 try + 计数，结束时汇总一条 detailed。"""
+    现逐条包 try + 计数，结束时汇总一条 detailed。
+
+    P3-7：连接与查询同样包 `sqlite3.Error`——head_image.db 损坏/被占用时
+    只降级为「没有头像」（返回已收集的 mapping），不再让整个会话导出失败。"""
     db = acc_out_dir / "head_image" / "head_image.db"
     mapping = {}
     if not db.is_file():
         logger.detailed("export", f"头像库不存在: {db.name}")
         return mapping
-    conn = sqlite3.connect(db)
+    conn = None
     hit = fail = 0
     try:
+        conn = sqlite3.connect(db)
         for i, un in enumerate(usernames):
             row = conn.execute(
                 "SELECT image_buffer FROM head_image WHERE username=?", (un,)).fetchone()
@@ -105,8 +120,18 @@ def collect_avatars(acc_out_dir: Path, usernames: list, dest: Path, progress=Non
                     logger.detailed("export", f"头像写入失败 username={un}: {e}")
             if (i + 1) % 50 == 0 and progress:
                 progress(0, f"头像 {i + 1}/{len(usernames)}")
+    except sqlite3.Error as e:
+        # 库损坏（file is not a database）/被锁：保留已收集的头像，继续导出
+        logger.warn("export",
+                    f"头像库读取失败，本次导出降级为无头像"
+                    f"（已收集 {len(mapping)} 个，用户数 {len(usernames)}）: "
+                    f"{db.name}: {e}")
     finally:
-        conn.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
     logger.detailed("export",
                     f"头像提取: db_exists=True 用户数={len(usernames)} "
                     f"命中={hit} 写失败={fail}")
@@ -470,6 +495,7 @@ class _ExportStats:
         self.record_items = 0
         self.fallback_labels = 0
         self.media_attached = 0
+        self.truncated = 0      # 本格式实际截断的消息条数（P3-8）
 
     def observe(self, msg: dict) -> None:
         t = msg.get("localType")
@@ -638,6 +664,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     fname = f"{safe}_{stamp}"
     files: list[str] = []
     written_total = 0
+    # P3-8：每格式实际截断条数（无截断也记 0，供 manifest/界面统一读取）
+    truncated_by_fmt: dict = {}
     stats_manifest = None
     for fi, one_fmt in enumerate(fmts):
         if should_cancel is not None and should_cancel():
@@ -698,6 +726,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             raise ValueError(f"未知格式: {one_fmt}")
         files.append(str(out_file))
         written_total += written
+        truncated_by_fmt[one_fmt] = stats.truncated
         progress(87, f"写入完成（{one_fmt}）: {written} 条")
         logger.detailed("export",
                         f"{logger.job_prefix()}写出完成 fmt={one_fmt} "
@@ -721,6 +750,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         # written_total 是多格式实际写入总量（对账/排查用）
         "collected_count": count, "written_count": output_count,
         "written_total": written_total,
+        "truncated": truncated_by_fmt,
         "files": files,
         "parse": stats_manifest.to_dict(),
         "media": {
@@ -796,6 +826,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "files": files_out,
         "format": fmt, "pack": pack,
         "message_count": output_count, "written_total": written_total,
+        "truncated": truncated_by_fmt,
         "media_count": stats_media + stats_voice,
         "image_count": stats_media, "voice_count": stats_voice,
         "avatar_count": stats_ava,
@@ -904,7 +935,6 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                for un in sorted(senders or ())]
 
     count = 0
-    truncated = 0      # P3：html_template._msg_entry 对 rawContent 截 8000 字
     faces_used: set = set()
     map_keys: set = set()
     with open(path, "w", encoding="utf-8") as f:
@@ -918,8 +948,8 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                 stats.observe(msg)
             faces_used |= wx_faces.used_from_message(msg)
             map_keys |= wx_maps.used_from_message(msg)
-            if len(msg.get("rawContent") or "") > 8000:
-                truncated += 1
+            if stats and len(msg.get("rawContent") or "") > HTML_RAW_CONTENT_LIMIT:
+                stats.truncated += 1
             stream_html_msg(f, msg, first=(count == 0))
             count += 1
             if count % 500 == 0:
@@ -931,10 +961,10 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                          maps=wx_maps.datauris(map_keys),
                          template=template,
                          media_enabled=media_enabled)
-    if truncated:
+    if stats and stats.truncated:
         logger.detailed("html",
-                        f"HTML rawContent截断(>8000字) {truncated}/{count} 条",
-                        ring=False)
+                        f"HTML rawContent截断(>{HTML_RAW_CONTENT_LIMIT}字) "
+                        f"{stats.truncated}/{count} 条", ring=False)
 
     # 审计 §4.6：服务端统计埋点落在调用方（html_template 保持零业务依赖）
     logger.detailed(
@@ -1042,7 +1072,6 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
                   session["isGroup"], session["messageCount"],
                   session["firstTimestamp"], session["lastTimestamp"]))
     count = 0
-    truncated = 0      # P3：rawContent 截断留痕（8000 字上限）
     # P2-3：仅元数据模式保留 session 表与 messages 表结构，不插任何消息行
     msgs = (message_stream(acc_dir, chat, start_ts, end_ts, account, names)
             if want_messages else ())
@@ -1052,14 +1081,14 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
             stats.observe(msg)
         count += 1
         raw = msg.get("rawContent") or ""
-        if len(raw) > 8000:
-            truncated += 1
+        if stats and len(raw) > SQLITE_RAW_CONTENT_LIMIT:
+            stats.truncated += 1
         conn.execute("INSERT INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                      (msg["localId"], msg["createTime"],
                       datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                       msg["localType"], msg["typeName"], msg["isSend"],
                       msg["senderUsername"], msg["senderDisplayName"],
-                      msg["content"], raw[:8000],
+                      msg["content"], raw[:SQLITE_RAW_CONTENT_LIMIT],
                       msg.get("mediaFile")))
         if count % 1000 == 0:
             conn.commit()
@@ -1067,10 +1096,10 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
                 progress(0, f"已写入 {count} 条…")
     conn.commit()
     conn.close()
-    if truncated:
+    if stats and stats.truncated:
         logger.detailed("export",
-                        f"SQLite rawContent截断(>8000字) {truncated}/{count} 条",
-                        ring=False)
+                        f"SQLite rawContent截断(>{SQLITE_RAW_CONTENT_LIMIT}字) "
+                        f"{stats.truncated}/{count} 条", ring=False)
     return count
 
 
@@ -1083,7 +1112,6 @@ def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, med
     ws = wb.create_sheet("聊天记录")
     ws.append(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
     count = 0
-    truncated = 0      # P3：单元格 32767 字上限，提前在 30000 字截断并留痕
     # P2-3：仅元数据模式保留表头行，不追加任何消息行
     msgs = (message_stream(acc_dir, chat, start_ts, end_ts, account, names)
             if want_messages else ())
@@ -1092,19 +1120,19 @@ def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, med
         if stats:
             stats.observe(msg)
         count += 1
-        if len(msg["content"]) > 30000:
-            truncated += 1
+        if stats and len(msg["content"]) > XLSX_CELL_LIMIT:
+            stats.truncated += 1
         ws.append([msg["localId"],
                    datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                    msg["typeName"], msg["senderDisplayName"],
-                   "是" if msg["isSend"] else "否", msg["content"][:30000],
+                   "是" if msg["isSend"] else "否", msg["content"][:XLSX_CELL_LIMIT],
                    msg.get("mediaFile") or ""])
         if count % 1000 == 0 and progress:
             progress(0, f"已写入 {count} 条…")
     wb.save(path)
-    if truncated:
+    if stats and stats.truncated:
         logger.detailed("export",
-                        f"XLSX内容截断(>30000字) {truncated}/{count} 条，"
+                        f"XLSX内容截断(>{XLSX_CELL_LIMIT}字) {stats.truncated}/{count} 条，"
                         f"换 JSON/HTML 格式可得全文", ring=False)
     return count
 

@@ -312,8 +312,11 @@ function runExtract() {
   logBox.innerHTML = '';
   resBox.innerHTML = '';
   startJob({ mode: 'auto', db_dir: state.account.db_dir },
-    logs => { if (body.contains(logBox)) renderLog(logBox, logs); },
+    // add 模式下可在运行中关闭向导：teardown 后 body/logBox 已解绑，
+    // 回调必须整体静默丢弃，否则对 null 调 contains 直接抛 TypeError
+    logs => { if (body && logBox && body.contains(logBox)) renderLog(logBox, logs); },
     job => {
+      if (!body || !resBox) return;           // 向导已关闭，回调静默丢弃
       state.running = false;
       progress.classList.add('hidden');
       if (job.error) {
@@ -354,6 +357,8 @@ function close() {
 function teardown() {
   if (escHandler) document.removeEventListener('keydown', escHandler, true);
   escHandler = null;
+  // 运行中被关闭：任务还在飞，running 必须复位，否则再次打开时 tryRun 会一直拦住
+  if (state) state.running = false;
   if (ov) { ov.remove(); ov = null; card = null; body = null; }
 }
 

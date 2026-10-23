@@ -1,5 +1,8 @@
 """导出 API —— 下载导出产物（导出任务复用全局 /api/job 单槽）。"""
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file
@@ -8,6 +11,10 @@ from siwx import logger as _log
 from siwx import paths as _paths
 
 bp = Blueprint("export_api", __name__, url_prefix="/api/export")
+
+# /render 预览的整包读取上限（P3-11）：预览只需要前 20 条，但旧实现会把
+# 整个 JSON 读进内存；超过该大小的文件直接让用户下载，不做预览。
+MAX_PREVIEW_BYTES = 64 * 1024 * 1024
 
 # 内置导出格式（顺序即前端下拉顺序）
 BUILTIN_FORMATS = [
@@ -69,11 +76,32 @@ def download():
     return send_file(target, as_attachment=True)
 
 
+def _open_in_file_manager(target: Path) -> None:
+    """按平台打开导出目录/在文件管理器中选中文件（P3-10）。
+
+    Windows：explorer /select 选中文件，目录走 os.startfile；
+    macOS：文件用 `open -R`（在 Finder 中定位），目录用 `open`；
+    其他平台（Linux）：xdg-open 打开目录本身/文件所在目录。
+
+    只负责发起进程，不等待也不校验返回值——命令缺失/无图形会话时由平台
+    自身报错，端点仍返回 opened（与旧行为一致）。"""
+    if sys.platform == "darwin":
+        cmd = (["open", "-R", str(target)] if target.is_file()
+               else ["open", str(target)])
+        subprocess.Popen(cmd)
+    elif sys.platform.startswith("win"):
+        if target.is_file():
+            subprocess.Popen(["explorer", "/select,", str(target)])
+        else:
+            os.startfile(str(target))
+    else:
+        subprocess.Popen(["xdg-open",
+                          str(target.parent if target.is_file() else target)])
+
+
 @bp.post("/open")
 def open_dir():
     """在文件资源管理器中打开导出目录/选中文件（仅限 exports 根内）。"""
-    import os
-    import subprocess
     data = request.get_json(silent=True) or {}
     p = Path(data.get("path", ""))
     root = _paths.exports_root().resolve()
@@ -81,10 +109,7 @@ def open_dir():
     if not target.is_relative_to(root) or not target.exists():
         _log.detailed("export", f"打开拒绝 path={p}")
         return jsonify({"error": "路径无效"}), 404
-    if target.is_file():
-        subprocess.Popen(["explorer", "/select,", str(target)])
-    else:
-        os.startfile(str(target))
+    _open_in_file_manager(target)
     return jsonify({"opened": True})
 
 
@@ -114,6 +139,19 @@ def render():
         if not target.is_relative_to(root) or not target.is_file():
             return jsonify({"error": "文件不存在"}), 404
         if target.suffix == ".json":
+            # P3-11：先看大小再决定是否整包读取——超限返回 413，前端提示下载
+            try:
+                size = target.stat().st_size
+            except OSError as e:
+                _log.detailed("export", f"预览 stat 失败 path={p}: {e}")
+                size = 0
+            if size > MAX_PREVIEW_BYTES:
+                _log.detailed("export",
+                              f"预览拒绝（文件 {size} 字节 > 上限 "
+                              f"{MAX_PREVIEW_BYTES}） path={p}")
+                return jsonify({
+                    "error": f"文件过大（{size / 1048576:.0f} MB），"
+                             f"超过预览上限，请直接下载查看"}), 413
             d = json.loads(target.read_text(encoding="utf-8"))
             return jsonify({"session": d.get("session"),
                             "preview": d.get("messages", [])[:20]})

@@ -277,29 +277,26 @@ def stream_export_txt(path: Path, session: dict, msg_iter, progress=None):
 
 
 def stream_export_csv(path: Path, msg_iter, progress=None):
-    """流式导出 CSV。"""
+    """流式导出 CSV。
+
+    P3-8：CSV 不再截断内容（旧实现截 2000 字）。CSV 标准没有单元格长度限制，
+    截断只会静默丢消息正文；需要限制长度的格式（HTML/SQLite/XLSX）各自
+    用命名常量并在 manifest["truncated"] 里留痕。"""
     import csv
     from datetime import datetime
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
         count = 0
-        truncated = 0      # P3：内容截断留痕（CSV 单元格 2000 字上限）
         for msg in msg_iter:
-            if len(msg["content"]) > 2000:
-                truncated += 1
             w.writerow([msg["localId"],
                         datetime.fromtimestamp(msg["createTime"]).strftime("%Y-%m-%d %H:%M:%S"),
                         msg["typeName"], msg["senderDisplayName"],
-                        msg["isSend"], msg["content"][:2000],
+                        msg["isSend"], msg["content"],
                         msg.get("mediaFile") or ""])
             count += 1
             if count % 500 == 0 and progress:
                 progress(0, f"已写入 {count} 条…")
-    if truncated:
-        logger.detailed("export",
-                        f"CSV内容截断(>2000字) {truncated}/{count} 条，"
-                        f"换 JSON/HTML 格式可得全文", ring=False)
     return count
 
 

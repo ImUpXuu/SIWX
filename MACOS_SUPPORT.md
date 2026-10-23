@@ -36,6 +36,15 @@ Release 页面的 macOS 产物是 `stories-in-wx-v*-macos.dmg`（`version.json` 
 
 当前 DMG 不含 x86_64 切片，Intel Mac 请改用源码运行：见下方[从源码运行](#使用)一节的 `pip install -r requirements.txt` 与 `python run.py ...` 步骤（需 Python 3.10+，LLDB 由 Xcode Command Line Tools 提供）。
 
+## 数据目录（打包版，2026-10 决策）
+
+- **应用数据**：`~/Library/Application Support/stories-in-wx/` —— `keystore.bin`、`media_key.json`、`wechat_paths.json`、`log_level.json`。
+- **相对路径产物**：`logs/`、`output/`、`exports/`、`templates/` 仍跟随程序根，即 `stories-in-wx.app/Contents/MacOS/` 内；默认权限沿用进程 umask（常见目录 0755、文件 0644）。
+- 如果 `.app` 位于只读位置，写目录会回退到**当前工作目录**下的 `stories-in-wx/<subdir>`（不一定是 Application Support）。
+- 想让所有产物都落在私有目录，可创建 `~/Library/Application Support/stories-in-wx` 后以 `SIWX_ROOT="$HOME/Library/Application Support/stories-in-wx"` 启动；keystore/media_key 本来就在该目录。
+- 本轮**不做自动迁移**（P3-21 决策）：升级不会移动既有 `output/exports/logs`；卸载 `.app` 前请先自行备份或删除这些目录，避免明文聊天库随程序目录残留。
+- `media_key.json` 是明文派生密钥缓存，POSIX 权限已收紧到 0600；Windows 依赖用户目录 ACL（P3-22 决策，见 `THREAT_MODEL.md`）。
+
 ## 使用
 
 ```bash

@@ -102,7 +102,10 @@ def signature(account: str):
 
     目录自身的 mtime 在部分盘符上会随墙钟自行推进（实测 G: 盘），会导致缓存
     永远失效，因此只认文件时间戳。
-    """
+
+    P3-12：contact/contact.db 存在时并入签名（同样用文件时间戳）。统计结果
+    里的私聊排行展示名来自 contact.db，只按消息分片做签名会让"改备注"后的
+    旧排行一直命中缓存；不存在时不加入，保持旧缓存清单兼容。"""
     d = _msg_dir(account)
     try:
         with os.scandir(d) as it:
@@ -115,6 +118,14 @@ def signature(account: str):
         # 签名不可用 → 缓存永不命中，每次请求都全量重扫（约 2.4s/8 万条）
         log.detailed("stats", f"{account} 分片签名不可用: {type(e).__name__}: {e}")
         return None
+    acc = _acc_dir(account)
+    if acc is not None:
+        try:
+            st = (acc / "contact" / "contact.db").stat()
+        except OSError:
+            pass                      # 无 contact.db（旧账号/未解密）：不加
+        else:
+            items.append(("contact/contact.db", st.st_size, st.st_mtime_ns))
     items.sort()
     return tuple(items)
 

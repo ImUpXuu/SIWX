@@ -47,6 +47,12 @@ _HOLDER_SESSIONS = {"brandsessionholder", "brandservicesessionholder", "@placeho
 _DECODED_CACHE: "OrderedDict[tuple, list]" = OrderedDict()
 _DECODED_CACHE_LOCK = threading.Lock()
 _DECODED_CACHE_MAX_SHARDS = 12   # 有界 LRU：大库全文缓存最多留 12 个分片
+# 字节预算（P3-13）：12 个分片的条数上限挡不住「单分片几十万行」，估算
+# 总占用超过该值同样按 LRU 淘汰。估算口径见 _estimate_rows_bytes。
+_DECODED_CACHE_MAX_BYTES = 256 * 1024 * 1024
+_DECODED_CACHE_SIZES: dict = {}   # sig -> 估算字节数（与 _DECODED_CACHE 同步维护）
+_DECODED_CACHE_BYTES = 0          # 当前估算总字节（受 _DECODED_CACHE_LOCK 保护）
+_ROW_OVERHEAD_BYTES = 200         # 每行元组/整数/None 的固定开销估算
 
 # 前端筛选 kind → SQL 层可判定的 local_type 集合（& 0xFFFF 后的值）。
 # 引用/合并转发等富文本卡片归入 link 组——它们的判定要解析 XML，
@@ -1405,6 +1411,46 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
     return msgs
 
 
+def _estimate_rows_bytes(rows) -> int:
+    """估算解码行列表的常驻内存（P3-13 字节预算用）。
+
+    行形状: (ts, local_id, server_id, local_type, origin, rsid, text, packed, smap)。
+    text 是 Python str（中文按 2 字节/字符估算，另加对象头），packed 是 bytes
+    （长度即主体占用），其余字段按固定开销计。只求量级正确，不做精确测量。
+    """
+    total = 0
+    for r in rows:
+        total += _ROW_OVERHEAD_BYTES
+        text = r[6] if len(r) > 6 else None
+        packed = r[7] if len(r) > 7 else None
+        if isinstance(text, str) and text:
+            total += len(text) * 2 + 64
+        if isinstance(packed, (bytes, bytearray)) and packed:
+            total += len(packed)
+    return total
+
+
+def _decoded_cache_put(sig, rows) -> None:
+    """插入解码缓存并维持分片数 + 字节预算（P3-13；调用方不持锁）。"""
+    global _DECODED_CACHE_BYTES
+    size = _estimate_rows_bytes(rows)
+    with _DECODED_CACHE_LOCK:
+        if _DECODED_CACHE.pop(sig, None) is not None:
+            # 同签名替换：先扣掉旧占用再加新占用
+            _DECODED_CACHE_BYTES -= _DECODED_CACHE_SIZES.pop(sig, 0)
+        _DECODED_CACHE[sig] = rows
+        _DECODED_CACHE_SIZES[sig] = size
+        _DECODED_CACHE_BYTES += size
+        while _DECODED_CACHE and (
+                len(_DECODED_CACHE) > _DECODED_CACHE_MAX_SHARDS
+                or _DECODED_CACHE_BYTES > _DECODED_CACHE_MAX_BYTES):
+            # 按 LRU 淘汰并扣减；单条就超预算时连它自己也会被淘汰（缓存为空）
+            old_sig, _old_rows = _DECODED_CACHE.popitem(last=False)
+            _DECODED_CACHE_BYTES -= _DECODED_CACHE_SIZES.pop(old_sig, 0)
+        if _DECODED_CACHE_BYTES < 0:      # 防御：计数永不为负
+            _DECODED_CACHE_BYTES = 0
+
+
 def _decoded_rows(db: Path, table: str) -> list:
     """分片解码缓存：文本行按 (库, 文件签名, 表名) 缓存，搜索零重复解码。
 
@@ -1441,11 +1487,7 @@ def _decoded_rows(db: Path, table: str) -> list:
         rows = []
     finally:
         conn.close()
-    with _DECODED_CACHE_LOCK:
-        _DECODED_CACHE[sig] = rows
-        _DECODED_CACHE.move_to_end(sig)
-        while len(_DECODED_CACHE) > _DECODED_CACHE_MAX_SHARDS:
-            _DECODED_CACHE.popitem(last=False)
+    _decoded_cache_put(sig, rows)
     return rows
 
 
@@ -2015,7 +2057,12 @@ def _image_fail_reason(info) -> str:
 
 @bp.get("/media/image")
 def media_image():
-    """按需解密单张图片：三级来源（hardlink 原图 → Bubble 气泡缓存 → Thumb 缩略图）。"""
+    """按需解密单张图片：三级来源（hardlink 原图 → Bubble 气泡缓存 → Thumb 缩略图）。
+
+    P3-1：media.get_image 已对每个候选来源逐级兜底，但端点自身（参数拼接、
+    路径校验、Response 构造）仍有意外异常面。这里整体再包一层，任何未预期
+    异常都返回现有 404 JSON（而不是 Flask 的 500），失败原因照常带 reason。
+    """
     account = request.args.get("account", "")
     md5 = request.args.get("md5", "")
     chat = request.args.get("chat", "")
@@ -2029,23 +2076,30 @@ def media_image():
         # 参数非法静默归零 → 后续按 local_id=0 查询，大概率误导性 404
         _logger.detailed("api", f"[image] local_id/ts 参数非法，已归零 "
                                 f"account={account} chat={chat} md5={(md5 or '')[:8]}")
-    if not account:
-        return jsonify({"error": "参数缺失"}), 400
-    acc_dir = validate.account_dir(account, must_exist=False)
-    if acc_dir is None:
-        return jsonify({"error": "账号不存在或未解密"}), 404
-    # 高频端点：detailed 天然节流（仅详细模式可见）
-    _logger.detailed("api", f"[image] account={account} chat={chat} "
-                            f"local_id={local_id} ts={ts} md5={(md5 or '')[:8]} hq={hq}")
-    body, info = media.get_image(account, md5, acc_dir,
-                                 chat=chat or None, local_id=local_id or None,
-                                 ts=ts or None, bubble_md5=bubble_md5 or None,
-                                 hq=hq)
-    if body is None:
-        return jsonify({"error": info,
-                        "reason": _image_fail_reason(info)}), 404
-    return Response(body, mimetype=info,
-                    headers={"Cache-Control": "private, max-age=86400"})
+    try:
+        if not account:
+            return jsonify({"error": "参数缺失"}), 400
+        acc_dir = validate.account_dir(account, must_exist=False)
+        if acc_dir is None:
+            return jsonify({"error": "账号不存在或未解密"}), 404
+        # 高频端点：detailed 天然节流（仅详细模式可见）
+        _logger.detailed("api", f"[image] account={account} chat={chat} "
+                                f"local_id={local_id} ts={ts} md5={(md5 or '')[:8]} hq={hq}")
+        body, info = media.get_image(account, md5, acc_dir,
+                                     chat=chat or None, local_id=local_id or None,
+                                     ts=ts or None, bubble_md5=bubble_md5 or None,
+                                     hq=hq)
+        if body is None:
+            return jsonify({"error": info,
+                            "reason": _image_fail_reason(info)}), 404
+        return Response(body, mimetype=info,
+                        headers={"Cache-Control": "private, max-age=86400"})
+    except Exception as e:  # noqa: BLE001 端点级兜底：单图失败不能升级成 500
+        _logger.detailed("api", f"[image] 未预期异常 account={account} "
+                                f"md5={(md5 or '')[:8]} local_id={local_id} "
+                                f"ts={ts}: {type(e).__name__}: {e}")
+        return jsonify({"error": f"图片读取失败: {type(e).__name__}",
+                        "reason": "decrypt_failed"}), 404
 
 
 # ── 动画表情（type 47）───────────────────────────────────────────────

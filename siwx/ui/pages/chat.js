@@ -84,7 +84,17 @@ async function init() {
         }
       }
       await loadSessions();
-      if (currentChat) await Promise.all([loadMessages(true), loadTimeline()]);
+      if (currentChat) {
+        // 增量同步后重渲染：先记下浏览位置——原本贴底就跟底，否则记下
+        // 视口顶部那条消息做锚点，渲染完按 key 滚回去（旧实现一律不跟底，
+        // 于是从中间翻看的人被弹回窗口顶部）
+        const box = el('c-msgs');
+        const atBottom = !box ||
+          box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+        const anchor = atBottom ? null : viewportAnchorKey(box);
+        await Promise.all([loadMessages(true, { stick: atBottom }), loadTimeline()]);
+        if (anchor) restoreScrollAnchor(anchor);
+      }
     } catch (e) {
       if (!gone()) {
         el('c-sessions').innerHTML = `<div class="c-empty">刷新失败: ${esc(e.message)}</div>`;
@@ -441,6 +451,30 @@ function startBottomFollow(box) {
 
 function stopBottomFollow() {
   if (bottomFollow) { bottomFollow.stop(); bottomFollow = null; }
+}
+
+/** 重载前列出视口顶部第一条消息的 key（用于刷新后恢复浏览位置）。 */
+function viewportAnchorKey(box) {
+  if (!box) return null;
+  const top = box.getBoundingClientRect().top;
+  for (const row of box.querySelectorAll('.m-row[data-key]')) {
+    if (row.getBoundingClientRect().bottom > top) return row.dataset.key;
+  }
+  return null;
+}
+
+/** 重载后把锚点消息滚回视口顶部；锚点不在新窗口内则保持现状。 */
+function restoreScrollAnchor(key) {
+  const box = el('c-msgs');
+  if (!box || !key) return;
+  const target = box.querySelector(`.m-row[data-key="${CSS.escape(key)}"]`);
+  if (!target) return;
+  // #c-msgs 有 scroll-behavior:smooth，直接 scrollIntoView 会被拖成一场
+  // 从顶部滑到锚点的动画；临时关掉平滑行为瞬时归位（与 jumpToBottom 同一手法）
+  const prev = box.style.scrollBehavior;
+  box.style.scrollBehavior = 'auto';
+  target.scrollIntoView({ block: 'start' });
+  box.style.scrollBehavior = prev;
 }
 
 async function loadMessages(fresh, opts = {}) {

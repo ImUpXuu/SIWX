@@ -2,7 +2,9 @@
 
 用法::
 
-    python diag_sns_api.py [账号目录名]
+    python diag_sns_api.py <账号目录名>
+
+账号必须显式传入（不提供默认值：默认值一旦写成真实目录名就会随仓库公开）。
 
 覆盖四种真实情况：
   1. 能下载的图     → 200 image/*
@@ -10,6 +12,7 @@
   3. 视频           → 200 video/mp4（修复前 100% 失败）
   4. 外链卡片（b23.tv）→ 400 + reason=not-cdn
 
+key/token 在打印时一律只报长度，内容不外泄（诊断输出常被贴进 issue）。
 最后打印本轮产生的 [sns-media] 日志行（证明失败有留痕）。
 """
 from __future__ import annotations
@@ -21,9 +24,27 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlencode
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 仓库根（迁入 scripts/ 后多一层）
+USAGE = "用法: python scripts/diag_sns_api.py <账号目录名>"
 
-ACC = sys.argv[1] if len(sys.argv) > 1 else "wxid_redacted_a_6409"
+
+def _mask_secret(v) -> str:
+    """key/token 只报长度，不保留任何前缀（P3-28）。"""
+    if v is None or v == "":
+        return "(空)"
+    return f"*** (len={len(str(v))})"
+
+
+def _require_account(argv) -> str:
+    """账号参数必填：缺参直接打印用法并以 2 退出（不导入 siwx，尽快失败）。"""
+    if len(argv) < 2 or not str(argv[1]).strip() or str(argv[1]).startswith("-"):
+        print(USAGE, file=sys.stderr)
+        raise SystemExit(2)
+    return str(argv[1]).strip()
+
+
+ACC = _require_account(sys.argv)
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 仓库根（迁入 scripts/ 后多一层）
 
 # 把日志挂到一个临时文件：既能验证格式，又不碰真实 logs/siwx.log（可能被在跑的 SIWX 占用）
 _log_path = Path(tempfile.gettempdir()) / "siwx-sns-diag.log"
@@ -77,7 +98,9 @@ def hit(label, m):
     if "json" in ct:
         j = json.loads(body)
         tail = f" reason={j.get('reason')} hosts_tried={j.get('hosts_tried')} err={j.get('error')}"
-    print(f"{label:14s} type={m.get('type')} -> HTTP {r.status_code} {ct} {len(body)}B{tail}")
+    # key/token 只报长度；token 不进任何打印（含 URL 查询串）
+    print(f"{label:14s} type={m.get('type')} key={_mask_secret(m.get('key'))} "
+          f"-> HTTP {r.status_code} {ct} {len(body)}B{tail}")
     return r.status_code
 
 

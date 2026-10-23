@@ -11,7 +11,10 @@ import os
 import shutil
 import struct
 import tempfile
+import time
 from pathlib import Path
+
+from siwx import logger as _slog
 
 PAGE_SZ = 4096
 KEY_SZ = 32
@@ -120,6 +123,39 @@ def collect_db_files(db_dir: str):
     return out
 
 
+# 陈旧 `.part` 的判定年龄（秒）：池中断/进程被杀留下的半成品超过该时长才清理
+STALE_PART_MAX_AGE = 3600
+
+
+def _clean_stale_parts(dst: Path) -> None:
+    """清理同目标的陈旧解密临时文件（P3-6）。
+
+    decrypt_database 用 mkstemp 生成 `<dst>.<随机>.part`；进程被杀/进程池中断时
+    残留文件永远不会被 os.replace 消费，会一直占着磁盘。只删 mtime 超过
+    STALE_PART_MAX_AGE 的项——刚创建或并发中的新文件不能碰（另一线程/进程可能
+    正在写同一个目标），清理失败也只留待下一轮。
+    """
+    try:
+        candidates = list(dst.parent.glob(dst.name + ".*.part"))
+    except OSError:
+        return
+    if not candidates:
+        return
+    now = time.time()
+    removed = 0
+    for p in candidates:
+        try:
+            if now - p.stat().st_mtime <= STALE_PART_MAX_AGE:
+                continue
+            p.unlink()
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        _slog.detailed("cipher",
+                       f"清理陈旧解密临时文件 {removed} 个（dst={dst.name}）")
+
+
 def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int:
     """流式整库解密：页读 → AES-256-CBC → 明文 SQLite 写出。返回总页数。
 
@@ -185,6 +221,7 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
         # 先写同目录临时文件，整库成功后再原子替换。原实现直接写 dst，一旦解密
         # 中途异常（磁盘满、源库被截断），会把原本有效的明文库覆盖成截断文件，
         # 而 manifest 仍认为它是好的 —— 只能整库重解。
+        _clean_stale_parts(dst)   # 上一次中断残留（>1h）先清掉，再建新 .part
         fd, _tmp_name = tempfile.mkstemp(prefix=dst.name + ".", suffix=".part",
                                         dir=dst.parent)
         os.close(fd)

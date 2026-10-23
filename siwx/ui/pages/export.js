@@ -45,6 +45,9 @@ let lastRunStats = null;
 // 最近一次导出/转换的目录与模板：结果面板"补生成格式"（方案 A）要用
 let lastExportDir = null;
 let lastTemplate = '';
+// 最近一次发起任务的类型与参数：结果面板的"重试"按此分派，
+// 补生成失败重试补生成，只有导出失败才重跑一次全量导出
+let lastTask = { mode: 'export' };
 // 头像 404 标记：失败过的头像不再反复请求（与聊天页同一策略）
 const avaFailed = new Set();
 
@@ -611,6 +614,7 @@ async function runConvert(formats, overwrite = false) {
   if (running || !lastExportDir) return;
   running = true;
   currentRunMode = 'convert';
+  lastTask = { mode: 'convert', formats, overwrite };
   updateCount();
   el('e-log').innerHTML = '';
   el('e-result').innerHTML = '';
@@ -681,6 +685,7 @@ async function run() {
   };
   running = true;
   currentRunMode = 'export';
+  lastTask = { mode: 'export' };
   updateCount();
   lastTemplate = tplDrop.value || '';
   el('e-log').innerHTML = '';
@@ -731,8 +736,20 @@ function poll() {
         setTimeout(() => { if (card.isConnected) card.classList.add('hidden'); }, 600);
         renderResult(job);
         const kind = job.report && job.report.kind;
-        if (job.ok) toast(kind === 'convert' ? '格式补生成完成' : '导出完成');
-        else toast(job.error || '导出失败', true);
+        // 取消的任务 ok 仍为 true（已完成部分算成功），终局文案必须先看 cancelled，
+        // 否则取消后还会提示"导出完成"
+        const cancelled = !!(job.report && job.report.cancelled);
+        if (job.ok) {
+          if (cancelled) {
+            toast(kind === 'convert'
+              ? '格式补生成已取消（已完成部分保留）'
+              : '导出已取消（已完成部分保留）');
+          } else {
+            toast(kind === 'convert' ? '格式补生成完成' : '导出完成');
+          }
+        } else {
+          toast(job.error || '导出失败', true);
+        }
       }
     } catch (e) {
       // 服务端重启/挂掉：连续失败就停下来给出错误态，进度条不再永久冻结
@@ -833,6 +850,12 @@ function sessionResultLine(s) {
   return `<div class="res-meta">✓ ${esc(s.display)} — ${s.message_count} 条消息${media}${size}${dur}${dl}</div>`;
 }
 
+/** 结果面板"重试"要回到哪条路径：最近一次是补生成就重试补生成，
+ *  否则才重跑全量导出（convert 失败点重试却跑一次解密导出是旧缺陷） */
+function retryMode() {
+  return lastTask.mode === 'convert' ? 'convert' : 'export';
+}
+
 function renderResult(job) {
   if (gone()) return;
   const box = el('e-result');
@@ -842,9 +865,10 @@ function renderResult(job) {
     ? `<div class="res-meta">本次勾选 ${lastRunStats.picked} · 排除 ${lastRunStats.excluded} · 实际导出 ${lastRunStats.export} 个会话</div>`
     : '';
   if (job.error) {
-    lines.push(`<div class="res-row res-err">✗ 导出失败：${esc(job.error)}</div>`);
+    const mode = retryMode();
+    lines.push(`<div class="res-row res-err">✗ ${mode === 'convert' ? '格式补生成' : '导出'}失败：${esc(job.error)}</div>`);
     if (echo) lines.push(echo);
-    lines.push(`<div class="res-actions"><a class="btn" href="#" data-retry>↻ 重试</a></div>`);
+    lines.push(`<div class="res-actions"><a class="btn" href="#" data-retry data-retry-mode="${mode}">↻ 重试</a></div>`);
     lines.push(`<details class="res-logs-detail" open><summary>运行日志（${logs.length} 条）</summary>`);
     lines.push(logLines(logs, 'dim'));
     lines.push('</details>');
@@ -880,7 +904,7 @@ function renderResult(job) {
   if (!r.sessions) {
     // 任务完成了却没有 report：多半是后端异常或任务被别的操作打断，重试可直接再来一次
     lines.push(`<div class="res-row res-err">⚠️ 无导出结果</div>`);
-    lines.push(`<div class="res-actions"><a class="btn" href="#" data-retry>↻ 重试</a></div>`);
+    lines.push(`<div class="res-actions"><a class="btn" href="#" data-retry data-retry-mode="${retryMode()}">↻ 重试</a></div>`);
     lines.push(`<details class="res-logs-detail" open><summary>运行日志（${logs.length} 条）</summary>`);
     lines.push(logLines(logs, 'dim'));
     lines.push('</details>');
@@ -898,6 +922,13 @@ function renderResult(job) {
     `，共 ${r.message_count} 条消息，图片 ${r.image_count || 0}，语音 ${r.voice_count || 0}，头像 ${r.avatar_count}（${dur}s）` +
     (r.cancelled ? '（已完成部分的产物保留）' : '') + '</div>');
   if (echo) lines.push(echo);
+  // P3-8：截断不是失败，但必须让用户看见（各格式阈值不同，按格式列出）
+  const truncEntries = Object.entries(r.truncated || {}).filter(([, n]) => n > 0);
+  if (truncEntries.length) {
+    lines.push(`<div class="res-meta res-part">⚠ 内容截断：` +
+      truncEntries.map(([fmt, n]) => `${esc(fmt)} ${n} 条`).join(' · ') +
+      '（长消息超出该格式上限，完整内容请改用 JSON/CSV/TXT）</div>');
+  }
   if (r.total_dir) {
     lines.push(`<div class="res-meta">目录：<span class="mono">${esc(r.total_dir)}</span></div>`);
     // 路径只放 data 属性，点击时再从 dataset 读取——内联 onclick 拼
@@ -948,7 +979,17 @@ function convertActionsHtml(formats) {
 
 function bindResultActions(box) {
   box.querySelectorAll('[data-retry]').forEach(a => {
-    a.addEventListener('click', (ev) => { ev.preventDefault(); run(); });
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      // 按重试按钮标注的 mode 分派：补生成失败不会退化成全量导出
+      const mode = a.dataset.retryMode || retryMode();
+      if (mode === 'convert') {
+        if (lastExportDir) runConvert(lastTask.formats || ['md', 'html'], !!lastTask.overwrite);
+        else toast('导出目录未知，无法重试补生成', true);
+      } else {
+        run();
+      }
+    });
   });
   box.querySelectorAll('[data-convert]').forEach(a => {
     a.addEventListener('click', (ev) => {

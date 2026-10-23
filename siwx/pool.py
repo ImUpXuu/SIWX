@@ -112,6 +112,7 @@ def decrypt_parallel(tasks, workers=None, on_done=None, should_cancel=None):
         return out
 
     results = []
+    interrupted = None
     if n <= 1 or len(tasks) <= 1:
         results = _run_serial()
     else:
@@ -123,19 +124,42 @@ def decrypt_parallel(tasks, workers=None, on_done=None, should_cancel=None):
             _slog.warn("pool", f"进程池创建失败({type(e).__name__}: {e})，回退串行解密")
             results = _run_serial()
         else:
-            # `with pool` 退出时调用 terminate()：收到取消就 break，
+            # `with pool` 退出时调用 terminate()：收到取消就 break / 出异常，
             # 已派发但未完成的任务随之终止（其半成品由 decrypt_database 自己负责）。
-            with pool:
-                for r in pool.imap_unordered(_worker, tasks):
-                    results.append(r)
-                    if on_done:
-                        on_done(r)
-                    if _cancel_requested():
-                        _slog.detailed(
-                            "pool",
-                            f"并行解密收到取消请求，终止进程池"
-                            f"（已收集 {len(results)}/{len(tasks)}）")
-                        break
+            try:
+                with pool:
+                    for r in pool.imap_unordered(_worker, tasks):
+                        results.append(r)
+                        if on_done:
+                            on_done(r)
+                        if _cancel_requested():
+                            _slog.detailed(
+                                "pool",
+                                f"并行解密收到取消请求，终止进程池"
+                                f"（已收集 {len(results)}/{len(tasks)}）")
+                            break
+            except (Exception, KeyboardInterrupt) as e:
+                # P3-6：worker 崩溃/池管道异常/用户中断时，此前会把**已收集**
+                # 的结果连同 extract 已写出的产物一起丢掉（无 manifest）。
+                # 这里保留已收集结果、让 `with pool` 终止剩余任务，再为未收集
+                # 的任务补失败占位。只兜 Exception/KeyboardInterrupt——
+                # SystemExit 等其余 BaseException 继续向上抛，不吞。
+                interrupted = e
+                _slog.error("pool",
+                            f"解密进程池中断（已收集 {len(results)}/{len(tasks)}）: "
+                            f"{type(e).__name__}: {e}")
+
+    if interrupted is not None and len(results) < len(tasks):
+        # 未收集的任务补失败占位（不计 cancelled：池中断是异常，不是用户取消）
+        from collections import Counter
+        seen = Counter(r[0] for r in results)
+        reason = f"池中断: {type(interrupted).__name__}"
+        for t in tasks:
+            rel = t[0]
+            if seen[rel] > 0:
+                seen[rel] -= 1
+                continue
+            results.append((rel, 0, "failed", reason))
 
     cancelled = 0
     if should_cancel is not None and len(results) < len(tasks):

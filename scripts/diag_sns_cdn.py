@@ -2,7 +2,11 @@
 
 用法::
 
-    python diag_sns_cdn.py [账号目录名] [扫描动态数] [抽样 URL 数]
+    python diag_sns_cdn.py <账号目录名> [扫描动态数] [抽样 URL 数]
+
+账号必须显式传入（不提供默认值：默认值一旦写成真实目录名就会随仓库公开）。
+key/token 在结果与打印里一律只报长度，不保留前缀；失败样本只打印
+域名 + 路径（去掉查询串，查询串里带 token）。
 
 输出：
 1. 库内统计：动态数 / 含媒体数 / 唯一 URL 数 / 本地缓存命中率
@@ -25,10 +29,30 @@ import sys
 import time
 import urllib.error
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 仓库根（迁入 scripts/ 后多一层）
 
 from siwx import paths, sns, sns_cdn  # noqa: E402
+
+USAGE = ("用法: python scripts/diag_sns_cdn.py <账号目录名> "
+         "[扫描动态数] [抽样 URL 数]")
+
+
+def _mask_secret(v) -> str:
+    """key/token 只报长度，不保留任何前缀（P3-28）。"""
+    if v is None or v == "":
+        return "(空)"
+    return f"*** (len={len(str(v))})"
+
+
+def _url_without_query(url: str) -> str:
+    """去掉查询串/片段（token 常挂在这里），只留 scheme://host/path。"""
+    try:
+        parts = urlsplit(url)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    except ValueError:
+        return str(url).split("?", 1)[0]
 
 
 def collect(acc: str, limit_posts: int):
@@ -57,7 +81,10 @@ def collect(acc: str, limit_posts: int):
 
 
 def probe(m: dict) -> dict:
-    """走生产路径 ``fetch_media``（含域名回退），记录结果与耗时。"""
+    """走生产路径 ``fetch_media``（含域名回退），记录结果与耗时。
+
+    请求用真实 key/token，返回的 result 里只放遮蔽值（P3-28）。
+    """
     t0 = time.time()
     r = sns_cdn.fetch_media(m["url"], key=m.get("key"), token=m.get("token"),
                             cache_dir=None)
@@ -65,16 +92,21 @@ def probe(m: dict) -> dict:
     return {
         "tid": m.get("tid"), "author": m.get("author"), "type": m.get("type"),
         "url": m["url"], "host": sns_cdn.safe_url(m["url"]).split("/")[0],
-        "key": m.get("key"), "token": m.get("token"), "ms": ms,
+        "key": _mask_secret(m.get("key")), "token": _mask_secret(m.get("token")),
+        "ms": ms,
         "ok": r["ok"], "reason": r.get("reason"), "status": r.get("status"),
         "error": r.get("error"), "ext": r.get("ext"), "encrypted": r.get("encrypted"),
     }
 
 
-def main():
-    acc = sys.argv[1] if len(sys.argv) > 1 else "wxid_redacted_a_6409"
-    limit_posts = int(sys.argv[2]) if len(sys.argv) > 2 else 300
-    n = int(sys.argv[3]) if len(sys.argv) > 3 else 60
+def main(argv=None):
+    argv = sys.argv if argv is None else argv
+    if len(argv) < 2 or not str(argv[1]).strip() or str(argv[1]).startswith("-"):
+        print(USAGE, file=sys.stderr)
+        raise SystemExit(2)
+    acc = str(argv[1]).strip()
+    limit_posts = int(argv[2]) if len(argv) > 2 else 300
+    n = int(argv[3]) if len(argv) > 3 else 60
 
     posts, medias = collect(acc, limit_posts)
     uniq = {}
@@ -117,8 +149,8 @@ def main():
         print("── 失败样本（前 8 条）──")
         for r in bad[:8]:
             print(f"  type={r['type']} reason={r['reason']} status={r['status']} "
-                  f"key={r['key']} token={(r['token'] or '')[:12]}… ms={r['ms']}")
-            print(f"    {r['url'][:120]}")
+                  f"key={r['key']} token={r['token']} ms={r['ms']}")
+            print(f"    {_url_without_query(r['url'])[:120]}")
             print(f"    {r['error']}")
 
     self_wxid = acc.rsplit("_", 1)[0] if "_" in acc else acc

@@ -92,18 +92,48 @@ _CACHE_ROOTS_TTL = 60.0
 
 # 派生密钥持久缓存（只有密钥，没有明文）
 _KEY_FILE_NAME = "media_key.json"
+# 已成功收紧到 0600 的 media_key 路径（P3-22；_tighten_key_perms 的 memo）
+_KEY_PERMS_TIGHTENED = set()
+
+
+def _tighten_key_perms(p: Path) -> None:
+    """非 Windows 把 media_key.json 收紧到 0600（P3-22，失败只留痕）。
+
+    Windows 无 POSIX 权限位（见 _save_key_cache 的残余风险说明），
+    P3-22 决策是"不做 DPAPI，只收紧权限"，因此这里直接跳过。
+    成功收紧过的路径记进 memo：candidate_keys 每张图都会调 _key_file()，
+    不必每次都 chmod 一遍。
+    """
+    if os.name == "nt":
+        return
+    key = str(p)
+    if key in _KEY_PERMS_TIGHTENED:
+        return
+    try:
+        if p.is_file():
+            p.chmod(0o600)
+            _KEY_PERMS_TIGHTENED.add(key)
+    except OSError as e:
+        try:
+            _media_logger.detailed(
+                "media", f"media_key 权限收紧失败 {p}: {type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 
 def _key_file() -> Path:
     """派生密钥缓存位置：系统数据目录（与 cwd / 安装位置解耦，issue #11）。"""
     try:
         from siwx.paths import data_dir
-        return data_dir() / "media_key.json"
+        p = data_dir() / "media_key.json"
     except Exception:
         base = (os.environ.get("LOCALAPPDATA")
                 or os.environ.get("USERPROFILE")
                 or str(Path(tempfile.gettempdir())))
-        return Path(base) / "stories-in-wx" / "media_key.json"
+        p = Path(base) / "stories-in-wx" / "media_key.json"
+    # P3-22：旧版本落下的文件权限可能是 0644，定位到之后顺手收紧一次
+    _tighten_key_perms(p)
+    return p
 
 
 def _load_key_cache() -> dict:
@@ -129,14 +159,20 @@ def _save_key_cache(cache: dict) -> None:
     FileNotFoundError / Windows PermissionError），或交错写出半个 JSON ——
     缓存损坏后所有账号的派生密钥一起丢，下次全部走"V2 密钥未命中"。
     唯一临时名把"多个写者"这一条彻底消掉；os.replace 本身仍是原子的。
+
+    P3-22 残余风险：文件内容仍是明文 {"aes":…,"xor":…}（Windows 不做 DPAPI，
+    决策见 docs/fix-list-2026-10-23.md）。非 Windows 保存后 chmod 0600；
+    Windows 只能依赖 %LOCALAPPDATA% 的 ACL —— 同机同用户进程可读，这是
+    已接受的残余风险，授权模型见 THREAT_MODEL.md。
     """
     p = _key_file()
     p.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(cache, ensure_ascii=False)
     fd, tmp_name = tempfile.mkstemp(dir=str(p.parent),
                                     prefix=p.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps(cache, ensure_ascii=False))
+            f.write(payload)
         os.replace(tmp_name, p)
     except OSError:
         try:
@@ -144,6 +180,7 @@ def _save_key_cache(cache: dict) -> None:
         except OSError:
             pass
         raise
+    _tighten_key_perms(p)
 
 
 def clean_wxid(wxid: str) -> str:
@@ -178,7 +215,20 @@ def find_kvcomm_codes() -> list:
     # net_1/net_2 等多网络配置文件目录与 net/ 平级，各账号的 code 可能
     # 落在不同 net* 下（实测一账号 code 只在 net_1/kvcomm → 此前恒扫不到，
     # 该账号全部图片解不开）。
-    pats = [
+    #
+    # P3-4：硬编码 C:/Users/*/AppData 只在"微信装在 C 盘默认用户目录"时成立
+    # （用户目录在 D 盘、漫游目录被重定向都扫不到）。优先用 %APPDATA% 拼真实
+    # Tencent 路径；环境变量缺失/为空时才退回旧通配符兜底。
+    pats = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        tencent = appdata.replace("\\", "/").rstrip("/") + "/Tencent"
+        pats += [
+            f"{tencent}/xwechat/net*/kvcomm/key_*_*.statistic",
+            f"{tencent}/xwechat/ilink/kvcomm/key_*_*.statistic",
+            f"{tencent}/WeChat/*/kvcomm/key_*_*.statistic",
+        ]
+    pats += [
         r"C:/Users/*/AppData/Roaming/Tencent/xwechat/net*/kvcomm/key_*_*.statistic",
         r"C:/Users/*/AppData/Roaming/Tencent/xwechat/ilink/kvcomm/key_*_*.statistic",
         r"C:/Users/*/AppData/Roaming/Tencent/WeChat/*/kvcomm/key_*_*.statistic",
@@ -653,6 +703,18 @@ def _decrypt_any(data: bytes, wxid: str):
     return None, None
 
 
+def _candidate_failed(src: str, path, e: BaseException, label: str) -> None:
+    """候选级异常留痕（P3-1）：坏图/读取竞态只丢该候选，不打断整张图请求。"""
+    try:
+        name = getattr(path, "name", None) or str(path)
+        _media_logger.detailed(
+            "media",
+            f"{src}候选异常 {str(name)[:32]}: {type(e).__name__}: {e} ({label})",
+            ring=False)
+    except Exception:
+        pass
+
+
 def get_image(account: str, md5: str, acc_out_dir: Path,
               chat: str = None, local_id: int = None, ts: int = None,
               bubble_md5: str = None, hq: bool = False):
@@ -700,9 +762,21 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
 
     def _emit(body: bytes, ext: str):
         """转码 + 缓存。转码失败返回 (None, None)，调用方落到下一级候选；
-        失败结果绝不进缓存（旧实现缓存坏 wxgf 导致重试永远失败）。"""
+        失败结果绝不进缓存（旧实现缓存坏 wxgf 导致重试永远失败）。
+
+        P3-1：转码（含 DLL 子进程/HEIC/sips）与缓存写入的异常一律按
+        "本候选不可用"处理——单张坏图不能把整个 HTTP 请求打成 500。"""
         nonlocal last_err
-        fin = _finalize(body, ext, f"image/{ext}")
+        try:
+            fin = _finalize(body, ext, f"image/{ext}")
+        except Exception as e:
+            try:
+                _media_logger.detailed(
+                    "media", f"转码异常 ext={ext}: {type(e).__name__}: {e}",
+                    ring=False)
+            except Exception:
+                pass
+            return None, None
         if fin is None:
             if ext == "wxgf":
                 f = _archive_wxgf(wxgf_key, body) if wxgf_key else None
@@ -711,10 +785,14 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                             else "wxgf 转码失败")
             return None, None
         body, _ext, ctype = fin
-        with _IMG_CACHE_LOCK:
-            _IMG_CACHE[cache_key] = (body, ctype)
-            if len(_IMG_CACHE) > _IMG_CACHE_MAX:
-                _IMG_CACHE.popitem(last=False)
+        try:
+            with _IMG_CACHE_LOCK:
+                _IMG_CACHE[cache_key] = (body, ctype)
+                if len(_IMG_CACHE) > _IMG_CACHE_MAX:
+                    _IMG_CACHE.popitem(last=False)
+        except Exception:
+            # 缓存写失败不影响本次返回（缓存是优化，不是结果）
+            pass
         return body, ctype
 
     # 复用离线全量备份（media_backup.py）已经转码好的结果，优先于现场
@@ -724,33 +802,34 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
     # 的开销，也让"微信没开"时已备份过的图片依然能看。
     if md5 and len(md5) == 32:
         backup_root = acc_out_dir / "media_backup" / "images"
-        if backup_root.is_dir():
-            hits = [p for p in _backup_index_for(backup_root).get(md5, [])
-                    if p.suffix.lstrip(".") in ("jpeg", "jpg", "png", "gif", "heic", "wxgf")]
-            if hits:
-                def _rank(p: Path):
-                    n = p.name
-                    is_t = "_t_" in n or "_t." in n
-                    is_h = "_h" in n and not is_t
-                    if hq:  # 查看大图：高清优先
-                        return 0 if is_h else (2 if is_t else 1)
-                    return 2 if is_t else (1 if is_h else 0)  # 默认：主图优先
-                hits.sort(key=_rank)
-                # P2-8：备份产物可能是被中断/截断的半成品，复用前必须校验；
-                # 坏文件绝不进 _IMG_CACHE，继续下一个候选，全部坏则落到现场
-                # 解密来源。
-                for p in hits:
+        try:
+            backup_hits = (
+                [p for p in _backup_index_for(backup_root).get(md5, [])
+                 if p.suffix.lstrip(".") in
+                 ("jpeg", "jpg", "png", "gif", "heic", "wxgf")]
+                if backup_root.is_dir() else [])
+        except Exception as e:
+            backup_hits = []
+            _candidate_failed("备份索引", backup_root, e, label)
+        if backup_hits:
+            def _rank(p: Path):
+                n = p.name
+                is_t = "_t_" in n or "_t." in n
+                is_h = "_h" in n and not is_t
+                if hq:  # 查看大图：高清优先
+                    return 0 if is_h else (2 if is_t else 1)
+                return 2 if is_t else (1 if is_h else 0)  # 默认：主图优先
+            backup_hits.sort(key=_rank)
+            # P2-8：备份产物可能是被中断/截断的半成品，复用前必须校验；
+            # 坏文件绝不进 _IMG_CACHE，继续下一个候选，全部坏则落到现场
+            # 解密来源。
+            for p in backup_hits:
+                try:
                     ext = p.suffix.lstrip(".")
                     if ext == "wxgf":  # wxgf 是转码失败时的兜底留档，让它落到
                                        # 下面走一遍现场转码
                         continue
-                    try:
-                        body = p.read_bytes()
-                    except OSError as e:
-                        _media_logger.detailed(
-                            "media", f"备份复用读取失败 {p.name[:24]}: {type(e).__name__}")
-                        last_err = "备份产物读取失败"
-                        continue
+                    body = p.read_bytes()
                     bad = None
                     if ext == "heic":
                         # heic 尾特征不固定，只做"非空 + 长度合理 + ftyp 盒"轻校验
@@ -776,123 +855,189 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                     r = _emit(body, "jpeg" if ext == "jpg" else ext)
                     if r[0] is not None:
                         return r
+                except OSError as e:
+                    _media_logger.detailed(
+                        "media", f"备份复用读取失败 {p.name[:24]}: {type(e).__name__}")
+                    last_err = "未找到文件"
+                    continue
+                except Exception as e:
+                    _candidate_failed("备份复用", p, e, label)
+                    last_err = "备份产物处理失败"
+                    continue
 
     # ⓪ attach 原图目录直查（按消息 XML md5 / packed_info md5 命名，不依赖
     #    hardlink；hq=True 时优先高清 _h 版，供点击查看大图使用）
     if chat and (md5 and len(md5) == 32 or bubble_md5 and len(bubble_md5) == 32):
-        cands = attach_paths(wxid, chat, md5, bubble_md5=bubble_md5)
-        if hq:
-            cands = sorted(cands, key=lambda p: (0 if "_h" in p.name else 1))
+        try:
+            cands = attach_paths(wxid, chat, md5, bubble_md5=bubble_md5)
+            if hq:
+                cands = sorted(cands, key=lambda p: (0 if "_h" in p.name else 1))
+        except Exception as e:
+            cands = []
+            _candidate_failed("attach 枚举", acc_out_dir, e, label)
         if not cands:
             event(f"attach 目录无该图: {label}")
         for path in cands:
-            if not path.is_file():
-                continue
-            data = path.read_bytes()
-            body, ctype = _decrypt_any(data, wxid)
-            if body and not _plausible_image(body):
-                event(f"attach 产物不完整，跳过({path.name[:24]}): {label} ({len(body)}B)")
-                last_err = "解密产物不完整"
-                continue
-            if body:
-                event(f"图片attach命中({path.name[:24]}): {label} ({len(body)}B)")
-                r = _emit(body, ctype.split("/")[1])
-                if r[0] is not None:
-                    return r
-                continue
-            last_err = "attach 解密失败"
-
-    # ① hardlink 原图
-    if md5 and len(md5) == 32:
-        for path in resolve_image_path(acc_out_dir, md5, wxid):
-            if not path.is_file():
-                last_err = f"文件不存在: {path.name}"
-                continue
-            data = path.read_bytes()
-            if not data:
-                last_err = "文件为空"
-                continue
-            head = data[:6]
-            if head == V2_MAGIC:
-                for aes_key, xor_key in candidate_keys(wxid):
-                    body, ctype = decrypt_v2_body(data, aes_key, xor_key)
-                    if body and not _plausible_image(body):
-                        event(f"hardlink 产物不完整，跳过: {label} ({len(body)}B)")
-                        last_err = "解密产物不完整"
-                        continue
-                    if body:
-                        _remember_key(wxid, aes_key, xor_key)
-                        event(f"图片原图命中 hardlink: {label} ({len(body)}B, {ctype})")
-                        r = _emit(body, ctype.split("/")[1])
-                        if r[0] is not None:
-                            return r
-                        continue
-                last_err = "V2 密钥未命中（请确认微信已登录过该账号）"
-            elif head == V1_MAGIC:
-                body, ctype = decrypt_v2_body(data, V1_FIXED_KEY, DEFAULT_XOR)
-                if body and _plausible_image(body):
+            try:
+                if not path.is_file():
+                    continue
+                data = path.read_bytes()
+                body, ctype = _decrypt_any(data, wxid)
+                if body and not _plausible_image(body):
+                    event(f"attach 产物不完整，跳过({path.name[:24]}): {label} ({len(body)}B)")
+                    last_err = "解密产物不完整"
+                    continue
+                if body:
+                    event(f"图片attach命中({path.name[:24]}): {label} ({len(body)}B)")
                     r = _emit(body, ctype.split("/")[1])
                     if r[0] is not None:
                         return r
-                last_err = "V1 解密失败"
-            else:
-                # V0：单字节 XOR 自动检测（按已知图像首字节推导）
-                for known, ext, ctype in _IMAGE_SIGS:
-                    xk = data[0] ^ known[0]
-                    body = data.translate(_xor_table(xk))
-                    ext2, _ct = _image_sig(body)
-                    if ext2 and _plausible_image(body):
-                        r = _emit(body, ext2)
-                        if r[0] is not None:
-                            return r
-                last_err = "未知格式"
+                    continue
+                last_err = "attach 解密失败"
+            except OSError as e:
+                _media_logger.detailed(
+                    "media", f"attach 读取失败 {path.name[:24]}: {type(e).__name__}")
+                last_err = "未找到文件"
+                continue
+            except Exception as e:
+                _candidate_failed("attach", path, e, label)
+                last_err = "attach 处理失败"
+                continue
 
-    # ② Bubble 气泡缓存（packed_info 的 md5 精确映射 + local_id 定位）
-    if chat and local_id and ts:
-        cands = bubble_paths(wxid, chat, local_id, ts,
-                             bubble_md5=bubble_md5, xml_md5=md5)
-        if not cands:
-            event(f"图片气泡未命中: {label}")
-        for f in cands:
-            data = f.read_bytes()
-            head = data[:6]
-            if head == V2_MAGIC:
-                for aes_key, xor_key in candidate_keys(wxid):
-                    body, ctype = decrypt_v2_body(data, aes_key, xor_key)
-                    if body and not _plausible_image(body):
-                        event(f"气泡产物不完整，跳过: {label} ({len(body)}B)")
-                        last_err = "解密产物不完整"
-                        continue
-                    if body:
-                        _remember_key(wxid, aes_key, xor_key)
-                        event(f"图片气泡命中: {label} ← {f.name[:20]}… ({len(body)}B)")
+    # ① hardlink 原图
+    if md5 and len(md5) == 32:
+        try:
+            hl_cands = resolve_image_path(acc_out_dir, md5, wxid)
+        except Exception as e:
+            hl_cands = []
+            _candidate_failed("hardlink 枚举", acc_out_dir, e, label)
+        for path in hl_cands:
+            try:
+                if not path.is_file():
+                    last_err = f"文件不存在: {path.name}"
+                    continue
+                data = path.read_bytes()
+                if not data:
+                    last_err = "文件为空"
+                    continue
+                head = data[:6]
+                if head == V2_MAGIC:
+                    for aes_key, xor_key in candidate_keys(wxid):
+                        body, ctype = decrypt_v2_body(data, aes_key, xor_key)
+                        if body and not _plausible_image(body):
+                            event(f"hardlink 产物不完整，跳过: {label} ({len(body)}B)")
+                            last_err = "解密产物不完整"
+                            continue
+                        if body:
+                            _remember_key(wxid, aes_key, xor_key)
+                            event(f"图片原图命中 hardlink: {label} ({len(body)}B, {ctype})")
+                            r = _emit(body, ctype.split("/")[1])
+                            if r[0] is not None:
+                                return r
+                            continue
+                    last_err = "V2 密钥未命中（请确认微信已登录过该账号）"
+                elif head == V1_MAGIC:
+                    body, ctype = decrypt_v2_body(data, V1_FIXED_KEY, DEFAULT_XOR)
+                    if body and _plausible_image(body):
                         r = _emit(body, ctype.split("/")[1])
                         if r[0] is not None:
                             return r
-                        continue
-                last_err = "Bubble V2 密钥未命中"
-            else:
-                ext, ctype = _image_sig(data)
-                if ext and _plausible_image(data):
-                    event(f"图片气泡命中(明文): {label} ← {f.name[:20]}…")
-                    r = _emit(data, ext)
-                    if r[0] is not None:
-                        return r
-                last_err = "Bubble 未知格式"
+                    last_err = "V1 解密失败"
+                else:
+                    # V0：单字节 XOR 自动检测（按已知图像首字节推导）
+                    for known, ext, ctype in _IMAGE_SIGS:
+                        xk = data[0] ^ known[0]
+                        body = data.translate(_xor_table(xk))
+                        ext2, _ct = _image_sig(body)
+                        if ext2 and _plausible_image(body):
+                            r = _emit(body, ext2)
+                            if r[0] is not None:
+                                return r
+                    last_err = "未知格式"
+            except OSError as e:
+                _media_logger.detailed(
+                    "media", f"原图读取失败 {path.name[:24]}: {type(e).__name__}")
+                last_err = "未找到文件"
+                continue
+            except Exception as e:
+                _candidate_failed("hardlink", path, e, label)
+                last_err = "原图处理失败"
+                continue
+
+    # ② Bubble 气泡缓存（packed_info 的 md5 精确映射 + local_id 定位）
+    if chat and local_id and ts:
+        try:
+            cands = bubble_paths(wxid, chat, local_id, ts,
+                                 bubble_md5=bubble_md5, xml_md5=md5)
+        except Exception as e:
+            cands = []
+            _candidate_failed("气泡枚举", acc_out_dir, e, label)
+        if not cands:
+            event(f"图片气泡未命中: {label}")
+        for f in cands:
+            try:
+                data = f.read_bytes()
+                head = data[:6]
+                if head == V2_MAGIC:
+                    for aes_key, xor_key in candidate_keys(wxid):
+                        body, ctype = decrypt_v2_body(data, aes_key, xor_key)
+                        if body and not _plausible_image(body):
+                            event(f"气泡产物不完整，跳过: {label} ({len(body)}B)")
+                            last_err = "解密产物不完整"
+                            continue
+                        if body:
+                            _remember_key(wxid, aes_key, xor_key)
+                            event(f"图片气泡命中: {label} ← {f.name[:20]}… ({len(body)}B)")
+                            r = _emit(body, ctype.split("/")[1])
+                            if r[0] is not None:
+                                return r
+                            continue
+                    last_err = "Bubble V2 密钥未命中"
+                else:
+                    ext, ctype = _image_sig(data)
+                    if ext and _plausible_image(data):
+                        event(f"图片气泡命中(明文): {label} ← {f.name[:20]}…")
+                        r = _emit(data, ext)
+                        if r[0] is not None:
+                            return r
+                    last_err = "Bubble 未知格式"
+            except OSError as e:
+                _media_logger.detailed(
+                    "media", f"气泡读取失败 {f.name[:24]}: {type(e).__name__}")
+                last_err = "未找到文件"
+                continue
+            except Exception as e:
+                _candidate_failed("气泡", f, e, label)
+                last_err = "Bubble 处理失败"
+                continue
 
     # ③ Thumb 明文缩略图
     if chat and local_id and ts:
-        thumbs = thumb_paths(wxid, chat, local_id, ts)
+        try:
+            thumbs = thumb_paths(wxid, chat, local_id, ts)
+        except Exception as e:
+            thumbs = []
+            _candidate_failed("缩略图枚举", acc_out_dir, e, label)
         if not thumbs:
             event(f"图片三级来源全部未命中: {label}")
         for f in thumbs:
-            data = f.read_bytes()
-            ext, ctype = _image_sig(data)
-            if ext and _plausible_image(data):
-                event(f"缩略图命中: {label} ← {f.name[:20]}…")
-                r = _emit(data, ext)
-                if r[0] is not None:
-                    return r
+            try:
+                data = f.read_bytes()
+                ext, ctype = _image_sig(data)
+                if ext and _plausible_image(data):
+                    event(f"缩略图命中: {label} ← {f.name[:20]}…")
+                    r = _emit(data, ext)
+                    if r[0] is not None:
+                        return r
+            except OSError as e:
+                _media_logger.detailed(
+                    "media", f"缩略图读取失败 {f.name[:24]}: {type(e).__name__}")
+                last_err = "未找到文件"
+                continue
+            except Exception as e:
+                _candidate_failed("缩略图", f, e, label)
+                last_err = "缩略图处理失败"
+                continue
         last_err = "本地无原图/气泡/缩略图"
     return None, last_err
 

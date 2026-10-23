@@ -19,7 +19,11 @@ ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 
 
 def valid_account(account) -> bool:
-    """账号名是否为合法单段路径分量。"""
+    """账号名是否为合法单段路径分量。
+
+    注意：正则接受 "." 与 ".."（点也是合法账号字符）。它们是路径分量而非
+    账号，拼接/删除路径的入口一律走 account_dir —— 那里显式拒绝这两个值。
+    """
     return isinstance(account, str) and bool(ACCOUNT_RE.fullmatch(account))
 
 
@@ -27,14 +31,21 @@ def account_dir(account, *, must_exist: bool = True) -> Path | None:
     """把 account 解析为 out_root 下的目录；非法/越界返回 None。
 
     must_exist=True 时目录不存在也返回 None（调用方据此直接判空）。
+
+    P3-20：ACCOUNT_RE 允许 "."/".."，而 `account_dir(".")` resolve 后就是
+    out_root 本身并成功通过 relative_to——清除接口会把这个"账号目录"整个
+    rmtree 掉。账号不可能是这两个路径分量，显式拒绝；另加 `p == root`
+    兜底，任何解析到输出根本身的输入都不返回目录。
     """
-    if not valid_account(account):
+    if not valid_account(account) or account in (".", ".."):
         return None
     root = paths.out_root().resolve()
     try:
         p = (root / account).resolve()
         p.relative_to(root)
     except (OSError, ValueError):
+        return None
+    if p == root:
         return None
     if must_exist and not p.is_dir():
         return None

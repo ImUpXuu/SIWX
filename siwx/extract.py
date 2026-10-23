@@ -26,6 +26,10 @@ from siwx.strategies import run_strategies
 # 从不遍历，因此新增该键不会影响任何既有逻辑。
 SOURCE_FIELD = "@source"
 
+# P3-6：每解出 N 个库把 manifest 落盘一次（进程被杀最多丢 N 条缓存记录，
+# 产物本身仍在，下次重解）。池中断/异常路径会额外补一次落盘。
+_MANIFEST_FLUSH_EVERY = 10
+
 
 def _round_mb(n: float) -> float:
     return round(n / 1048576.0, 1)
@@ -376,26 +380,38 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
 
     log(f"[decrypt] 待解密: {len(tasks)} 个, 缓存命中: {cached}, 缺密钥: {skipped}")
 
-    def _on_done(r):
-        rel, pages, status, err = r
-        if status == "ok":
-            log(f"  [cipher] 已解密 {rel} ({pages} 页)")
-        elif status == "cancelled":
-            log(f"  [cancel] 已取消 {rel}")
-        else:
-            log(f"  [err] 失败 {rel}: {err}")
+    # P3-6：边收边写 manifest —— 进程池中断/进程被杀时，已完成条目不能随
+    # 异常一起丢弃。rel → 条目/密钥 预先建索引，避免结果循环里 O(n²) 的查找。
+    entry_by_rel = {e.rel: e for e in entries}
+    key_by_rel = {t[0]: t[3] for t in tasks}
+    consumed = set()
+    dirty = 0
 
-    # P2-10：仅在显式传入取消探针时才把它交给 pool——旧调用/monkeypatch 的
-    # 三参数 decrypt_parallel(tasks, workers, on_done) 必须继续可用。
-    dkw = {"workers": workers, "on_done": _on_done}
-    if should_cancel is not None:
-        dkw["should_cancel"] = should_cancel
-    results = decrypt_parallel(tasks, **dkw)
-    for rel, pages, status, err in results:
-        e = next(x for x in entries if x.rel == rel)
-        key_hex = next(t[3] for t in tasks if t[0] == rel)
+    def _flush_manifest():
+        nonlocal dirty
+        try:
+            save_manifest(out_root, manifest)
+            dirty = 0
+        except OSError:
+            # save_manifest 已记 error；中途落盘失败不该打断解密，结束时还会再写
+            pass
+
+    def _consume(r):
+        """记账一条解密结果；on_done 与最终遍历共用，保证只计一次。"""
+        nonlocal ok, failed, cancelled, dirty
+        rel, pages, status, err = r
+        if rel in consumed:
+            return
+        e = entry_by_rel.get(rel)
+        if e is None:
+            # 池返回了未知条目的结果（调用方/pool 被替换时的防御），不污染计数
+            _slog.detailed("decrypt", f"解密结果无对应条目，已忽略: {rel}")
+            return
+        consumed.add(rel)
+        key_hex = key_by_rel.get(rel)
         if status == "ok":
             ok += 1
+            log(f"  [cipher] 已解密 {rel} ({pages} 页)")
             # P2-7：manifest 必须记录**解密前**的 (mtime_ns,size)。解密窗口内
             # 源库若被写入且大小不变，写解密后 stat 会让下次错误命中旧产物、
             # 新增消息永久缺失；此时宁可删条目、下次强制重解。
@@ -420,14 +436,35 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
                                  "mtime": prev[0],
                                  "mtime_ns": prev[1],
                                  "pages": pages}
+                dirty += 1
         elif status == "cancelled":
             # 取消不等于失败：未执行的库已有产物不入 manifest（下次会重解）
             cancelled += 1
+            log(f"  [cancel] 已取消 {rel}")
             manifest.pop(rel, None)
         else:
             failed += 1
+            log(f"  [err] 失败 {rel}: {err}")
         files.append({"rel": rel, "size_mb": _round_mb(e.size), "pages": pages,
-                      "status": status, "key_masked": mask_key(key_hex)})
+                      "status": status,
+                      "key_masked": mask_key(key_hex) if key_hex else ""})
+        if dirty >= _MANIFEST_FLUSH_EVERY:
+            _flush_manifest()
+
+    # P2-10：仅在显式传入取消探针时才把它交给 pool——旧调用/monkeypatch 的
+    # 三参数 decrypt_parallel(tasks, workers, on_done) 必须继续可用。
+    dkw = {"workers": workers, "on_done": _consume}
+    if should_cancel is not None:
+        dkw["should_cancel"] = should_cancel
+    try:
+        results = decrypt_parallel(tasks, **dkw)
+    except BaseException:
+        # P3-6：向上抛（含中断）之前把已完成条目落盘；不吞任何异常
+        if dirty:
+            _flush_manifest()
+        raise
+    for r in results:
+        _consume(r)
 
     if tasks:
         # 记录来源：本次确实写出了产物，该目录即归属于本 db_dir。

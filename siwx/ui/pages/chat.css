@@ -349,13 +349,15 @@
   cursor: pointer; user-select: none;
   transition: background .15s, border-color .15s, color .15s;
 }
-.chip:hover { border-color: var(--accent); color: var(--accent); }
+/* 文字色用 --accent-fg（浅底上的深绿，保证对比度）：--accent 在
+   card/accent-soft 上一类底色上只有约 2.2:1，不满足 AA */
+.chip:hover { border-color: var(--accent); color: var(--accent-fg); }
 .chip.on {
   background: var(--accent-soft); border-color: var(--accent);
-  color: var(--accent); font-weight: 600;
+  color: var(--accent-fg); font-weight: 600;
 }
 .c-filter-info { font-size: 12px; color: var(--muted); }
-.c-filter-info b { color: var(--accent); }
+.c-filter-info b { color: var(--accent-fg); }
 mark.m-hit {
   background: #ffe58f; color: inherit;
   border-radius: 2px; padding: 0 1px;

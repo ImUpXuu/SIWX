@@ -227,10 +227,12 @@ def extract(ctx) -> int:
     log(f"[cipher] 微信进程 {pids} — 只读扫描 (无需管理员、无需重启)")
 
     entry = len(key_map)
-    found_any = False
     tot_found = tot_tried = tot_bad = 0
+    total_salts = len(page1_by_salt)
+    stop_reason = "已扫描完所有进程"
     for pid in pids:
-        if len(key_map) >= len(page1_by_salt):
+        if len(key_map) >= total_salts:
+            stop_reason = "全部 salt 已覆盖，提前结束"
             break
         h = winproc.open_process(pid)
         if not h:
@@ -238,6 +240,10 @@ def extract(ctx) -> int:
             dbg(f"[cipher] PID={pid} 打开失败 "
                 f"err={winproc._stats.get('open_last_err', 0)}")
             continue
+        # P3-5：每个进程独立计贡献。旧实现用跨进程的 found_any 决定 break，
+        # 多开微信时只要第一个进程命中就停，其他实例持有的密钥全部漏扫。
+        pid_entry = len(key_map)
+        pid_found = False
         try:
             regions = winproc.enum_regions(h)
             total_mb = sum(s for _b, s in regions) // 1048576
@@ -312,12 +318,16 @@ def extract(ctx) -> int:
                 tot_tried += tr
                 tot_bad += bd
                 if f:
-                    found_any = True
+                    pid_found = True
             dbg(f"[cipher] PID={pid} 候选汇总: 命中={tot_found} "
                 f"尝试={tot_tried} 非法hex={tot_bad}")
+            dbg(f"[cipher] PID={pid} 贡献 +{len(key_map) - pid_entry}，"
+                f"累计 {len(key_map)}/{total_salts}")
 
-            # 掩码恢复兜底（微信升级导致内置掩码失效时）
-            if not found_any and len(key_map) < len(page1_by_salt):
+            # 掩码恢复兜底（微信升级导致内置掩码失效时）。按本进程是否命中
+            # 判断，而不是跨进程的 found_any：前一个进程命中不该让后一个
+            # 进程跳过求解。
+            if not pid_found and len(key_map) < total_salts:
                 log("[cipher] 内置掩码未命中，启用验证引导的掩码求解…")
                 dbg(f"[cipher] 掩码求解仅用 blob[0]（共 {len(blobs)} 个）")
 
@@ -338,15 +348,22 @@ def extract(ctx) -> int:
                         mask = sm
                 if mask is not None:
                     log(f"[cipher] 求解掩码: {mask.hex()}")
-                    found_any = True
+                    pid_found = True
                 else:
                     # 审计 §3.4:292-311：crib 与打分两路都失败必须可见
                     dbg("[cipher] 掩码求解失败: crib 与 ASCII 打分均未命中")
         finally:
             winproc.close_handle(h)
-        if found_any:
+        # P3-5：只有"该进程贡献了密钥但仍有 salt 未覆盖"才继续下一个 PID；
+        # 已全覆盖时上面的循环头会在下一轮 break，这里显式收尾并说明原因。
+        if len(key_map) >= total_salts:
+            stop_reason = "全部 salt 已覆盖，提前结束"
             break
+        if pid_found:
+            dbg(f"[cipher] PID={pid} 命中 {len(key_map) - pid_entry} 个，仍有 "
+                f"{total_salts - len(key_map)} 个 salt 未覆盖 → 继续下一个进程")
 
     found = len(key_map) - entry
+    dbg(f"[cipher] 扫描结束原因: {stop_reason}（PID 数={len(pids)}）")
     log(f"[cipher] Config.Cipher 扫描完成: 验证 {found} 个密钥")
     return found

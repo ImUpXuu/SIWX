@@ -23,6 +23,7 @@
 """
 import argparse
 import hashlib
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -105,6 +106,24 @@ def _convert_html(session: dict, msgs: list, avatar_map: dict,
                          template=template)
 
 
+def _write_atomic(out: Path, writer) -> None:
+    """写同目录 `<out>.part`，成功后 os.replace（P3-9）。
+
+    旧实现直接写 out：转换中途异常会留下半截文件，而下次 `out.exists()`
+    会把它当已完成跳过——坏产物永久留存。异常路径删除 .part 且不产生 out
+    （已存在的旧成品保持原样，overwrite 语义不变）。"""
+    tmp = out.with_name(out.name + ".part")
+    try:
+        writer(tmp)
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _update_manifest(session_dir: Path, added: dict) -> None:
     """manifest 追加 converted 段；parse/media 段原样保留（无法从 JSON 重算）。"""
     import json
@@ -174,15 +193,17 @@ def convert_dir_report(root: Path, formats, only: str | None = None,
             if want_md:
                 out = d / f"{base}.md"
                 if overwrite or not out.exists():
-                    _convert_md(session, msgs, out)
+                    _write_atomic(out, lambda p, _s=session, _m=msgs:
+                                  _convert_md(_s, _m, p))
                     added["formats"].append("md")
             if want_html:
                 out = d / f"{base}.html"
                 if overwrite or not out.exists():
-                    _convert_html(session, msgs, _avatar_map(d, set(
+                    avatars = _avatar_map(d, set(
                         m.get("senderUsername") or "" for m in msgs) | {
-                        session.get("ownerId") or ""}),
-                        out, template)
+                        session.get("ownerId") or ""})
+                    _write_atomic(out, lambda p, _s=session, _m=msgs,
+                                  _a=avatars: _convert_html(_s, _m, _a, p, template))
                     added["formats"].append("html")
         except Exception as e:  # noqa: BLE001 单会话失败不拖垮整批
             log(f"[fail] {d.name}: {type(e).__name__}: {e}")

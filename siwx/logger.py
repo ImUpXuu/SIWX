@@ -13,9 +13,10 @@
   防止大导出冲掉日志页早期关键记录（埋点越密丢得越快）。
 
 脱敏规则:
-- 密钥: 64 位 hex → ****
+- 密钥: 64 位 / 32 位 hex → ****（先 64 后 32，避免长密钥被拆段残留）
 - wxid: wxid_xxx → wxid_*** (保留前缀)
-- 路径: 绝对路径 → 相对路径
+- 数字消息 ID: local_id=/serverId= 后的纯数字 → ***（不做无差别数字脱敏）
+- 路径: 绝对路径 → 相对路径（含空格路径单列规则，保留末段）
 - 用户名: 保留首字符，其余脱敏
 """
 import hashlib
@@ -256,15 +257,34 @@ def export_logs(start_ts=None, end_ts=None, desensitize=True) -> str:
 
 # 匹配 64 位 hex 密钥
 _KEY_RE = re.compile(r"[0-9a-fA-F]{64}")
+# 匹配 32 位 hex（md5 / 半截 token）。必须在 64 位规则之后应用：64 位先被
+# 替换成 "****"，否则 32 位规则会把一个 64 位密钥拆成两段残留
+# （"****" + 剩余 32 位仍可反查）。
+_KEY32_RE = re.compile(r"[0-9a-fA-F]{32}")
 # 匹配 wxid_xxx
 _WXID_RE = re.compile(r"wxid_[a-zA-Z0-9_\-]+")
 # 匹配 gh_xxx (公众号)
 _GH_RE = re.compile(r"gh_[a-zA-Z0-9_\-]+")
 # 匹配 @chatroom
 _CHATROOM_RE = re.compile(r"\d+@chatroom")
+# 纯数字消息 ID：只按 `键=值` / `键: 值` 形式匹配。不做无差别数字脱敏——
+# 日志里的耗时/时间戳/计数必须保留，否则排障文本直接失真。
+_ID_KV_RE = re.compile(
+    r"\b((?:server|local)_?id)\s*([=:])\s*(\d+)", re.IGNORECASE)
 # 匹配绝对路径 (Windows/Mac)。审计 §7.7：原规则 `[/][^\s]+` 会把 `17/5684`、
 # `img=3/5` 这类比率/分数当路径匹配，脱敏后输出损坏文本（175684）。
 # 收紧为带明确锚点的形式：盘符 / UNC / ~/ / 常见 POSIX 绝对根。
+# P3-23：真实路径常含空格（C:\Program Files (x86)、C:\Users\John Doe、
+# ~/Library/Application Support）。这类路径没有"以空格为界"的可靠判据，
+# 因此单列一条"敏感前缀 + 允许空格"的规则：惰性匹配到下一个 "键=值"、
+# 引号/标点或行尾为止，只保留末段。普通无空格路径仍走下面的老规则，
+# 比率/分数继续不受影响。
+_PATH_SPACE_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/](?:Program Files(?: \(x86\))?|Users|ProgramData|Windows)"
+    r"|/Users/|~/Library/Application Support/|~/Library/)"
+    r"[^<>\"|*\r\n]*?"
+    r"(?=\s+\w+=|[\"'<>|,;)]|$)"
+)
 _PATH_RE = re.compile(
     r"(?:[A-Za-z]:[\\/][^\s]+"                      # Windows 盘符路径
     r"|\\\\[^\s]+"                                  # UNC 路径
@@ -276,18 +296,28 @@ _PATH_RE = re.compile(
 _ACCOUNT_KV_RE = re.compile(r"\b(account|chat|ownerId|username|talker)=([^\s'\"&,;]+)")
 
 
+def _last_segment(path: str) -> str:
+    """路径 → 末段（同时兼容 \\ 与 / 分隔；尾随标点/空白不并进末段）。"""
+    return re.split(r"[\\/]", path.rstrip())[-1]
+
+
 def desensitize_msg(msg: str) -> str:
     """脱敏单条日志消息。"""
-    # 密钥 → ****
+    # 密钥 → ****（先 64 位，再 32 位；含空格路径规则先于通用路径规则）
     msg = _KEY_RE.sub("****", msg)
+    msg = _KEY32_RE.sub("****", msg)
     # wxid → wxid_*** (保留前缀)
     msg = _WXID_RE.sub(lambda m: m.group()[:5] + "***", msg)
     # gh_ → gh_***
     msg = _GH_RE.sub(lambda m: m.group()[:3] + "***", msg)
     # @chatroom → ***@chatroom
     msg = _CHATROOM_RE.sub("***@chatroom", msg)
-    # 路径 → 仅保留末段（同时兼容 \ 与 / 分隔，POSIX 上 Path 不切反斜杠）
-    msg = _PATH_RE.sub(lambda m: re.split(r"[\\/]", m.group())[-1], msg)
+    # local_id=123456789 / serverId: 987654321 → 值置 ***（键与分隔符保留）
+    msg = _ID_KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***", msg)
+    # 含空格路径 → 仅保留末段（必须先于下面的无空格规则，否则会被截在空格处）
+    msg = _PATH_SPACE_RE.sub(lambda m: _last_segment(m.group()), msg)
+    # 路径 → 仅保留末段
+    msg = _PATH_RE.sub(lambda m: _last_segment(m.group()), msg)
     # 键值对形式的账号标识 → 保留前 4 字符 + ***（wxid/gh/chatroom 已被上面
     # 的规则遮盖，值里含 *** 的跳过，保证重复脱敏幂等）
     def _mask_kv(m):

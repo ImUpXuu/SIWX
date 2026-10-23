@@ -13,14 +13,24 @@
 | 联系人 / 会话 / 朋友圈 | 解密产物 | `output/<wxid>/` | 高 |
 | 导出产物（HTML/JSON/ZIP + manifest.json） | 导出管线 | `exports/` | 高 |
 | 缓存清单 `.siwx_cache.json` | 解密缓存 | `output/<wxid>/` | 中（自 5.0.7 起不含密钥） |
+| 派生媒体密钥 `media_key.json` | 图片 V2 密钥派生 | `data_dir()`（Windows `%LOCALAPPDATA%/stories-in-wx`；macOS `~/Library/Application Support/stories-in-wx`） | 高（AES/XOR 派生密钥明文；POSIX 0600） |
 
 ## 2. 信任边界
 
 1. **微信进程**：密钥收割需要读取微信进程内存（策略链）。这是本项目唯一
    触碰微信进程的环节，只读，不写入、不注入代码。
 2. **本机其他进程**：任何能读 `output/` 的本地进程都能拿到解密库与密钥库。
-   Windows 上密钥库受 DPAPI 保护（绑定当前用户），解密库为**明文**。
-3. **Web 控制台（本机 API）**：默认绑定 `127.0.0.1:8787`，API **无 token、
+   Windows 上密钥库受 DPAPI 保护（绑定当前用户），解密库为**明文**；
+   `media_key.json` 是图片派生密钥的明文缓存（POSIX 权限 0600，Windows 依赖
+   用户目录 ACL，见 §4.4）。
+3. **macOS 打包版的数据位置**：`keystore.bin`、`media_key.json`、
+   `wechat_paths.json`、`log_level.json` 已落在 `data_dir()`（Application
+   Support）；但 `logs/`、`output/`、`exports/`、`templates/` 仍跟随
+   `app_root()`，即 `stories-in-wx.app/Contents/MacOS/` 内，权限沿用进程
+   umask（常见目录 0755 / 文件 0644）。本轮决策是不迁移（见 §4.3）；若 .app
+   位于只读位置，路径回退会在当前工作目录下创建 `stories-in-wx/<subdir>`。
+   建议把程序放在私有可写目录，或用 `SIWX_ROOT` 指向私有数据目录。
+4. **Web 控制台（本机 API）**：默认绑定 `127.0.0.1:8787`，API **无 token、
    无登录态**（P2-14 决策：单用户桌面假设下本轮不引入 token），任何能连上
    该端口的本机程序都可调用全部接口。已实现的缓解只针对浏览器跨源：
    - Host 头校验，缓解 DNS rebinding；
@@ -32,14 +42,14 @@
    per-launch token（启动时随机生成、宿主 UI 自动注入，脚本/MCP 显式配置），
    列为后续项，本轮不实现。`--host 0.0.0.0` 需要 `--trust-lan` 显式确认
    （局域网内任何设备均可访问全部 API）。
-4. **自动更新**：manifest 只从白名单域名拉取，客户端 POST 的 manifest 被
+5. **自动更新**：manifest 只从白名单域名拉取，客户端 POST 的 manifest 被
    拒绝；安装包与 SHA-256 清单的 URL 还必须落在本仓库 releases 路径下
    （否则仅靠域名白名单可被 `github.com/<其他仓库>` 绕过）；SHA-256 期望值
    缺失、哈希清单拉取失败或不在白名单时 **fail-closed**（拒绝安装）。
    但 SHA-256 清单与安装包**同源**（同一个 GitHub Release / 同一镜像），
    没有代码签名、没有内置公钥：镜像或发布账号被控时可同时替换安装包与
    哈希，形成自洽投毒，完整性校验无法发现（P2-15 残余风险）。
-5. **AI 接入（MCP）**：消息正文应视为不可信数据（提示注入面）；工具级开关
+6. **AI 接入（MCP）**：消息正文应视为不可信数据（提示注入面）；工具级开关
    在 MCP 配置页，调用有审计日志。
 
 ## 3. 已知风险与缓解
@@ -49,14 +59,16 @@
 | 解密产物明文常驻磁盘 | 无法避免（导出/查看需要明文） | 用完即删；不要把 `output/` 放进同步盘/备份 |
 | 密钥库非 Windows 明文 | 权限收紧 0600 | 优先在 Windows 上运行解密 |
 | `.siwx_cache.json` 旧版含明文密钥 | 5.0.7 起加载即剥离并重写 | 手动删除旧文件亦可 |
+| `media_key.json` 明文派生密钥 | 非 Windows chmod 0600；Windows 依赖用户目录 ACL（P3-22 决策：本轮不引入 DPAPI） | 不要在共享/多用户机器运行；不再看图时可删除该文件，下次按需重建 |
+| macOS 打包版日志/导出在 .app 内 | 位置与权限见 §2.3；敏感数据文件已移 `data_dir()`（P3-21 决策：本轮不迁移） | 把 .app 放在私有可写目录，或用 `SIWX_ROOT` 指向私有数据目录；卸载前先清理 output/exports |
 | 本机 API 无鉴权（同机进程可调用，跨用户可能可达） | 默认只绑 `127.0.0.1`；Host 头校验防 DNS rebinding；非 GET 校验 `Origin` / `Sec-Fetch-Site` 防跨源 CSRF。**不防本机进程**；跨用户不在防护范围（P2-14 决策，依赖单用户桌面假设） | 只在个人单用户机器上运行；不要使用 `--trust-lan` / `--host 0.0.0.0`；不要在多用户共享机器上运行 |
 | 局域网暴露 API | `--trust-lan` 显式确认 + Host 校验 | 保持默认 127.0.0.1 |
 | 更新链投毒 | 域名白名单 + 本仓库 releases 路径约束 + 拒绝客户端 manifest + SHA-256 缺失/拉取失败 fail-closed。但哈希与安装包同源、无签名/内置公钥，镜像或发布账号被控时可自洽投毒（P2-15 残余风险） | 只从官方 GitHub Releases 下载；对照 Release 说明核对 SHA-256；关注仓库/账号安全公告 |
 | 导出产物外发 | manifest.json 供完整性核对 | 外发前自行脱敏 |
 
-## 4. 决策与后续项（P2-14 / P2-15，2026-10）
+## 4. 决策与后续项（P2-14 / P2-15 / P3-21 / P3-22，2026-10）
 
-本轮对两处信任缺口只做**明确的文档化决策**，不引入新机制：
+本轮对这些信任缺口只做**明确的文档化决策**，不引入新机制：
 
 1. **本机 API 鉴权（P2-14）**：不加 token。前提是单用户个人桌面——默认绑定
    `127.0.0.1`、Host 校验 + 非 GET 的 `Origin` / `Sec-Fetch-Site` 校验挡住
@@ -68,9 +80,20 @@
    SHA-256 缺失或不合法即拒绝安装；但哈希清单与安装包同源，**镜像或发布
    账号被控时可自洽投毒**，这是已被接受的残余风险。后续项（未实现）：发布
    签名或内置公钥校验（对安装包与哈希清单同时验证），以及可验证的发布流程。
+3. **macOS 打包版数据目录（P3-21）**：本轮**不迁移** `logs/output/exports/
+   templates` 到 Application Support，保留在 `.app` 内（`Contents/MacOS`）；
+   权限沿用 umask，敏感配置/密钥文件已在 `data_dir()` 并单独收紧。理由是
+   迁移会改变所有既有用户的产物路径与自动更新/备份脚本的假设，需要单独的
+   迁移方案与版本窗口。后续项：迁移到 `~/Library/Application Support/
+   stories-in-wx` 并把数据目录 chmod 700，附带一次性搬迁与旧路径兼容读取。
+4. **媒体派生密钥存储（P3-22）**：不做 Windows DPAPI，`media_key.json` 仍是
+   明文 JSON；POSIX 收紧到 0600，Windows 依赖 `%LOCALAPPDATA%` 的 ACL。同机
+   同用户进程可读是已被接受的残余风险。后续项：Windows DPAPI / macOS
+   Keychain 封装与迁移。
 
-用户侧缓解对上述两项同样适用：只从官方 Releases 获取程序、核对 SHA-256、
-在个人单用户机器上运行并保持默认仅回环监听。
+用户侧缓解对上述各项同样适用：只从官方 Releases 获取程序、核对 SHA-256、
+在个人单用户机器上运行并保持默认仅回环监听；macOS 用户把程序放在私有可写
+目录并定期清理 output/exports。
 
 ## 5. 非目标（Out of Scope）
 
