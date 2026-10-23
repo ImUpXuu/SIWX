@@ -15,6 +15,9 @@ blobs.txt
 # 运行时状态与本地产物
 auto_sync.json
 video/
+# 手动微信路径配置：含真实绝对路径与账号目录名，任何层级都不许入库
+wechat_paths.json
+wechat_paths.json.tmp
 
 # 工作区助手元数据（本地记忆/分析，不入库）
 .workbuddy-ai/

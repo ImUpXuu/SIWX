@@ -95,6 +95,61 @@ def _host_guard():
     _siwx_logger.warning("拒绝非本机 Host 请求: %s", host)
     return jsonify({"error": f"Host 校验失败: {host} 不在允许列表内"}), 403
 
+
+# ── Origin / Sec-Fetch-Site 校验（审计 P2-11，防 CSRF）──────────────
+# Host 头校验只挡 DNS rebinding，挡不住跨源表单：任意网页可以
+# <form method=POST action="http://127.0.0.1:port/api/update/do">，浏览器
+# 照发不误（表单提交不受 CORS 限制）。这里只对"写"请求校验浏览器自带的
+# 来源头：
+#   - Origin 存在：scheme 必须是 http/https，netloc 必须与 Host 完全一致
+#     （大小写不敏感）；"Origin: null"（沙箱 iframe / file://）一律 403；
+#   - Sec-Fetch-Site 存在：只允许 same-origin / none，same-site 也拒绝
+#     （同站子域同样不该读本机数据）；
+#   - 两个头都没有：curl / 脚本 / 旧客户端，放行（不加 token 的既定决策）。
+# 本机 UI 的同源 fetch 会带 Origin 与 Sec-Fetch-Site: same-origin，不受影响。
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_ALLOWED_FETCH_SITES = frozenset({"same-origin", "none"})
+
+
+def _parse_origin(origin: str):
+    """解析 Origin 头，返回 netloc；非法（null / 解析失败 / 非 http(s)）返回 None。"""
+    from urllib.parse import urlsplit
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return None
+    if (parts.scheme or "").lower() not in ("http", "https"):
+        return None
+    netloc = (parts.netloc or "").lower()
+    return netloc or None
+
+
+@app.before_request
+def _origin_guard():
+    if request.method in _SAFE_METHODS:
+        return None
+    origin = (request.headers.get("Origin") or "").strip()
+    fetch_site = (request.headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if not origin and not fetch_site:
+        return None
+    if origin:
+        netloc = _parse_origin(origin)
+        # 只记 netloc（不含 query/path），避免把可疑 URL 里的敏感参数写进日志
+        if netloc is None:
+            _siwx_logger.warning("拒绝非法 Origin 的写请求: %s %s",
+                                 request.method, request.path)
+            return jsonify({"error": "Origin 头非法，已拒绝请求"}), 403
+        if netloc != (request.host or "").lower():
+            _siwx_logger.warning("拒绝跨源写请求: %s %s origin=%s host=%s",
+                                 request.method, request.path, netloc,
+                                 request.host)
+            return jsonify({"error": "跨源请求被拒绝（Origin 与 Host 不一致）"}), 403
+    if fetch_site and fetch_site not in _ALLOWED_FETCH_SITES:
+        _siwx_logger.warning("拒绝跨源写请求: %s %s Sec-Fetch-Site=%s",
+                             request.method, request.path, fetch_site)
+        return jsonify({"error": f"跨源请求被拒绝（Sec-Fetch-Site={fetch_site}）"}), 403
+    return None
+
 # 模块化 API 蓝图（聊天查看 / 设置 / 导出 / MCP）
 from siwx.api_chat import bp as chat_bp  # noqa: E402
 from siwx.api_settings import bp as settings_bp, load_auto_sync, mark_auto_sync_result  # noqa: E402

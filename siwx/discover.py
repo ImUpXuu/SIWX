@@ -15,15 +15,93 @@ WECHAT_PROCESSES_MAC = ("WeChat",)
 
 
 def manual_paths_file() -> Path:
-    """手动指定的微信 db_storage 路径配置文件。"""
+    """手动指定的微信 db_storage 路径配置文件。
+
+    放在 `data_dir()` 而非 `app_root()`：文件内容是真实绝对路径与账号目录名，
+    历史上写在仓库根/安装目录，既会污染仓库（曾未进 .gitignore），也会在
+    升级/卸载时丢失或泄露。旧位置由 `load_manual_data_dirs()` 首次读取时迁移。
+    """
+    return _paths.data_dir() / "wechat_paths.json"
+
+
+def _legacy_manual_paths_file() -> Path:
+    """历史位置：仓库根 / 安装目录（app_root）。只用于迁移与兜底读取。"""
     return _paths.app_root() / "wechat_paths.json"
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return str(a) == str(b)
+
+
+_MIGRATION_WARNED = set()     # load_manual_data_dirs 在媒体热路径上高频调用
+
+
+def _warn_once(key: str, msg: str) -> None:
+    """迁移类告警每进程每条只记一次，避免每张图解密都刷一行 WARN。"""
+    if key in _MIGRATION_WARNED:
+        return
+    _MIGRATION_WARNED.add(key)
+    _slog.warn("discover", msg)
+
+
+def _migrate_legacy_manual_paths(dest: Path) -> None:
+    """把旧位置的 wechat_paths.json 原子迁移到数据目录。
+
+    - 目标已存在：以数据目录为准，旧文件不动（只告警提示残留，可手动删除）；
+    - 目标不存在而旧文件存在：同目录 `.tmp` + replace 复制（权限尽量 0600），
+      成功后才删除旧文件；
+    - 复制失败（权限/跨盘/占用）：保留旧文件并告警，调用方回退读旧文件；
+    - 删除旧文件失败：只告警（Windows 上被杀软/索引占用常见）。
+    """
+    legacy = _legacy_manual_paths_file()
+    if _same_file(legacy, dest):      # SIWX_DATA_DIR 恰好指到安装目录
+        return
+    try:
+        if not legacy.is_file():
+            return
+        if dest.exists():
+            _warn_once(f"residual:{dest}",
+                       f"数据目录已有 {dest.name}，旧位置仍有同名残留文件，请手动删除")
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_bytes(legacy.read_bytes())
+        try:
+            tmp.chmod(0o600)          # 含真实绝对路径/账号目录名
+        except OSError:
+            pass
+        tmp.replace(dest)
+    except OSError as e:
+        _warn_once(f"migrate:{dest}",
+                   f"迁移旧 {dest.name} 失败，继续读取旧位置: "
+                   f"{type(e).__name__}: {e}")
+        try:
+            dest.with_suffix(dest.suffix + ".tmp").unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    try:
+        legacy.unlink()
+        _slog.info("discover", f"{dest.name} 已迁移到应用数据目录")
+    except OSError as e:
+        _warn_once(f"unlink:{legacy}",
+                   f"旧 {dest.name} 删除失败，请手动删除: {type(e).__name__}: {e}")
 
 
 def load_manual_data_dirs() -> list:
     """读取用户手动保存的微信数据目录，返回 [(wxid, db_storage 路径)]。"""
     p = manual_paths_file()
+    _migrate_legacy_manual_paths(p)
     if not p.is_file():
-        return []
+        # 迁移失败时继续读旧文件兜底，避免用户已配置的目录凭空消失。
+        legacy = _legacy_manual_paths_file()
+        if not _same_file(legacy, p) and legacy.is_file():
+            p = legacy
+        else:
+            return []
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:

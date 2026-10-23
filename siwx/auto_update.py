@@ -316,7 +316,15 @@ def run_update(remote: dict, progress=None) -> dict:
         log.warn("update", f"[run] version 字段格式非法，拒绝安装: {ver!r}")
         return {"ok": False, "message": f"远程版本号格式非法，已拒绝安装: {ver}"}
 
-    log.info("update", f"[run] 开始更新: v{current_version()} → v{ver} "
+    # 拒绝降级/重装（P2-12）：do_update 已按 has_update() 拦过一层，但
+    # run_update 是安装入口，必须自己兜底——远程 manifest 可能是同版本或
+    # 旧版本（代理缓存、镜像回退），装下去等于静默降级。
+    cur = current_version()
+    if _version_tuple(ver) <= _version_tuple(cur):
+        log.warn("update", f"[run] 远程版本 v{ver} 不高于当前 v{cur}，拒绝安装")
+        return {"ok": False, "message": "远程版本不高于当前版本，已拒绝安装"}
+
+    log.info("update", f"[run] 开始更新: v{cur} → v{ver} "
                        f"平台={plat}")
     # 下载到系统临时目录；装到哪个盘由安装阶段决定（支持跨盘复制）
     tmp_dir = Path(tempfile.gettempdir()) / "siwx_update"

@@ -59,10 +59,18 @@ def data_dir() -> Path:
     Program Files 等安装位置可能只读或随升级被整体替换，用户数据
     必须落在系统数据目录，绝不能依赖启动时的工作目录。
 
-    Windows: %LOCALAPPDATA%/stories-in-wx        （与历史版本行为一致）
-    macOS:   ~/Library/Application Support/stories-in-wx
-    Linux:   $XDG_DATA_HOME/stories-in-wx（默认 ~/.local/share/stories-in-wx）
+    解析优先级（最高在前）：
+    1. 环境变量 SIWX_DATA_DIR（显式覆盖，与 SIWX_ROOT 同风格；目录不存在
+       也可用，调用方自行 mkdir —— 用于测试隔离与用户显式指定数据位置）
+    2. 平台默认：Windows %LOCALAPPDATA%/stories-in-wx；macOS
+       ~/Library/Application Support/stories-in-wx；Linux
+       $XDG_DATA_HOME/stories-in-wx（默认 ~/.local/share/stories-in-wx）
     """
+    env_data = os.environ.get("SIWX_DATA_DIR", "")
+    if env_data:
+        # 原样返回：可以是尚未创建的目录（调用方负责 mkdir），
+        # 也不做 resolve，避免吞掉用户显式写下的相对/符号链接路径。
+        return Path(env_data)
     if os.name == "nt":
         base = (os.environ.get("LOCALAPPDATA")
                 or os.environ.get("USERPROFILE")

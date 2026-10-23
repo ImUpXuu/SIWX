@@ -17,7 +17,12 @@ if str(ROOT) not in sys.path:
 
 
 class IsolatedRootCase(unittest.TestCase):
-    """把 SIWX_ROOT 指向临时目录，并在前后清空全部模块级缓存。
+    """把 SIWX_ROOT / SIWX_DATA_DIR 指向临时目录，并在前后清空模块级缓存。
+
+    SIWX_DATA_DIR 单独隔离（tmp/data）：keystore、log_level、media_key、
+    wechat_paths.json 等持久化配置都落在 data_dir()，只隔离 SIWX_ROOT 时
+    它们仍会写真实 %LOCALAPPDATA%/Application Support，测试之间互相污染、
+    也会碰到用户真实配置。
 
     顺序注意：clear_caches 里 `registry._loaded = True`（已加载但为空），
     保证消费方短路跳过，而不是重新触发目录扫描。
@@ -28,7 +33,9 @@ class IsolatedRootCase(unittest.TestCase):
                                                 ignore_cleanup_errors=True)
         self.tmp = Path(self._tmp.name)
         self._old_root = os.environ.get("SIWX_ROOT")
+        self._old_data_dir = os.environ.get("SIWX_DATA_DIR")
         os.environ["SIWX_ROOT"] = str(self.tmp)
+        os.environ["SIWX_DATA_DIR"] = str(self.tmp / "data")
         os.environ["SIWX_NO_PLUGINS"] = "1"
         self.clear_caches()
 
@@ -37,6 +44,10 @@ class IsolatedRootCase(unittest.TestCase):
             os.environ.pop("SIWX_ROOT", None)
         else:
             os.environ["SIWX_ROOT"] = self._old_root
+        if self._old_data_dir is None:
+            os.environ.pop("SIWX_DATA_DIR", None)
+        else:
+            os.environ["SIWX_DATA_DIR"] = self._old_data_dir
         self.clear_caches()
         try:
             self._tmp.cleanup()

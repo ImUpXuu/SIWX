@@ -42,9 +42,13 @@ def do_update():
         from siwx import logger as _log
         _log.warn("update", "[update] 忽略客户端提交的更新 manifest（安全策略，"
                             "更新源仅从服务端白名单域名拉取）")
-    remote = has_update()[1]  # 服务端自行拉取
+    has, remote, cur = has_update()  # 服务端自行拉取
     if not remote:
         return jsonify({"ok": False, "message": "无法获取远程版本信息（服务端拉取失败）"})
+    # 远程 manifest 存在 ≠ 有新版本：旧逻辑只看 remote，同版本/旧版本也会
+    # 走完整下载安装流程（P2-12）。无更新时直接返回，前端按 ok/message 呈现。
+    if not has:
+        return jsonify({"ok": False, "message": f"当前已是最新版本 v{cur}，无需更新"})
     result = run_update(remote)
     return jsonify(result)
 
