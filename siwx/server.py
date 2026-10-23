@@ -355,7 +355,8 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 accounts.append({"wxid": wxid,
                                  "decrypt": extract.decrypt_dir(
                                      db, str(Path(out_root) / wxid), _log,
-                                     workers=workers, use_cache=use_cache)})
+                                     workers=workers, use_cache=use_cache,
+                                     should_cancel=_cancel_event.is_set)})
             report = {"kind": "decrypt", "accounts": accounts}
             total_ok = sum(a["decrypt"]["ok"] for a in accounts)
             total_cached = sum(a["decrypt"].get("cached", 0) for a in accounts)
@@ -376,7 +377,8 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                 if rep["verified"] > 0:
                     _log(f"[job] 账号 {wxid}: 开始解密…")
                     dec = extract.decrypt_dir(db, str(Path(out_root) / wxid), _log,
-                                              workers=workers, use_cache=use_cache)
+                                              workers=workers, use_cache=use_cache,
+                                              should_cancel=_cancel_event.is_set)
                     _log(f"[job] 账号 {wxid}: 解密完成 {dec['ok']} 成功")
                 accounts.append({**rep, "decrypt": dec})
             report = {"kind": "auto", "accounts": accounts}
@@ -1052,8 +1054,14 @@ def _run_media_backup(account: str, out_dir, jlog):
         report = media_backup.backup_all(account, out_dir, log=jlog,
                                          should_cancel=_backup_cancel.is_set)
         _backup_job["report"] = report
-        _backup_job["ok"] = True
-        if report.get("cancelled"):
+        # P2-9：账号目录/媒体目录缺失时 report.ok=False，任务必须显式失败，
+        # 不再无条件报"备份完成"（前端读 ok/error 渲染失败态）。
+        ok = bool(report.get("ok", True))
+        _backup_job["ok"] = ok
+        if not ok:
+            _backup_job["error"] = report.get("error") or "备份失败（原因未知）"
+            jlog(f"备份失败: {_backup_job['error']}")
+        elif report.get("cancelled"):
             jlog("备份已取消（已完成部分保留）")
         else:
             jlog("备份完成")

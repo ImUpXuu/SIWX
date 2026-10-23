@@ -253,13 +253,17 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
 
 
 def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
-                workers=None, use_cache=True) -> dict:
-    """并行解密 + 产物缓存：源库 (mtime,size) 未变直接命中，秒回。
+                workers=None, use_cache=True, should_cancel=None) -> dict:
+    """并行解密 + 产物缓存：源库 (mtime_ns,size) 未变直接命中，秒回。
 
     来源保护：manifest 记录产出该目录的 db_dir（`@source`）。当同名账号存在
     多个副本目录时，它们共用同一个 output/<wxid>/；若当前 db_dir 与记录不符，
     说明会覆盖另一副本的产物，此时跳过并计入 conflict，避免静默丢数据。
     旧 manifest 无 `@source`（升级自 v5.0.x）视为放行，行为与旧版一致。
+
+    取消粒度（P2-10）：should_cancel 透传给 decrypt_parallel，在单库批次边界
+    （串行逐库、并行每个结果）检查；取消后未执行/未收集的库记 cancelled
+    （不计失败、不写 manifest），已写出的产物保留。
     """
     t0 = time.time()
     # 双写注入点（审计 §2.1 模式 A）
@@ -293,8 +297,9 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
         log(f"[decrypt]     本次来源 {src_tag}")
         log(f"[decrypt]     已存在的产物将跳过，不覆盖（如需切换请清空该账号输出目录）")
     files, tasks = [], []
-    ok = failed = skipped = cached = 0
+    ok = failed = skipped = cached = cancelled = 0
     conflicts = []
+    pre_stat = {}   # rel -> (mtime 秒, mtime_ns)：解密前快照，成功后比对
 
     def _resolve_key(e):
         rec = store.get(e.salt_hex)
@@ -330,23 +335,32 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
             skipped += 1
             continue
         try:
-            mtime = int(e.path.stat().st_mtime)
+            st = e.path.stat()
+            mtime = int(st.st_mtime)          # 秒级：兼容旧 manifest 条目
+            mtime_ns = int(st.st_mtime_ns)    # 纳秒：缓存判定首选
+            size_now = st.st_size
         except OSError as oe:
-            mtime = 0
+            mtime, mtime_ns, size_now = 0, None, e.size
             _slog.warn("decrypt", f"stat 失败 {e.rel}: {oe}（该库缓存将永不命中）")
         m = manifest.get(e.rel)
         dst = out_root / e.rel
         # S6：缓存命中不再比对 manifest 里的 key（密钥已不落盘）。
-        # 能走到这里说明密钥已从 keystore 解析成功；(mtime,size) 未变且
-        # 产物存在即为有效缓存。
-        if (use_cache and m and m.get("size") == e.size and m.get("mtime") == mtime
-                and dst.is_file()):
-            cached += 1
-            files.append({"rel": e.rel, "size_mb": _round_mb(e.size),
-                          "pages": m.get("pages", 0), "status": "cached",
-                          "key_masked": mask_key(key_hex)})
-            log(f"  [decrypt] 缓存命中 {e.rel} ({_round_mb(e.size)}MB, 未变)")
-            continue
+        # 能走到这里说明密钥已从 keystore 解析成功；(mtime_ns,size) 未变且
+        # 产物存在即为有效缓存。旧条目没有 mtime_ns 时回退秒级 mtime。
+        if use_cache and m and m.get("size") == e.size and dst.is_file():
+            if m.get("mtime_ns") is not None and mtime_ns is not None:
+                fresh = int(m["mtime_ns"]) == mtime_ns
+            elif mtime_ns is not None:
+                fresh = m.get("mtime") == mtime
+            else:
+                fresh = False   # 当前 stat 失败，不敢判缓存
+            if fresh:
+                cached += 1
+                files.append({"rel": e.rel, "size_mb": _round_mb(e.size),
+                              "pages": m.get("pages", 0), "status": "cached",
+                              "key_masked": mask_key(key_hex)})
+                log(f"  [decrypt] 缓存命中 {e.rel} ({_round_mb(e.size)}MB, 未变)")
+                continue
         # 来源保护：同名账号的多个副本目录会共用 output/<wxid>/，若当前来源与
         # 产出该目录的来源不同，直接覆盖会把另一副本（可能数据更全）的产物
         # 冲掉。这里跳过并告警，由用户决定是否清理目录后重跑。
@@ -358,6 +372,7 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
             log(f"  [decrypt] ⚠ 跳过 {e.rel}：已有产物来自其他副本目录")
             continue
         tasks.append((e.rel, str(e.path), str(dst), key_hex))
+        pre_stat[e.rel] = (mtime, mtime_ns, size_now)
 
     log(f"[decrypt] 待解密: {len(tasks)} 个, 缓存命中: {cached}, 缺密钥: {skipped}")
 
@@ -365,26 +380,50 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
         rel, pages, status, err = r
         if status == "ok":
             log(f"  [cipher] 已解密 {rel} ({pages} 页)")
+        elif status == "cancelled":
+            log(f"  [cancel] 已取消 {rel}")
         else:
             log(f"  [err] 失败 {rel}: {err}")
 
-    results = decrypt_parallel(tasks, workers=workers, on_done=_on_done)
+    # P2-10：仅在显式传入取消探针时才把它交给 pool——旧调用/monkeypatch 的
+    # 三参数 decrypt_parallel(tasks, workers, on_done) 必须继续可用。
+    dkw = {"workers": workers, "on_done": _on_done}
+    if should_cancel is not None:
+        dkw["should_cancel"] = should_cancel
+    results = decrypt_parallel(tasks, **dkw)
     for rel, pages, status, err in results:
         e = next(x for x in entries if x.rel == rel)
         key_hex = next(t[3] for t in tasks if t[0] == rel)
         if status == "ok":
             ok += 1
-            # S6：manifest 不再持久化密钥（size/mtime/pages 足以判定缓存命中，
-            # 密钥每次会话从 keystore 重取）
-            # 审计 §3.1:327-329：源库被微信删除的竞态不应炸掉已成功任务与缓存
+            # P2-7：manifest 必须记录**解密前**的 (mtime_ns,size)。解密窗口内
+            # 源库若被写入且大小不变，写解密后 stat 会让下次错误命中旧产物、
+            # 新增消息永久缺失；此时宁可删条目、下次强制重解。
+            prev = pre_stat.get(rel) or (0, None, e.size)
+            changed = None
             try:
-                mtime = int(e.path.stat().st_mtime)
+                st2 = e.path.stat()
             except OSError as oe:
-                mtime = 0
-                _slog.warn("decrypt", f"{rel} manifest 记录失败: {oe}")
-            manifest[rel] = {"size": e.size,
-                             "mtime": mtime,
-                             "pages": pages}
+                changed = f"解密后 stat 失败: {oe}"
+            else:
+                if prev[1] is None:
+                    changed = "解密前 stat 失败，无法确认源库稳定"
+                elif st2.st_size != prev[2] or int(st2.st_mtime_ns) != prev[1]:
+                    changed = (f"源库在解密期间变化(size {prev[2]}->{st2.st_size}, "
+                               f"mtime_ns {prev[1]}->{st2.st_mtime_ns})")
+            if changed:
+                manifest.pop(rel, None)
+                _slog.warn("decrypt",
+                           f"{rel} 不写入缓存清单：{changed}；下次强制重解")
+            else:
+                manifest[rel] = {"size": prev[2],
+                                 "mtime": prev[0],
+                                 "mtime_ns": prev[1],
+                                 "pages": pages}
+        elif status == "cancelled":
+            # 取消不等于失败：未执行的库已有产物不入 manifest（下次会重解）
+            cancelled += 1
+            manifest.pop(rel, None)
         else:
             failed += 1
         files.append({"rel": rel, "size_mb": _round_mb(e.size), "pages": pages,
@@ -399,16 +438,25 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     if conflicts:
         log(f"[decrypt] ⚠ {len(conflicts)} 个库因来源不同被跳过（已有产物来自其他副本目录）")
 
+    cancel_flag = False
+    if should_cancel is not None:
+        try:
+            cancel_flag = bool(should_cancel())
+        except Exception:
+            cancel_flag = False
     report = {
         "wxid": wxid, "out_dir": str(out_root),
         "ok": ok, "failed": failed, "skipped": skipped, "cached": cached,
         "conflicts": len(conflicts),
+        "cancelled": cancelled,
+        "is_cancelled": bool(cancelled) or cancel_flag,
         "duration_ms": int((time.time() - t0) * 1000),
         "files": files,
     }
     log(f"解密完成: {ok} 成功（缓存命中 {cached}）"
         + (f"，{failed} 失败" if failed else "")
         + (f"，{skipped} 缺密钥" if skipped else "")
+        + (f"，{cancelled} 已取消" if cancelled else "")
         + (f"，{len(conflicts)} 来源冲突跳过" if conflicts else "")
         + f" (耗时 {report['duration_ms']} ms)")
     return report

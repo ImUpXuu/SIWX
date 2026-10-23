@@ -29,19 +29,19 @@ CACHE_NAME = ".siwx_cache.json"
 加载缓存清单。
 
 ```python
-# .siwx_cache.json 格式
+# .siwx_cache.json 格式（密钥不再落盘，S6）
 {
   "message/message_1.db": {
     "size": 524288000,
     "mtime": 1725600000,
-    "pages": 1234,
-    "key": "abcdef1234567890..."
+    "mtime_ns": 1725600000123456789,
+    "pages": 1234
   },
   "contact/contact.db": {
     "size": 1048576,
     "mtime": 1725500000,
-    "pages": 256,
-    "key": "fedcba9876543210..."
+    "mtime_ns": 1725500000987654321,
+    "pages": 256
   }
 }
 ```
@@ -85,30 +85,49 @@ def _worker(task):
 
 ---
 
-### `decrypt_parallel(tasks, workers=None, on_done=None) → list`
+### `decrypt_parallel(tasks, workers=None, on_done=None, should_cancel=None) → list`
 
 **并行解密入口**。
 
 ```python
 def decrypt_parallel(
     tasks: list[(rel, src, dst, key_hex)],
-    workers: int = None,     # 默认 min(8, cpu_count)
-    on_done: callable = None, # 每完成一个任务回调
+    workers: int = None,       # 默认 min(8, cpu_count)
+    on_done: callable = None,  # 每完成一个任务回调
+    should_cancel: callable = None,  # 协作式取消探针；None=不可取消
 ) -> list[(rel, pages, status, err)]:
 ```
 
 **流程**:
 ```
 1. 空任务 → 返回 []
-2. workers <= 1 或 len(tasks) <= 1 → 串行执行
+2. workers <= 1 或 len(tasks) <= 1 → 串行执行（逐任务检查取消）
 3. 否则:
    a. multiprocessing.Pool(n)
    b. pool.imap_unordered(_worker, tasks)
-   c. 流式返回结果
+   c. 流式返回结果，每收到一个结果检查一次取消
    d. 每完成一个调用 on_done(r)
 ```
 
-**返回**: `[(rel, pages, status, err), ...]`
+**返回**: `[(rel, pages, status, err), ...]`，条数恒等于任务数。
+
+---
+
+## 取消粒度
+
+`should_cancel` 是协作式探针（调用方传 `threading.Event().is_set` 这类无参可调用对象）：
+
+| 路径 | 检查点 | 取消后的行为 |
+|---|---|---|
+| 串行（`workers<=1`） | 每个任务执行前 | 停止派发，未执行任务补 `(rel, 0, "cancelled", "用户取消")` |
+| 并行（`Pool`） | 每收集到一个结果 | 停止收集并终止进程池（`with pool` 退出即 `terminate()`），已派发未完成的任务同样补 `cancelled` 占位 |
+
+设计要点：
+
+- 取消方**不把剩余任务当失败**：占位结果 `status == "cancelled"`，与 `failed` 区分统计；
+- 返回条数=任务数，调用方按 rel 对齐任务与结果时不会漏项；
+- 已完成任务的产物保留（`decrypt_database` 自己负责半成品的清理）；
+- 不传 `should_cancel`（旧调用）行为与旧版完全一致。
 
 ---
 
@@ -118,15 +137,15 @@ def decrypt_parallel(
 
 ```python
 m = manifest.get(e.rel)
-if (use_cache and m
-    and m.get("size") == e.size
-    and m.get("mtime") == mtime
-    and m.get("key") == key_hex
-    and dst.is_file()):
+if use_cache and m and m.get("size") == e.size and dst.is_file():
+    # 优先纳秒；旧条目没有 mtime_ns 时回退秒级
+    fresh = int(m["mtime_ns"]) == mtime_ns if m.get("mtime_ns") is not None \
+        else m.get("mtime") == mtime
     → cached += 1  # 跳过解密
 ```
 
-**三者一致**: 文件大小 + 修改时间 + 密钥 → 源库未变。
+**两者一致**: 文件大小 + 修改时间（ns 优先，旧条目秒级回退）→ 源库未变。
+manifest 记录的是**解密前**的 stat，解密窗口内源库变化则不写条目（下次重解）。
 
 ---
 

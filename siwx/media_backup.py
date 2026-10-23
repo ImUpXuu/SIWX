@@ -22,6 +22,7 @@ local_id 撞号、消息体解析失败、引用信息缺失……）都可能�
 - 文件消息附件（msg/file/**，任意扩展名）：实测同样未加密、原文件名
   和扩展名原样保留在磁盘上（PDF/APK/PNG 等头部签名完好），直接复制。
 """
+import os
 import platform
 import shutil
 from pathlib import Path
@@ -30,11 +31,70 @@ from siwx import media
 
 
 def _account_root(wxid_full: str) -> Path | None:
-    """账号的 xwechat_files/<wxid> 根目录（cache/ 的上一级）。"""
+    """账号的 xwechat_files/<wxid> 根目录（db_storage 的上一级）。
+
+    P2-9：直接走 discover.find_wechat_data_dirs() 定位 (wxid, db_storage)，
+    不再依赖 cache/ 是否存在——删掉 cache 后旧实现拿不到 root，备份静默
+    返回 0/0 还报成功。discover 找不到时再回退 cache 根（兼容只暴露
+    cache 路径的环境/旧调用）。
+    """
+    try:
+        from siwx.discover import find_wechat_data_dirs
+        for wxid, db in find_wechat_data_dirs():
+            if wxid == wxid_full:
+                return Path(db).parent
+    except Exception as e:   # 扫描失败不应让备份直接崩，回退 cache 路径
+        media._media_logger.detailed("media_backup", f"find_wechat_data_dirs 失败: {e}")
     roots = media._wechat_cache_roots(wxid_full)
     if not roots:
         return None
     return roots[0].parent
+
+
+def _media_dir_flags(root: Path) -> dict:
+    """msg/attach、msg/video、msg/file 是否存在（供报告与失败判定）。"""
+    return {"attach": (root / "msg" / "attach").is_dir(),
+            "video": (root / "msg" / "video").is_dir(),
+            "file": (root / "msg" / "file").is_dir()}
+
+
+def _empty_stats(**extra) -> dict:
+    return {"total": 0, "ok": 0, "skipped": 0, "failed": 0, "bytes_written": 0,
+            "failures": [], **extra}
+
+
+def _part_path(dst: Path) -> Path:
+    """同目录临时名：与目标同盘才能保证 os.replace 原子。"""
+    return dst.with_name(dst.name + ".part")
+
+
+def _atomic_write_bytes(dst: Path, data: bytes) -> None:
+    """先写 <dst>.part 再 os.replace——中断只留 .part，清理后不留半成品。"""
+    part = _part_path(dst)
+    try:
+        with open(part, "wb") as f:
+            f.write(data)
+        os.replace(part, dst)
+    except BaseException:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_copyfile(src: Path, dst: Path) -> None:
+    """视频/文件附件的原子复制：.part 拷完再 replace。"""
+    part = _part_path(dst)
+    try:
+        shutil.copyfile(src, part)
+        os.replace(part, dst)
+    except BaseException:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def backup_images(wxid_full: str, out_dir: Path, log=print,
@@ -90,29 +150,44 @@ def backup_images(wxid_full: str, out_dir: Path, log=print,
         if ctype == "image/wxgf":
             dst = out_dir / rel.with_suffix(".wxgf")
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(body)
+            _atomic_write_bytes(dst, body)
             wxgf_pending.append((dst, dst.with_suffix(".heic")))
         else:
             ext = (ctype.split("/")[-1] if ctype else "bin") or "bin"
             dst = out_dir / rel.with_suffix(f".{ext}")
             dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(body)
+            _atomic_write_bytes(dst, body)
             stats["ok_viewable"] += 1
         stats["bytes_written"] += len(body)
         if log and (i + 1) % 2000 == 0:
             log(f"[media_backup] 图片 {i + 1}/{len(files)}")
 
     if wxgf_pending:
-        _convert_pending_wxgf(wxgf_pending, stats, log)
+        if stats.get("cancelled"):
+            # P2-10：已取消就不再启动转码批处理（其 LLDB/DLL 开销可能几十秒），
+            # 原始 .wxgf 字节已写盘，按"留档"计数。
+            stats["ok_wxgf_preserved"] += len(wxgf_pending)
+            if log:
+                log(f"[media_backup] 已取消，跳过 wxgf 批量转码"
+                    f"（{len(wxgf_pending)} 张原始字节已保留）")
+        else:
+            _convert_pending_wxgf(wxgf_pending, stats, log,
+                                  should_cancel=should_cancel)
     return stats
 
 
-def _convert_pending_wxgf(pending: list, stats: dict, log) -> None:
+def _convert_pending_wxgf(pending: list, stats: dict, log,
+                          should_cancel=None) -> None:
     """对第一遍收集到的 wxgf 文件批量转码，更新 stats；跨平台分流。
 
     log=None 等价于"不要日志"（与本模块其余函数的既有约定一致），这里统一
     归一化成空操作，避免再到处写 `if log and ...` 判断，也避免把裸 None
     传给 media_wxgf_macos.convert_wxgf_batch() 导致它内部调用时炸掉。
+
+    should_cancel（P2-10）：Windows 逐张检查；macOS 由 convert_wxgf_batch
+    在批次之间检查并提前返回部分结果。取消时剩余 pending 计入
+    ok_wxgf_preserved（原始 .wxgf 已安全保留，不算失败），
+    stats["cancelled"]=True 后停止。
     """
     if log is None:
         log = lambda *_a, **_k: None
@@ -124,7 +199,11 @@ def _convert_pending_wxgf(pending: list, stats: dict, log) -> None:
         # .wxgf 字节已在第一遍原样保留，该批全部计入 ok_wxgf_preserved。
         try:
             from siwx import media_wxgf_macos
-            results = media_wxgf_macos.convert_wxgf_batch(pending, log=log)
+            bkw = {"log": log}
+            if should_cancel is not None:
+                # 仅在显式取消探针存在时透传（旧 fake/旧版本无该形参）
+                bkw["should_cancel"] = should_cancel
+            results = media_wxgf_macos.convert_wxgf_batch(pending, **bkw)
         except Exception as e:
             log(f"[media_backup] macOS wxgf 批量转码异常（原始 wxgf 已保留）: "
                 f"{type(e).__name__}: {e}")
@@ -141,11 +220,24 @@ def _convert_pending_wxgf(pending: list, stats: dict, log) -> None:
                     pass
             else:
                 stats["ok_wxgf_preserved"] += 1
+        # 取消时 convert_wxgf_batch 只返回部分结果，剩余已按"保留"计数
+        if should_cancel is not None and len(results) < len(pending):
+            try:
+                if should_cancel():
+                    stats["cancelled"] = True
+            except Exception:
+                pass
         return
     # Windows：convert_wxgf() 内部缓存了 VoipEngine.dll 句柄，逐张调用开销
     # 不像 macOS 的 LLDB attach 那么大，不需要额外批处理。
     converted = 0
-    for wxgf_path, heic_path in pending:
+    for idx, (wxgf_path, heic_path) in enumerate(pending):
+        if should_cancel is not None and should_cancel():
+            stats["cancelled"] = True
+            stats["ok_wxgf_preserved"] += len(pending) - idx
+            log(f"[media_backup] wxgf 转码已取消（已转 {converted}/{len(pending)}，"
+                f"剩余 {len(pending) - idx} 张原始字节已保留）")
+            return
         try:
             data = wxgf_path.read_bytes()
             out = media.convert_wxgf(data)
@@ -155,7 +247,7 @@ def _convert_pending_wxgf(pending: list, stats: dict, log) -> None:
         if out:
             ext, ctype = media._image_sig(out) or ("gif", "image/gif")
             final_path = wxgf_path.with_suffix(f".{ext}")
-            final_path.write_bytes(out)
+            _atomic_write_bytes(final_path, out)
             stats["ok_viewable"] += 1
             stats["bytes_written"] += len(out)
             try:
@@ -206,7 +298,7 @@ def backup_videos(wxid_full: str, out_dir: Path, log=print,
                 stats["skipped"] += 1
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(f, dst)
+            _atomic_copyfile(f, dst)
             stats["ok"] += 1
             stats["bytes_written"] += src_size
         except Exception as e:
@@ -254,7 +346,7 @@ def backup_files(wxid_full: str, out_dir: Path, log=print,
                 stats["skipped"] += 1
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(f, dst)
+            _atomic_copyfile(f, dst)
             stats["ok"] += 1
             stats["bytes_written"] += src_size
         except Exception as e:
@@ -271,7 +363,35 @@ def backup_all(wxid_full: str, out_dir: Path, log=print,
     """images/ + videos/ + files/ 一次性全量备份，返回合并统计。
 
     should_cancel：协作式取消探针，逐段/逐文件检查；取消返回已完成段，
-    各段统计带 cancelled=True。"""
+    各段统计带 cancelled=True。
+
+    P2-9：账号根目录与媒体目录缺失必须显式失败（ok=False + error），
+    不再静默返回 0/0 且报告成功。报告始终带 media_dirs 布尔表。
+    """
+    root = _account_root(wxid_full)
+    if root is None:
+        if log:
+            log("[media_backup] 未找到账号数据目录，无法备份")
+        return {"ok": False, "error": "未找到账号数据目录",
+                "media_dirs": {"attach": False, "video": False, "file": False},
+                "images": _empty_stats(ok_viewable=0, ok_wxgf_preserved=0),
+                "videos": _empty_stats(), "files": _empty_stats(),
+                "cancelled": False}
+    media_dirs = _media_dir_flags(root)
+    if not any(media_dirs.values()):
+        if log:
+            log("[media_backup] 未找到媒体目录"
+                "（msg/attach、msg/video、msg/file 均不存在）")
+        return {"ok": False,
+                "error": "未找到媒体目录（msg/attach、msg/video、msg/file 均不存在）",
+                "media_dirs": media_dirs,
+                "images": _empty_stats(ok_viewable=0, ok_wxgf_preserved=0),
+                "videos": _empty_stats(), "files": _empty_stats(),
+                "cancelled": False}
+    if not all(media_dirs.values()) and log:
+        missing = "、".join(f"msg/{k}" for k, v in media_dirs.items() if not v)
+        log(f"[media_backup] ⚠ 部分媒体目录缺失: {missing}（对应类别备份为空）")
+
     img_stats = backup_images(wxid_full, out_dir / "images", log=log,
                               should_cancel=should_cancel)
     if not img_stats.get("cancelled"):
@@ -286,7 +406,8 @@ def backup_all(wxid_full: str, out_dir: Path, log=print,
     else:
         file_stats = {"total": 0, "ok": 0, "skipped": 0, "failed": 0,
                       "bytes_written": 0, "failures": [], "cancelled": True}
-    return {"images": img_stats, "videos": vid_stats, "files": file_stats,
+    return {"ok": True, "media_dirs": media_dirs,
+            "images": img_stats, "videos": vid_stats, "files": file_stats,
             "cancelled": bool(img_stats.get("cancelled")
                               or vid_stats.get("cancelled")
                               or file_stats.get("cancelled"))}

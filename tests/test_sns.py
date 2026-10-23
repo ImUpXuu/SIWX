@@ -172,6 +172,14 @@ def _make_sns_db_raw(path: Path, posts):
     con.close()
 
 
+def _post_xml(i, text, user="wxid_a", ts=1700000000):
+    """一条纯文字动态的 XML（关键词搜索分页测试用）。"""
+    return (f"<SnsDataItem><TimelineObject><id>{i}</id><username>{user}</username>"
+            f"<createTime>{ts}</createTime><contentDesc>{text}</contentDesc>"
+            "<ContentObject><type>1</type><mediaList/></ContentObject>"
+            "</TimelineObject></SnsDataItem>")
+
+
 class TestSnsExport(unittest.TestCase):
     def setUp(self):
         import tempfile
@@ -229,6 +237,116 @@ class TestSnsExport(unittest.TestCase):
         self.assertTrue(r["empty"])
         self.assertEqual(r["count"], 0)
         self.assertIsNone(r["file"])
+
+
+# P2-5 回归夹具：带 token/thumb_token 的主图 + 实况照片（token 全是明显的假串）
+_MEDIA_TOKEN_XML = (
+    "<SnsDataItem><TimelineObject><id>1</id><username>wxid_a</username>"
+    "<createTime>1700000000</createTime><contentDesc>带图动态</contentDesc>"
+    "<ContentObject><type>2</type><mediaList><media>"
+    "<id>1</id><type>2</type>"
+    "<size width='100' height='80' totalSize='9'/>"
+    "<url token='tok_example_01' key='12345'>"
+    "http://shmmsns.qpic.cn/mmsns/a/150?token=old&amp;idx=0</url>"
+    "<thumb token='thumb_example_02'>http://shmmsns.qpic.cn/mmsns/a/150</thumb>"
+    "<LivePhoto><liveMedia><id>0</id><type>6</type>"
+    "<url token='live_example_03'>"
+    "http://snsvideo.c2c.wechat.com/102/20202/snsvideodownload?encfilekey=x</url>"
+    "<size width='288' height='288' totalSize='9884'/>"
+    "<videoDuration>2.378</videoDuration><liveStillImageTimeMs>734</liveStillImageTimeMs>"
+    "<enc key='424242'>1</enc></liveMedia></LivePhoto>"
+    "</media></mediaList></ContentObject></TimelineObject></SnsDataItem>"
+)
+
+
+class TestSnsExportMediaUrl(unittest.TestCase):
+    """P2-5：默认不导媒体时，链接必须带 token（裸 CDN URL 会 400），
+    JSON 保留 token/key 供事后补下载；有 localFile 时仍优先本地文件。"""
+
+    TID = 424242
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory(prefix="siwx_sns_media_",
+                                                ignore_cleanup_errors=True)
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _feed(self):
+        feed = sns.parse_timeline(_MEDIA_TOKEN_XML)
+        feed["tid"] = self.TID
+        return feed
+
+    def test_feed_to_dict_keeps_token_and_builds_download_url(self):
+        from siwx import sns_export as E
+        m = E._feed_to_dict(self._feed())["media"][0]
+        # 图片：150 档换成原图，旧 token 去掉，换成 XML 属性里的新 token
+        self.assertTrue(m["downloadUrl"].startswith("https://shmmsns.qpic.cn/"))
+        self.assertIn("/mmsns/a/0?", m["downloadUrl"])
+        self.assertIn("token=tok_example_01", m["downloadUrl"])
+        self.assertIn("idx=1", m["downloadUrl"])
+        self.assertNotIn("token=old", m["downloadUrl"])
+        # JSON 字段：token/key/thumb_token 保留，原 url/thumb 兼容
+        self.assertEqual(m["token"], "tok_example_01")
+        self.assertEqual(m["key"], "12345")
+        self.assertEqual(m["thumb_token"], "thumb_example_02")
+        self.assertEqual(m["url"], "http://shmmsns.qpic.cn/mmsns/a/150?token=old&idx=0")
+        self.assertIn("token=thumb_example_02", m["thumbDownloadUrl"])
+        self.assertTrue(m["thumbDownloadUrl"].startswith("https://"))
+        # 实况照片同样有带 token 的下载链接
+        live = m["livePhoto"]
+        self.assertIn("token=live_example_03", live["downloadUrl"])
+        self.assertTrue(live["downloadUrl"].startswith("https://"))
+        self.assertEqual(live["token"], "live_example_03")
+
+    def test_writers_prefer_download_url_without_media(self):
+        from siwx import sns_export as E
+        feed = self._feed()
+        md_path = self.tmp / "a.md"
+        E._write_markdown(md_path, [feed], {}, None)
+        md = md_path.read_text(encoding="utf-8")
+        self.assertIn("![image](https://shmmsns.qpic.cn/mmsns/a/0"
+                      "?token=tok_example_01&idx=1)", md)
+        self.assertIn("[实况照片](https://snsvideo.c2c.wechat.com/102/20202/"
+                      "snsvideodownload?encfilekey=x&token=live_example_03&idx=1)", md)
+        self.assertNotIn("token=old", md)
+
+        txt_path = self.tmp / "a.txt"
+        E._write_txt(txt_path, [feed], {}, None)
+        txt = txt_path.read_text(encoding="utf-8")
+        self.assertIn("<image> https://shmmsns.qpic.cn/mmsns/a/0"
+                      "?token=tok_example_01&idx=1", txt)
+        self.assertIn("<livephoto> https://snsvideo.c2c.wechat.com/", txt)
+
+        html_path = self.tmp / "a.html"
+        E._write_html(html_path, [feed], {}, None)
+        html = html_path.read_text(encoding="utf-8")
+        self.assertIn("token=tok_example_01", html)
+        self.assertIn("token=live_example_03", html)
+        # 无本地文件时标注「远程链接可能过期」
+        self.assertIn("远程 CDN 链接，可能过期", html)
+        self.assertNotIn("token=old", html)
+
+    def test_local_file_still_wins(self):
+        from siwx import sns_export as E
+        feed = self._feed()
+        media_map = {(self.TID, 0, ""): "media/p_0.jpg",
+                     (self.TID, 0, "_live"): "media/p_0_live.mp4"}
+        md_path = self.tmp / "b.md"
+        E._write_markdown(md_path, [feed], media_map, None)
+        md = md_path.read_text(encoding="utf-8")
+        self.assertIn("![image](media/p_0.jpg)", md)
+        self.assertIn("[实况照片](media/p_0_live.mp4)", md)
+        self.assertNotIn("token=tok_example_01", md)
+
+        html_path = self.tmp / "b.html"
+        E._write_html(html_path, [feed], media_map, None)
+        html = html_path.read_text(encoding="utf-8")
+        self.assertIn('src="media/p_0.jpg"', html)
+        self.assertIn('src="media/p_0_live.mp4"', html)
+        self.assertNotIn("远程 CDN 链接，可能过期", html)
 
 
 _EMOJI_XML = (
@@ -627,13 +745,14 @@ class TestSnsCardExport(unittest.TestCase):
         self.assertIn("[一篇好文](https://mp.weixin.qq.com/s/x)", md)
         self.assertIn("📹 视频号 @占位主播乙", md)
         self.assertIn("📍 外滩", md)
-        self.assertIn("![评论图](http://h/mmcomment/a/0)", md)
+        # 评论图有 token 时顺带拼成可下载链接（缺 token 的裸 URL 会 400）
+        self.assertIn("![评论图](https://h/mmcomment/a/0?token=t&idx=1)", md)
 
         txt = Path(E.run_sns_export(self.db, fx.DEMO_SELF, fmt="txt",
                                     export_root=self.tmp / "out")["file"]).read_text(encoding="utf-8")
         self.assertIn("🔗 一篇好文", txt)
         self.assertIn("📍 外滩 中山东一路", txt)
-        self.assertIn("<评论图> http://h/mmcomment/a/0", txt)
+        self.assertIn("<评论图> https://h/mmcomment/a/0?token=t&idx=1", txt)
 
         html = Path(E.run_sns_export(self.db, fx.DEMO_SELF, fmt="html",
                                      export_root=self.tmp / "out")["file"]).read_text(encoding="utf-8")
@@ -726,6 +845,83 @@ class TestSnsApi(IsolatedRootCase):
 
         d3 = c.get(f"/api/sns/timeline?account={self.acc}&username=wxid_b").get_json()
         self.assertEqual(len(d3["timeline"]), 1)
+
+    def test_keyword_scan_truncated_gives_older_cursor(self):
+        """P2-6：关键词超出扫描窗口时，要返回 truncated + 可续扫的游标，
+        且按 before_tid 能翻到更早的命中（旧实现更早命中永远看不到）。"""
+        from unittest import mock
+        from siwx import api_sns
+        acc = "wxid_kw_window"
+        db = self.tmp / "output" / acc / "sns" / "sns.db"
+        base = (1700000000 * 1000) << 23
+        posts = []
+        for i in range(12):
+            text = "占位正文" + (" 关键词命中" if i == 0 else "")
+            posts.append((_to_signed64(base + i), "wxid_a", _post_xml(i, text)))
+        _make_sns_db_raw(db, posts)
+        c = self._client()
+
+        with mock.patch.object(api_sns, "KEYWORD_MAX_SCAN", 5):
+            first = c.get(f"/api/sns/timeline?account={acc}"
+                          "&keyword=关键词命中&limit=20").get_json()
+            # 最新 5 条无命中：不能静默返回空，要标记截断并给出向更早的游标
+            self.assertEqual(first["timeline"], [])
+            self.assertTrue(first["has_more"])
+            self.assertTrue(first["truncated"])
+            self.assertIsNotNone(first["next_before_tid"])
+
+            seen, cursor, pages = [], first["next_before_tid"], 0
+            while cursor and pages < 10:
+                page = c.get(f"/api/sns/timeline?account={acc}&keyword=关键词命中"
+                             f"&limit=20&before_tid={cursor}").get_json()
+                pages += 1
+                seen += page["timeline"]
+                if not page["has_more"]:
+                    break
+                cursor = page["next_before_tid"]
+        # 12 条按每轮 5 条扫：11..7 / 6..2 / 1..0，两跳后取到最早的唯一命中
+        self.assertEqual(pages, 2)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("关键词命中", seen[0]["content_desc"])
+
+    def test_keyword_limit_hit_keeps_existing_cursor(self):
+        """命中达到 limit 时仍以最后一条命中为游标（与旧语义一致，不标截断）。"""
+        from unittest import mock
+        from siwx import api_sns
+        acc = "wxid_kw_limit"
+        db = self.tmp / "output" / acc / "sns" / "sns.db"
+        base = (1700000000 * 1000) << 23
+        posts = [(_to_signed64(base + i), "wxid_a",
+                  _post_xml(i, "关键词命中" if i >= 3 else "占位正文"))
+                 for i in range(6)]
+        _make_sns_db_raw(db, posts)
+        c = self._client()
+
+        with mock.patch.object(api_sns, "KEYWORD_MAX_SCAN", 2):
+            d = c.get(f"/api/sns/timeline?account={acc}"
+                      "&keyword=关键词命中&limit=2").get_json()
+        self.assertEqual(len(d["timeline"]), 2)
+        self.assertTrue(d["has_more"])
+        self.assertNotIn("truncated", d)
+        self.assertEqual(d["next_before_tid"], d["timeline"][-1]["tid"])
+
+    def test_timeline_paging_without_keyword_unchanged(self):
+        """无关键词：LIMIT 直取，has_more / 游标语义与旧行为一致，无 truncated。"""
+        acc = "wxid_page_plain"
+        db = self.tmp / "output" / acc / "sns" / "sns.db"
+        base = (1700000000 * 1000) << 23
+        _make_sns_db_raw(db, [(_to_signed64(base + i), "wxid_a",
+                               _post_xml(i, f"第{i}条")) for i in range(6)])
+        c = self._client()
+        d1 = c.get(f"/api/sns/timeline?account={acc}&limit=4").get_json()
+        self.assertEqual(len(d1["timeline"]), 4)
+        self.assertTrue(d1["has_more"])
+        self.assertNotIn("truncated", d1)
+        d2 = c.get(f"/api/sns/timeline?account={acc}&limit=4"
+                   f"&before_tid={d1['next_before_tid']}").get_json()
+        self.assertEqual(len(d2["timeline"]), 2)
+        self.assertFalse(d2["has_more"])
+        self.assertEqual(d2["next_before_tid"], d2["timeline"][-1]["tid"])
 
     def test_detail_and_errors(self):
         c = self._client()

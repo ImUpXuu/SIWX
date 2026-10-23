@@ -72,23 +72,46 @@ def _worker(task):
         return (rel, 0, "failed", f"{type(e).__name__}: {e}")
 
 
-def decrypt_parallel(tasks, workers=None, on_done=None):
-    """tasks: [(rel, src, dst, key_hex)]；返回 [(rel, pages, status, err)]。"""
+CANCEL_STATUS = "cancelled"
+CANCEL_ERR = "用户取消"
+
+
+def _cancelled_result(rel):
+    """取消后未执行/未收集的任务占位结果（不计失败）。"""
+    return (rel, 0, CANCEL_STATUS, CANCEL_ERR)
+
+
+def decrypt_parallel(tasks, workers=None, on_done=None, should_cancel=None):
+    """tasks: [(rel, src, dst, key_hex)]；返回 [(rel, pages, status, err)]。
+
+    should_cancel：协作式取消探针（None=不可取消，行为与旧版完全一致）。
+    串行路径逐任务检查；并行路径每收到一个结果检查一次。取消后停止派发/
+    收集，未执行（串行）或未收集（并行）的任务补 `cancelled` 占位结果，
+    保证返回条数恒等于任务数——调用方不会把剩余任务误当失败。
+    """
     if not tasks:
         return []
     n = workers or min(8, (os.cpu_count() or 4))
     t0 = time.time()
     _slog.detailed("pool", f"解密启动 workers={n} tasks={len(tasks)}")
 
+    def _cancel_requested() -> bool:
+        return should_cancel is not None and bool(should_cancel())
+
     def _run_serial() -> list:
-        results = []
-        for t in tasks:
+        out = []
+        for i, t in enumerate(tasks):
+            if _cancel_requested():
+                _slog.detailed("pool",
+                               f"串行解密收到取消请求，已停止（完成 {i}/{len(tasks)}）")
+                break
             r = _worker(t)
-            results.append(r)
+            out.append(r)
             if on_done:
                 on_done(r)
-        return results
+        return out
 
+    results = []
     if n <= 1 or len(tasks) <= 1:
         results = _run_serial()
     else:
@@ -100,15 +123,34 @@ def decrypt_parallel(tasks, workers=None, on_done=None):
             _slog.warn("pool", f"进程池创建失败({type(e).__name__}: {e})，回退串行解密")
             results = _run_serial()
         else:
+            # `with pool` 退出时调用 terminate()：收到取消就 break，
+            # 已派发但未完成的任务随之终止（其半成品由 decrypt_database 自己负责）。
             with pool:
-                results = []
                 for r in pool.imap_unordered(_worker, tasks):
                     results.append(r)
                     if on_done:
                         on_done(r)
+                    if _cancel_requested():
+                        _slog.detailed(
+                            "pool",
+                            f"并行解密收到取消请求，终止进程池"
+                            f"（已收集 {len(results)}/{len(tasks)}）")
+                        break
 
-    failed = sum(1 for r in results if r[2] != "ok")
+    cancelled = 0
+    if should_cancel is not None and len(results) < len(tasks):
+        from collections import Counter
+        seen = Counter(r[0] for r in results)
+        for t in tasks:
+            rel = t[0]
+            if seen[rel] > 0:
+                seen[rel] -= 1
+                continue
+            results.append(_cancelled_result(rel))
+            cancelled += 1
+    failed = sum(1 for r in results if r[2] not in ("ok", CANCEL_STATUS))
     _slog.detailed("pool",
-                   f"解密完成 tasks={len(results)} 失败={failed} "
-                   f"耗时={time.time() - t0:.1f}s")
+                   f"解密完成 tasks={len(results)} 失败={failed}"
+                   + (f" 取消={cancelled}" if cancelled else "")
+                   + f" 耗时={time.time() - t0:.1f}s")
     return results

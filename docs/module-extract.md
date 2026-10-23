@@ -142,7 +142,7 @@ ctx = {
 
 ---
 
-### `decrypt_dir(db_dir, out_dir, log, entries, workers, use_cache) → dict`
+### `decrypt_dir(db_dir, out_dir, log, entries, workers, use_cache, should_cancel) → dict`
 
 **并行解密 + 产物缓存**。
 
@@ -150,9 +150,10 @@ ctx = {
 流程:
 1. 加载密钥库
 2. 为每个 DbEntry 解析对应 key（先查 salt，再遍历 unique_keys）
-3. 缓存判定 (manifest: mtime/size/key) → 命中则跳过
-4. decrypt_parallel() → 多进程解密
-5. 保存 manifest
+3. 解密前记录 (size, mtime_ns) → 缓存判定（ns 优先，旧条目回退秒级）→ 命中则跳过
+4. decrypt_parallel(..., should_cancel=...) → 多进程解密
+5. 成功库重新 stat：size/mtime_ns 变化则不写 manifest（下次强制重解）
+6. 保存 manifest
 ```
 
 **返回报告格式**:
@@ -164,16 +165,36 @@ ctx = {
     "failed": int,
     "skipped": int,
     "cached": int,
+    "cancelled": int,         # 取消后未执行/未收集的库数（不计失败）
+    "is_cancelled": bool,     # 本次是否收到过取消请求
+    "conflicts": int,
     "duration_ms": int,
     "files": [{               # 每个文件的状态
         "rel": str,
         "size_mb": float,
         "pages": int,
-        "status": str,        # "ok" / "failed" / "skipped" / "cached" / "conflict"
+        "status": str,        # "ok" / "failed" / "skipped" / "cached" /
+                              # "conflict" / "cancelled"
         "key_masked": str,
     }]
 }
 ```
+
+---
+
+### 取消粒度
+
+取消是**协作式**的，粒度从粗到细：
+
+| 层级 | 检查点 | 取消后 |
+|---|---|---|
+| 账号 | server 任务线程在账号之间（`_cancel_event`） | 剩余账号跳过 |
+| 阶段/单库批次 | `decrypt_parallel`：串行逐库、并行每个结果 | 剩余库记 `cancelled`（=`files[].status`），不写 manifest、不计 failed |
+| 单文件（媒体） | `media_backup` 逐文件；macOS wxgf 每批一次 LLDB | 已完成产物保留，剩余 wxgf 原始字节保留并计入 `ok_wxgf_preserved` |
+
+- `decrypt_dir` 只在 `should_cancel is not None` 时把参数透传给 `decrypt_parallel`（保持旧调用/旧 monkeypatch 的三参数形式可用）；
+- 取消是"尽快停"而非"立即停"：正在进行中的单个库/单批 LLDB 无法中断，会在下一个检查点停止；
+- `cancelled` 与 `failed` 分开统计，`report["is_cancelled"]` 供上层展示"已取消（部分完成）"而非失败。
 
 ---
 
@@ -243,13 +264,15 @@ _keystore_preset():
 ### 解密产物缓存判定
 
 ```python
-# 在 decrypt_dir() 中
+# 在 decrypt_dir() 中：解密前先 stat 一次，记录 (size, mtime_ns)
 m = manifest.get(e.rel)
-if (m and m["size"] == e.size
-    and m["mtime"] == mtime
-    and m["key"] == key_hex
-    and dst.is_file()):
+if use_cache and m and m["size"] == e.size and dst.is_file():
+    fresh = (int(m["mtime_ns"]) == mtime_ns) if m.get("mtime_ns") is not None \
+        else (m["mtime"] == mtime)   # 旧条目回退秒级，不清空旧缓存
     → cached += 1  # 跳过解密
+
+# 解密成功后再 stat：size 或 mtime_ns 变了（源库在解密窗口内被写）
+# → manifest.pop(rel)，下次强制重解，避免错误命中旧产物丢新增消息
 ```
 
 ---

@@ -193,18 +193,25 @@ def timeline():
         # 有关键词：关键字可能只出现在卡片字段/媒体描述里（contentDesc 常为空），
         # SQL 无法过滤，只能逐条解析；命中 limit 条即停，另设扫描上限兜底
         # （实测 0.19ms/条，5000 条约 1s，全库 5684 条）。
+        # 多取 1 条仅用于判断「上限之外还有没有更早的数据」，避免恰好扫满上限
+        # 时把「确实扫到底了」误报成截断。
         if keyword:
             sql += " LIMIT ?"
-            args.append(KEYWORD_MAX_SCAN)
+            args.append(KEYWORD_MAX_SCAN + 1)
         else:
             sql += " LIMIT ?"
             args.append(limit)
         scanned = 0
         parsed_fail = 0
+        last_scanned_tid = None
+        scan_capped = False
         for tid, who, content in con.execute(sql, args):
-            scanned += 1
-            if keyword and scanned > KEYWORD_MAX_SCAN:
+            if keyword and scanned >= KEYWORD_MAX_SCAN:
+                # 多取的那一条：本轮不解析，只标记「还有更早的数据没扫」
+                scan_capped = True
                 break
+            scanned += 1
+            last_scanned_tid = tid
             ts_sec = sns.sns_id_to_seconds(tid)
             # 时间范围兜底（正常已下推到 SQL；仅正负分界那种异常区间才生效）
             if start_ts is not None and ts_sec < start_ts:
@@ -227,12 +234,30 @@ def timeline():
                 break
     finally:
         con.close()
-    # 循环外记三计数（scanned/parsed/skipped），失败明细不逐条打防刷屏
+    # 游标语义：
+    # * 命中达到 limit：next_before_tid 取最后一条**命中**（与旧行为一致）；
+    # * 关键词命中不足但已扫满上限：has_more=true、truncated=true，
+    #   next_before_tid 取最后一条**实际扫描**的 tid —— 旧实现取最后命中
+    #   （无命中时为 None），更早的命中永远翻不到；
+    # * 扫到底：next_before_tid 取最后命中（可能为 None），has_more=false。
+    if keyword and len(rows) < limit and scan_capped:
+        next_tid = str(last_scanned_tid) if last_scanned_tid is not None else None
+        has_more = True
+        truncated = True
+    else:
+        next_tid = str(rows[-1]["tid"]) if rows else None
+        has_more = len(rows) >= limit
+        truncated = False
+    # 循环外记计数（scanned/parsed/skipped/truncated），失败明细不逐条打防刷屏
     log.detailed("sns", f"[timeline] account={account} scanned={scanned} "
-                        f"parsed={len(rows)} 解析失败={parsed_fail}")
-    next_tid = str(rows[-1]["tid"]) if rows else None
-    return jsonify({"timeline": [_feed_json(x) for x in rows], "next_before_tid": next_tid,
-                    "has_more": len(rows) >= limit})
+                        f"parsed={len(rows)} 解析失败={parsed_fail} "
+                        f"truncated={truncated}")
+    payload = {"timeline": [_feed_json(x) for x in rows],
+               "next_before_tid": next_tid, "has_more": has_more}
+    if truncated:
+        # 只在真的截断时出现，无关键词/未截断的响应形状保持不变
+        payload["truncated"] = True
+    return jsonify(payload)
 
 
 @bp.get("/detail")

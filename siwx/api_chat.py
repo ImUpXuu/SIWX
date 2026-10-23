@@ -97,6 +97,8 @@ def shard_index(msg_dir: Path) -> dict:
             return hit[1]
 
     index: dict = {}
+    failed = 0
+    first_error = None
     for db in sorted(msg_dir.glob("*.db")):
         try:
             conn = sqlite3.connect(db)
@@ -107,11 +109,24 @@ def shard_index(msg_dir: Path) -> dict:
                 conn.close()
         except sqlite3.Error as e:
             # 分片打不开即被剔除索引 → 该库里的会话在聊天页/MCP 里"消失"
+            failed += 1
+            first_error = first_error or e
             _logger.detailed("api", f"[shard] 分片读取失败 db={db.name}: {e}")
             continue
         for t in names:
             if t.startswith("Msg_"):
                 index.setdefault(t, []).append(db)
+
+    if failed:
+        # 不完整的索引绝不入缓存：否则在目录签名变化前，失败分片里的会话会
+        # 一直"消失"（进程重启才能恢复）。瞬时失败（文件锁/杀软占用）应由
+        # 下一次请求自愈，所以顺带清掉该 key 的旧条目，强制重建。
+        _logger.warn("api", f"[shard] 分片读取失败 failed={failed} "
+                            f"err={type(first_error).__name__}，本次索引不入缓存，"
+                            f"下次请求重建 dir={msg_dir.name}")
+        with _SHARD_LOCK:
+            _SHARD_INDEX.pop(key, None)
+        return index
 
     with _SHARD_LOCK:
         _SHARD_INDEX[key] = (stamp, index)
@@ -1396,7 +1411,9 @@ def _decoded_rows(db: Path, table: str) -> list:
     message_content 可能是 zstd 压缩 BLOB，SQL LIKE 对压缩行完全失明，
     关键词匹配必须在 Python 层解码后做；把逐行解码的成本摊到第一次
     查询，之后同分片的搜索/翻页是纯内存扫描。有界 LRU 防大库吃穿内存。
-    行形状: (ts, local_id, server_id, t, origin, rsid, text, packed, smap)。
+    行形状: (ts, local_id, server_id, local_type, origin, rsid, text, packed, smap)。
+    local_type 保留原始完整值（复合 49 的高 16 位 subtype 不能丢），
+    类型判定时再由 _enrich_chat_row / 筛选路径取低 16 位基本类型。
     """
     try:
         st = db.stat()
@@ -1417,7 +1434,7 @@ def _decoded_rows(db: Path, table: str) -> list:
                 f"origin_source, real_sender_id, message_content, "
                 f"packed_info_data FROM [{table}]"):
             ts = r[3] or 0
-            rows.append((ts, r[0] or 0, r[1], r[2] & 0xFFFF, r[4], r[5],
+            rows.append((ts, r[0] or 0, r[1], r[2], r[4], r[5],
                          _decode_content(r[6]), r[7], smap))
         rows.sort(key=lambda x: (x[0], x[1]))
     except sqlite3.Error:
@@ -1438,8 +1455,13 @@ def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
     """单条消息行 → 前端气泡形状。/messages 的富化逻辑，普通分页与筛选
     搜索两条路径共用；text 必须已经过 _decode_content。
 
+    t 为原始 local_type（复合 49 保留高 16 位 subtype）。类型判定/富化按
+    低 16 位基本类型进行；_fmt 收完整值才能输出 [转账]/[红包]/[拍一拍] 等
+    细分文案，否则复合 49 会统一退化成 [链接]。
+
     resolve_many: 合并转发子项的原始消息解析器（issue #31），见
     make_record_resolver。"""
+    base_t = (t or 0) & 0xFFFF
     sender_wxid = ""
     m = SENDER_PREFIX_RE.match(text[:100]) if text else None
     if m and (m.group(1).startswith("wxid_") or m.group(1).startswith("gh_")
@@ -1466,20 +1488,20 @@ def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
     if is_group and not is_me and sender_wxid == chat:
         sender_wxid = ""
 
-    md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
+    md5, bubble_md5, voice_meta, sticker = enrich_message_row(base_t, text, packed)
     quote, link, record, channels = parse_quote_or_link(
-        t, text, local_id=local_id, ts=ts, resolve_many=resolve_many)
-    kind = message_kind(t, quote, link, channels, record)
+        base_t, text, local_id=local_id, ts=ts, resolve_many=resolve_many)
+    kind = message_kind(base_t, quote, link, channels, record)
     return {
         "id": local_id, "platformMessageId": str(server_id or ""),
-        "ts": ts or 0, "type": t, "kind": kind,
+        "ts": ts or 0, "type": base_t, "kind": kind,
         "sender_wxid": sender_wxid,
         "sender_name": names.get(sender_wxid, sender_wxid) if sender_wxid
         else (names.get(chat, chat) if not is_group else ""),
         "is_me": bool(is_me), "md5": md5, "bubble_md5": bubble_md5,
         "voice": voice_meta, "sticker": sticker, "channels": channels,
         "quote": quote, "link": link, "record": record,
-        "text": _fmt(t, text) if t != 1 else text,
+        "text": _fmt(t, text) if base_t != 1 else text,
     }
 
 
@@ -1500,11 +1522,14 @@ def _filtered_messages_response(acc, account, chat, table, names, my_base,
     for db in shards_for(acc, chat):
         for (ts, local_id, server_id, t, origin, rsid, text, packed, smap) \
                 in _decoded_rows(db, table):
+            # t 是完整 local_type：复合 49 的高 16 位 subtype 必须保留给
+            # _enrich_chat_row → _fmt；筛选比较只取低 16 位基本类型。
+            base_t = (t or 0) & 0xFFFF
             if kind == "record":
                 # 合并转发与普通 49 卡片同 type，必须解析内容才能区分（issue #31）
-                if t != 49 or not _is_recordinfo(text):
+                if base_t != 49 or not _is_recordinfo(text):
                     continue
-            elif type_set and t not in type_set:
+            elif type_set and base_t not in type_set:
                 continue
             if start_ts and ts < start_ts:
                 continue
@@ -1691,7 +1716,7 @@ def messages():
     resolve_many = make_record_resolver(acc, chat)
     for (local_id, server_id, ltype, ts, origin, rsid, content, packed), smap in page:
         msgs.append(_enrich_chat_row(
-            local_id, server_id, ltype & 0xFFFF, ts, origin, rsid,
+            local_id, server_id, ltype, ts, origin, rsid,
             _decode_content(content), packed, smap,
             names, my_base, self_ids, is_group, chat, resolve_many=resolve_many))
 

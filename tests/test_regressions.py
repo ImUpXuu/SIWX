@@ -424,11 +424,16 @@ class TestExport(TempRootCase):
         self.assertEqual([f.suffix for f in files], [".json", ".html"])
         for f in files:
             self.assertTrue(f.is_file(), f"缺产物: {f}")
-        # written_count = 两种格式之和；message_count 仍是会话真实条数
-        self.assertEqual(res["message_count"], 24)
+        # P2-1：message_count 是单遍逻辑条数（12），不是两种格式之和；
+        # 实际写入总量另由 written_total 给出（24）
+        self.assertEqual(res["message_count"], 12)
+        self.assertEqual(res["written_total"], 24)
         manifest = json.loads(
             (Path(res["export_dir"]) / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(len(manifest["files"]), 2)
+        self.assertEqual(manifest["collected_count"], 12)
+        self.assertEqual(manifest["written_count"], 12)
+        self.assertEqual(manifest["written_total"], 24)
         # 解析统计按消息数计（12 条），不随格式数翻倍
         self.assertEqual(sum(manifest["parse"]["type_counts"].values()), 12)
 
@@ -443,6 +448,9 @@ class TestExport(TempRootCase):
         sess = res["sessions"][0]
         self.assertEqual(len(sess["files"]), 2)
         self.assertTrue(all(Path(f).is_file() for f in sess["files"]))
+        # P2-1：多格式聚合也按单遍条数计，不随格式数翻倍
+        self.assertEqual(sess["message_count"], 12)
+        self.assertEqual(res["message_count"], 12)
 
     def test_multi_report_includes_size_duration_and_zip_size(self):
         """报告逐会话带产物大小与耗时；整体 zip 带大小（前端结果面板展示用）。"""
@@ -456,6 +464,90 @@ class TestExport(TempRootCase):
         self.assertGreaterEqual(sess["duration_ms"], 0)
         self.assertTrue(res["zip"])
         self.assertGreater(res["zip_size"], 0)
+
+
+class TestExportWantMessagesOff(TempRootCase):
+    """P2-3 回归：want_messages=False（UI 取消"消息记录"）时不能只透传——
+    8 种格式都不得写出消息正文，但仍要生成可用的产物（文件头/表结构/
+    成员表）与会话元数据，计数口径与 P2-1 的单遍条数一致（0）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.acc, self.account, self.chat = make_account(self.tmp, n_texts=6)
+        self.display = "测试会话名ABC"
+
+    def _export(self, fmt):
+        return exporter.run_export(
+            self.acc, self.account, self.chat, self.display, fmt,
+            want_messages=False, want_media=False, want_avatars=False,
+            export_root=self.tmp / "exports", pack="none",
+            progress=lambda p, m: None)
+
+    def test_json_messages_empty_and_counts_zero(self):
+        res = self._export("json")
+        self.assertEqual(res["message_count"], 0)
+        self.assertEqual(res["written_total"], 0)
+        d = json.loads(Path(res["file"]).read_text(encoding="utf-8"))
+        self.assertEqual(d["messages"], [])
+        self.assertEqual(d["session"]["messageCount"], 0)
+        manifest = json.loads(
+            (Path(res["export_dir"]) / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["written_count"], 0)
+        self.assertEqual(manifest["written_total"], 0)
+        self.assertEqual(manifest["collected_count"], 6)
+
+    def test_html_keeps_frame_but_no_message_body(self):
+        """非流式格式（HTML）仍写头/尾/成员表，只是没有消息。"""
+        res = self._export("html")
+        html = Path(res["file"]).read_text(encoding="utf-8")
+        blob = html.split("window.CHAT_DATA = ", 1)[1].split(";</script>", 1)[0]
+        data = json.loads(blob)
+        self.assertEqual(data["messages"], [])
+        self.assertEqual(data["meta"]["messageCount"], 0)
+        self.assertTrue(data["members"], "成员表应仍由第一遍 senders 生成")
+        self.assertIn("const MSG_COUNT = 0;", html)
+        self.assertNotIn("第 0 条消息", html)
+
+    def test_toml_parseable_without_messages(self):
+        if tomllib is None:
+            self.skipTest("tomllib 需要 Python 3.11+")
+        res = self._export("toml")
+        text = Path(res["file"]).read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        self.assertEqual(data["session"]["messageCount"], 0)
+        self.assertNotIn("messages", data)
+        self.assertNotIn("第 0 条消息", text)
+
+    def test_all_formats_write_file_with_zero_count(self):
+        for fmt in ("json", "html", "txt", "csv", "markdown", "toml",
+                    "sqlite", "xlsx"):
+            with self.subTest(fmt=fmt):
+                res = self._export(fmt)
+                self.assertEqual(res["message_count"], 0)
+                self.assertTrue(Path(res["file"]).is_file(), f"缺产物: {fmt}")
+
+    def test_sqlite_keeps_schema_without_rows(self):
+        res = self._export("sqlite")
+        conn = sqlite3.connect(res["file"])
+        try:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0], 0)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM session").fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_xlsx_keeps_header_only(self):
+        from openpyxl import load_workbook
+        res = self._export("xlsx")
+        wb = load_workbook(res["file"], read_only=True)
+        try:
+            rows = list(wb.active.iter_rows(values_only=True))
+        finally:
+            wb.close()
+        # write_only 产物没有 dimension，max_row 为 None，按实际行数断言
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][:3], ("localId", "时间", "类型"))
 
 
 # ── 4.1 /api/job 结构化进度 ─────────────────────────────────────
@@ -4443,7 +4535,8 @@ class TestMediaBackupApi(TempRootCase):
         from siwx import server
         from unittest import mock as _mock
         client = app = server.app.test_client()
-        # 用空目录当账号根：backup_all 三类产物都为 0，任务应干净完成
+        # 账号目录里没有 cache/ 也没有 msg/*：P2-9 后必须显式失败，
+        # 不能再以 0/0 统计伪装成“备份完成”。
         with _mock.patch.object(server.validate, "account_dir",
                                 return_value=self.tmp / "out" / self.account):
             r = client.post("/api/media/backup/start", json={"account": self.account})
@@ -4454,7 +4547,8 @@ class TestMediaBackupApi(TempRootCase):
                     break
                 time.sleep(0.05)
         self.assertTrue(st["done"])
-        self.assertTrue(st["ok"], st.get("error"))
+        self.assertFalse(st["ok"], "缺账号数据目录时不得报告成功")
+        self.assertIn("未找到账号数据目录", st.get("error") or "")
         self.assertIn("images", st["report"])
         self.assertEqual(st["report"]["images"]["total"], 0)
 

@@ -534,7 +534,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "export",
         f"{logger.job_prefix()}开始导出 chat={chat} fmt={fmt} "
         f"range=[{start_ts},{end_ts}] "
-        f"media={want_media} voice={want_voice} avatars={want_avatars}")
+        f"messages={want_messages} media={want_media} voice={want_voice} "
+        f"avatars={want_avatars}")
 
     # 联系人缓存：全流程只加载一次，供两遍扫描共用（避免重复读 contact.db）
     names = _contact_names(acc_out_dir)
@@ -543,6 +544,9 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     progress(3, "扫描消息元数据…")
     count, first_ts, last_ts, senders, images, voices, stickers = _collect_metadata(
         acc_out_dir, chat, start_ts, end_ts, account, names)
+    # P2-1/P2-3：单遍逻辑条数——want_messages=False（仅元数据/媒体）时为 0。
+    # 多格式导出的 message_count/manifest written_count 都用它，不按格式数累加。
+    output_count = count if want_messages else 0
     progress(10, f"共 {count} 条消息，{len(images)} 张图片，{len(voices)} 条语音")
     logger.detailed(
         "export",
@@ -566,7 +570,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "platform": "wechat", "isGroup": chat.endswith("@chatroom"),
         "ownerId": account,
         "firstTimestamp": first_ts, "lastTimestamp": last_ts,
-        "messageCount": count,
+        # P2-3：仅元数据模式不产出消息，会话头计数与之保持一致
+        "messageCount": output_count,
     }
 
     # ── 头像 ──────────────────────────────────────────────
@@ -626,6 +631,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     # ── 第二遍：流式写出（fmt 可传列表，一次写出多种格式）──
     # 扫描/头像/媒体只做一次；每种格式各自重放 message_stream（DB 重查
     # 毫秒级）并各自计数，避免 manifest 的解析统计被乘以格式数。
+    # 计数口径（P2-1）：message_count = 单遍逻辑条数 output_count；
+    # written_total = 多格式实际写入总量（仅进度/对账/排查用）。
     fmts = [str(f).lower() for f in fmt] if isinstance(fmt, (list, tuple)) \
         else [str(fmt).lower()]
     fname = f"{safe}_{stamp}"
@@ -650,6 +657,11 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             stats_manifest = stats
 
         def export_stream_with_media(_stats=stats):
+            # P2-3：want_messages=False（仅元数据/媒体）时不产出任何消息记录，
+            # 生成器直接返回——JSON/TXT/CSV/Markdown/插件都拿到空序列，
+            # stats.observe 随之跳过（统计只在真正写消息时有意义）。
+            if not want_messages:
+                return
             for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
                 _attach_media(msg, media_map)
                 _stats.observe(msg)
@@ -657,8 +669,9 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
         # ── 传入缓存的 names，避免重复加载 ───────────────────
         if plugin_writer is not None:
+            stream = export_stream_with_media() if want_messages else iter(())
             written = _run_plugin_writer(plugin_writer, out_file, session,
-                                         export_stream_with_media(), media_map, progress,
+                                         stream, media_map, progress,
                                          acc_out_dir, chat, start_ts, end_ts, account, names)
         elif one_fmt == "json":
             written = stream_export_json(out_file, session, export_stream_with_media(), progress)
@@ -668,7 +681,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
                                             avatar_map, progress, display, stats,
                                             session=session, senders=senders,
                                             template=template,
-                                            media_enabled=want_media)
+                                            media_enabled=want_media,
+                                            want_messages=want_messages)
         elif one_fmt == "txt":
             written = stream_export_txt(out_file, session, export_stream_with_media(), progress)
         elif one_fmt == "csv":
@@ -679,7 +693,7 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             # 这些格式需要全量数据 → 降级为流式分批（每批 500 条）
             written = _write_batch(out_file, one_fmt, session,
                                    acc_out_dir, chat, start_ts, end_ts, account, names, media_map, progress,
-                                   stats=stats)
+                                   stats=stats, want_messages=want_messages)
         else:
             raise ValueError(f"未知格式: {one_fmt}")
         files.append(str(out_file))
@@ -687,12 +701,14 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         progress(87, f"写入完成（{one_fmt}）: {written} 条")
         logger.detailed("export",
                         f"{logger.job_prefix()}写出完成 fmt={one_fmt} "
-                        f"written={written} collected={count}")
-        if count and written != count:
+                        f"written={written} collected={count} "
+                        f"messages={want_messages}")
+        # 对账按单格式 written 比单遍采集数；want_messages=False 时 0 条是
+        # 预期行为，不误报为缺消息
+        if want_messages and count and written != count:
             logger.warn("export",
                         f"[export] 条数对账不一致 (fmt={one_fmt}): 采集 {count} 条 vs 实际写出 "
                         f"{written} 条（可能有分片读取失败、消息缺失，详见上方日志）")
-    written = written_total
 
     # ── 导出完整性清单（审计 G2）──────────────────────────
     # 各类型解析成功/兜底计数、媒体失败分布随导出落盘，用户能直接看到
@@ -701,7 +717,10 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "generator": GENERATOR, "export_version": EXPORT_VERSION,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "chat": chat, "display": display,
-        "collected_count": count, "written_count": written,
+        # P2-1：written_count 是单遍逻辑条数（多格式不翻倍）；
+        # written_total 是多格式实际写入总量（对账/排查用）
+        "collected_count": count, "written_count": output_count,
+        "written_total": written_total,
         "files": files,
         "parse": stats_manifest.to_dict(),
         "media": {
@@ -736,7 +755,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "file": files[0] if files else None,
         "files": list(files),
         "format": fmt, "pack": pack,
-        "message_count": written,
+        "message_count": output_count,
+        "written_total": written_total,
     }
     _run_after_export("before_zip", {
         **export_result, "account": account, "chat": chat,
@@ -775,7 +795,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "file": file_path,
         "files": files_out,
         "format": fmt, "pack": pack,
-        "message_count": written, "media_count": stats_media + stats_voice,
+        "message_count": output_count, "written_total": written_total,
+        "media_count": stats_media + stats_voice,
         "image_count": stats_media, "voice_count": stats_voice,
         "avatar_count": stats_ava,
         "duration_ms": int((time.time() - t0) * 1000),
@@ -856,7 +877,7 @@ def _run_after_export(when: str, ctx: dict) -> None:
 def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
                           names, media_map, avatar_map, progress=None,
                           display=None, stats=None, session=None, senders=None,
-                          template=None, media_enabled=True):
+                          template=None, media_enabled=True, want_messages=True):
     """HTML 真流式导出（P1 修复）：消息边读边写文件句柄，内存 O(1)。
 
     旧实现把全部消息 accumulate 进 lines 再一次性 render_html——3 万条
@@ -864,6 +885,9 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
     矛盾。成员表由第一遍扫描的 senders 集合预构建（meta.messageCount 用
     第一遍计数，尾部 MSG_COUNT 用实际写出数，二者以 run_export 的对账
     warn 兜底差异）。
+
+    want_messages=False（P2-3，仅元数据/媒体）：跳过消息循环，但仍写
+    头部、尾部与成员表，得到可打开的空消息页（MSG_COUNT=0）。
     """
     from siwx.html_template import (
         stream_html_head, stream_html_msg, stream_html_tail,
@@ -885,8 +909,10 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
     map_keys: set = set()
     with open(path, "w", encoding="utf-8") as f:
         stream_html_head(f, session, members, avatar_map, template=template)
-        for msg in message_stream(acc_dir, chat, start_ts, end_ts, account,
-                                  names):
+        # P2-3：仅元数据模式不写消息，头/尾/成员表照常输出
+        msgs = (message_stream(acc_dir, chat, start_ts, end_ts, account, names)
+                if want_messages else ())
+        for msg in msgs:
             _attach_media(msg, media_map)
             if stats:
                 stats.observe(msg)
@@ -921,14 +947,22 @@ def _write_html_streaming(path, acc_dir, chat, start_ts, end_ts, account,
 
 
 def _write_batch(path, fmt, session, acc_dir, chat, start_ts, end_ts, account, names,
-                 media_map, progress=None, stats=None):
-    """TOML/SQLite/XLSX 流式分批写入。"""
+                 media_map, progress=None, stats=None, want_messages=True):
+    """TOML/SQLite/XLSX 流式分批写入。
+
+    want_messages=False（P2-3）：只写文件头/表结构，不写任何消息，返回 0。"""
     if fmt == "toml":
-        return _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats)
+        return _write_toml_batch(
+            path, session, acc_dir, chat, start_ts, end_ts, account, names,
+            media_map, progress, stats, want_messages)
     elif fmt == "sqlite":
-        return _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats)
+        return _write_sqlite_batch(
+            path, session, acc_dir, chat, start_ts, end_ts, account, names,
+            media_map, progress, stats, want_messages)
     elif fmt == "xlsx":
-        return _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats)
+        return _write_xlsx_batch(
+            path, acc_dir, chat, start_ts, end_ts, account, names,
+            media_map, progress, stats, want_messages)
 
 
 def _toml_value(v) -> str:
@@ -948,7 +982,7 @@ def _toml_value(v) -> str:
     return json.dumps(str(v), ensure_ascii=False)
 
 
-def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None):
+def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None, want_messages=True):
     header = ["[exportInfo]", f'version = {_toml_value("1.0")}',
               f'generator = {_toml_value(GENERATOR)}',
               f'exportedAt = {_toml_value(int(time.time()))}',
@@ -966,7 +1000,10 @@ def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, n
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(header))
         f.write("\n")
-        for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+        # P2-3：仅元数据模式只写 [exportInfo]/[session] 头，不写 [[messages]]
+        msgs = (message_stream(acc_dir, chat, start_ts, end_ts, account, names)
+                if want_messages else ())
+        for msg in msgs:
             _attach_media(msg, media_map)
             if stats:
                 stats.observe(msg)
@@ -988,7 +1025,7 @@ def _write_toml_batch(path, session, acc_dir, chat, start_ts, end_ts, account, n
     return count
 
 
-def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None):
+def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None, want_messages=True):
     if path.exists():
         path.unlink()
     conn = sqlite3.connect(path)
@@ -1006,7 +1043,10 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
                   session["firstTimestamp"], session["lastTimestamp"]))
     count = 0
     truncated = 0      # P3：rawContent 截断留痕（8000 字上限）
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+    # P2-3：仅元数据模式保留 session 表与 messages 表结构，不插任何消息行
+    msgs = (message_stream(acc_dir, chat, start_ts, end_ts, account, names)
+            if want_messages else ())
+    for msg in msgs:
         _attach_media(msg, media_map)
         if stats:
             stats.observe(msg)
@@ -1034,7 +1074,7 @@ def _write_sqlite_batch(path, session, acc_dir, chat, start_ts, end_ts, account,
     return count
 
 
-def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None):
+def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, media_map, progress, stats=None, want_messages=True):
     from openpyxl import Workbook
     # write_only=True：默认 Workbook() 会把每个 Cell 对象都留在内存里，长会话
     # （12.4 万条 × 7 列 = 近百万 Cell）占用远超文件本身；write_only 只保留
@@ -1044,7 +1084,10 @@ def _write_xlsx_batch(path, acc_dir, chat, start_ts, end_ts, account, names, med
     ws.append(["localId", "时间", "类型", "发送者", "是否自己", "内容", "媒体文件"])
     count = 0
     truncated = 0      # P3：单元格 32767 字上限，提前在 30000 字截断并留痕
-    for msg in message_stream(acc_dir, chat, start_ts, end_ts, account, names):
+    # P2-3：仅元数据模式保留表头行，不追加任何消息行
+    msgs = (message_stream(acc_dir, chat, start_ts, end_ts, account, names)
+            if want_messages else ())
+    for msg in msgs:
         _attach_media(msg, media_map)
         if stats:
             stats.observe(msg)

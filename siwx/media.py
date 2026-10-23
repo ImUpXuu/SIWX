@@ -736,11 +736,34 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                         return 0 if is_h else (2 if is_t else 1)
                     return 2 if is_t else (1 if is_h else 0)  # 默认：主图优先
                 hits.sort(key=_rank)
-                p = hits[0]
-                ext = p.suffix.lstrip(".")
-                if ext != "wxgf":  # wxgf 是转码失败时的兜底留档，让它落到
-                                   # 下面走一遍现场转码
-                    body = p.read_bytes()
+                # P2-8：备份产物可能是被中断/截断的半成品，复用前必须校验；
+                # 坏文件绝不进 _IMG_CACHE，继续下一个候选，全部坏则落到现场
+                # 解密来源。
+                for p in hits:
+                    ext = p.suffix.lstrip(".")
+                    if ext == "wxgf":  # wxgf 是转码失败时的兜底留档，让它落到
+                                       # 下面走一遍现场转码
+                        continue
+                    try:
+                        body = p.read_bytes()
+                    except OSError as e:
+                        _media_logger.detailed(
+                            "media", f"备份复用读取失败 {p.name[:24]}: {type(e).__name__}")
+                        last_err = "备份产物读取失败"
+                        continue
+                    bad = None
+                    if ext == "heic":
+                        # heic 尾特征不固定，只做"非空 + 长度合理 + ftyp 盒"轻校验
+                        if len(body) < 64 or b"ftyp" not in body[:32]:
+                            bad = "heic 过短/缺少 ftyp"
+                    elif not _plausible_image(body):
+                        bad = "尾部特征缺失"
+                    if bad:
+                        event(f"备份产物不完整，跳过({p.name[:24]}): {label} ({len(body)}B)")
+                        _media_logger.detailed(
+                            "media", f"备份复用跳过坏文件 {p.name[:32]}: {bad} ({len(body)}B)")
+                        last_err = "备份产物不完整"
+                        continue
                     if ext == "heic":
                         # HEIC 在浏览器 <img> 里原生支持不可靠（Safari 能显示，
                         # Chrome/Firefox 普遍不行），补一次轻量本地 sips 转码
@@ -750,7 +773,9 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
                             if jpeg:
                                 return _emit(jpeg, "jpeg")
                         return _emit(body, "heic")  # sips 失败/非 macOS：原样返回好过没有
-                    return _emit(body, "jpeg" if ext == "jpg" else ext)
+                    r = _emit(body, "jpeg" if ext == "jpg" else ext)
+                    if r[0] is not None:
+                        return r
 
     # ⓪ attach 原图目录直查（按消息 XML md5 / packed_info md5 命名，不依赖
     #    hardlink；hq=True 时优先高清 _h 版，供点击查看大图使用）

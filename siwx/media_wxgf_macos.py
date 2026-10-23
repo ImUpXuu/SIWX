@@ -510,12 +510,16 @@ def convert_wxgf_macos(data: bytes, log=print) -> bytes | None:
                 pass
 
 
-def convert_wxgf_batch(pairs: list, log=print, batch_size: int = 200) -> dict:
+def convert_wxgf_batch(pairs: list, log=print, batch_size: int = 200,
+                       should_cancel=None) -> dict:
     """批量 wxgf → HEIC（供 media_backup.py 对已备份的 .wxgf 文件重新转码）。
 
     pairs: [(Path(wxgf文件), Path(目标heic路径)), ...]
     一次 LLDB attach 处理一批（batch_size 张），避免每张都单独 attach/detach
     的开销；返回 {str(in_path): {"ok": bool, "reason"/"bytes": ...}}。
+
+    should_cancel（P2-10）：只在批次之间检查（批内一次 LLDB 调用不可中断）；
+    触发时提前返回已完成批次的部分结果，调用方按"未返回=未转码"处理。
     """
     if not pairs:
         return {}
@@ -526,6 +530,10 @@ def convert_wxgf_batch(pairs: list, log=print, batch_size: int = 200) -> dict:
 
     out = {}
     for i in range(0, len(pairs), batch_size):
+        if should_cancel is not None and should_cancel():
+            log(f"[media_wxgf_macos] 收到取消请求，停止批量转码"
+                f"（已完成 {i}/{len(pairs)}，剩余保持原始 wxgf 字节）")
+            break
         chunk = pairs[i:i + batch_size]
         log(f"[media_wxgf_macos] 转码批次 {i + 1}-{i + len(chunk)}/{len(pairs)}")
         res = _run_lldb_batch(pid, chunk, log=log,

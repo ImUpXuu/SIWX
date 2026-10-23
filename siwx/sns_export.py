@@ -102,18 +102,41 @@ def _feed_to_dict(feed: dict, media_map: dict | None = None) -> dict:
                       "emojis": [{"md5": e.get("md5"), "url": e.get("url"),
                                   "width": e.get("width"), "height": e.get("height")}
                                  for e in (x.get("emojis") or [])],
-                      "images": [{"md5": i.get("md5"), "url": i.get("url")}
+                      # 评论图与主图同构（sns._parse_media_el），有 token 时顺带
+                      # 拼出可下载链接；表情没有 token，保持原始 url。
+                      "images": [{"md5": i.get("md5"), "url": i.get("url"),
+                                  "token": i.get("token"),
+                                  "downloadUrl": (
+                                      sns_cdn.build_media_url(i.get("url") or "",
+                                                              i.get("token"))
+                                      if i.get("token") else "")}
                                  for i in (x.get("images") or [])]}
                      for x in feed.get("comments", [])],
         "media": [],
     }
     for i, m in enumerate(feed.get("medias", [])):
+        is_video = m.get("type") == 6
+        url = m.get("url") or ""
+        thumb = m.get("thumb_url") or ""
         item = {
             "index": i,
-            "type": "video" if m.get("type") == 6 else "image",
+            "type": "video" if is_video else "image",
             "width": m.get("width"), "height": m.get("height"),
-            "url": m.get("url"), "thumb": m.get("thumb_url"),
+            "url": url, "thumb": thumb,
+            # CDN 原图必须带 token（缺了会 400/裂图），downloadUrl 是可直接打开的
+            # 版本；无 token 时至少补上 https 与图片原图路径。
+            "downloadUrl": (sns_cdn.build_media_url(url, m.get("token"),
+                                                    is_video=is_video)
+                            if url else ""),
+            # 缩略图保持原尺寸：is_video=True 只是跳过 /0 原图改写，仍会追加 token
+            "thumbDownloadUrl": (sns_cdn.build_media_url(thumb, m.get("thumb_token"),
+                                                         is_video=True)
+                                 if thumb else ""),
             "md5": m.get("md5"),
+            # token/key 是 CDN 凭据，仅留在本地导出里供事后补下载，勿外发
+            "token": m.get("token"),
+            "thumb_token": m.get("thumb_token"),
+            "key": m.get("key"),
         }
         if media_map and (feed.get("tid"), i, "") in media_map:
             item["localFile"] = media_map[(feed.get("tid"), i, "")]
@@ -123,7 +146,12 @@ def _feed_to_dict(feed: dict, media_map: dict | None = None) -> dict:
                              f"媒体未落盘 tid={feed.get('tid')} idx={i} live=False")
         if m.get("live_photo"):
             lp = m["live_photo"]
-            live = {"md5": lp.get("md5"), "url": lp.get("url"),
+            lurl = lp.get("url") or ""
+            live = {"md5": lp.get("md5"), "url": lurl,
+                    "downloadUrl": (sns_cdn.build_media_url(lurl, lp.get("token"),
+                                                            is_video=True)
+                                    if lurl else ""),
+                    "token": lp.get("token"), "key": lp.get("key"),
                     "duration": lp.get("video_duration"),
                     "stillMs": lp.get("live_still_ms"),
                     "width": lp.get("width"), "height": lp.get("height")}
@@ -135,6 +163,16 @@ def _feed_to_dict(feed: dict, media_map: dict | None = None) -> dict:
             item["livePhoto"] = live
         d["media"].append(item)
     return d
+
+
+def _render_src(item: dict) -> str:
+    """媒体渲染取址优先级：本地文件 → 带 token 的下载链接 → 原始 URL。
+
+    默认导出（不下载媒体）时没有 localFile，原始 URL 缺 token 会 400（图片全裂），
+    因此 downloadUrl 必须排在 url 前面；已落盘时优先本地文件（离线可看）。
+    """
+    return (item.get("localFile") or item.get("downloadUrl")
+            or item.get("url") or "")
 
 
 # ── 卡片渲染（txt / markdown / html 共用）────────────────────────────
@@ -369,10 +407,9 @@ def _write_txt(path: Path, feeds, media_map, meta=None) -> int:
                 if line:
                     f.write("  " + line + "\n")
             for m in d["media"]:
-                src = m.get("localFile") or m.get("url")
-                f.write(f"  <{m['type']}> {src}\n")
+                f.write(f"  <{m['type']}> {_render_src(m)}\n")
                 if m.get("livePhoto"):
-                    f.write(f"  <livephoto> {m['livePhoto'].get('localFile') or m['livePhoto'].get('url')}\n")
+                    f.write(f"  <livephoto> {_render_src(m['livePhoto'])}\n")
             if d["location"]:
                 loc = d["location"]
                 f.write("  📍 " + " ".join(
@@ -384,7 +421,7 @@ def _write_txt(path: Path, feeds, media_map, meta=None) -> int:
                 for e in (c.get("emojis") or []):
                     f.write(f"    <表情> {e.get('url') or ''}\n")
                 for im in (c.get("images") or []):
-                    f.write(f"    <评论图> {im.get('url') or ''}\n")
+                    f.write(f"    <评论图> {im.get('downloadUrl') or im.get('url') or ''}\n")
             f.write("\n")
             n += 1
     return n
@@ -418,13 +455,12 @@ def _write_markdown(path: Path, feeds, media_map, meta=None) -> int:
                     f.write(f"> ![封面]({card['cover']})\n")
                 f.write("\n")
             for m in d["media"]:
-                src = m.get("localFile") or m.get("url")
+                src = _render_src(m)
                 f.write(f"![{m['type']}]({src})\n\n" if m["type"] == "image"
                         else f"[视频]({src})\n\n")
                 lp = m.get("livePhoto")
                 if lp:
-                    lsrc = lp.get("localFile") or lp.get("url")
-                    f.write(f"[实况照片]({lsrc})\n\n")
+                    f.write(f"[实况照片]({_render_src(lp)})\n\n")
             if d["location"]:
                 loc = d["location"]
                 f.write(f"📍 {loc.get('name') or ''} {loc.get('address') or ''}\n\n")
@@ -433,7 +469,8 @@ def _write_markdown(path: Path, feeds, media_map, meta=None) -> int:
             for c in d["comments"]:
                 who = c["name"] or ""
                 emo = "".join(f"![{e['md5'][:8]}]({e.get('url') or ''})" for e in (c.get("emojis") or []))
-                imgs = "".join(f"![评论图]({im.get('url') or ''})" for im in (c.get("images") or []))
+                imgs = "".join(f"![评论图]({im.get('downloadUrl') or im.get('url') or ''})"
+                               for im in (c.get("images") or []))
                 f.write(f"- **{who}**：{c['text']}{emo}{imgs}\n")
             if d["comments"]:
                 f.write("\n")
@@ -490,19 +527,24 @@ def _write_html(path: Path, feeds, media_map, meta=None) -> int:
             if d["media"]:
                 f.write('<div class="grid">')
                 for m in d["media"]:
-                    src = _html.escape(str(m.get("localFile") or m.get("url") or ""))
+                    src = _html.escape(_render_src(m))
                     if not src:
                         continue
+                    # 没有本地文件时链接指向 CDN（token 会过期），用 title 标注
+                    remote = "" if m.get("localFile") else ' title="远程 CDN 链接，可能过期"'
                     if m["type"] == "video":
-                        f.write(f'<video controls preload="metadata" src="{src}"></video>')
+                        f.write(f'<video controls preload="metadata"{remote} '
+                                f'src="{src}"></video>')
                     else:
-                        f.write(f'<img loading="lazy" src="{src}" alt="">')
+                        f.write(f'<img loading="lazy"{remote} src="{src}" alt="">')
                     lp = m.get("livePhoto")
                     if lp:
-                        lsrc = _html.escape(str(lp.get("localFile") or lp.get("url") or ""))
+                        lsrc = _html.escape(_render_src(lp))
                         if lsrc:
+                            ltitle = ("实况照片" if lp.get("localFile")
+                                      else "实况照片（远程 CDN 链接，可能过期）")
                             f.write(f'<video controls preload="metadata" '
-                                    f'title="实况照片" src="{lsrc}"></video>')
+                                    f'title="{ltitle}" src="{lsrc}"></video>')
                 f.write("</div>")
             f.write(f'<div class="act">赞 {len(d["likes"])} · 评论 {len(d["comments"])}</div>')
             if d["location"]:
@@ -517,8 +559,8 @@ def _write_html(path: Path, feeds, media_map, meta=None) -> int:
                         f'<img class="e" loading="lazy" src="{_html.escape(str(e.get("url") or ""))}" alt="">'
                         for e in (c.get("emojis") or []) if e.get("url"))
                     cimg = "".join(
-                        f'<img class="cm-img" loading="lazy" src="{_html.escape(str(im.get("url") or ""))}" alt="评论图">'
-                        for im in (c.get("images") or []) if im.get("url"))
+                        f'<img class="cm-img" loading="lazy" src="{_html.escape(str(im.get("downloadUrl") or im.get("url") or ""))}" alt="评论图">'
+                        for im in (c.get("images") or []) if (im.get("downloadUrl") or im.get("url")))
                     f.write(f'<div><b>{_html.escape(str(c["name"] or ""))}</b>：'
                             f'{_html.escape(str(c["text"] or ""))}{emo}{cimg}</div>')
                 f.write("</div>")
