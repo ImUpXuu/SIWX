@@ -230,6 +230,7 @@ class MultiAccountGateTest(unittest.TestCase):
                 "key_map": {}, "attrib": {}, "log": lambda *_a: None,
                 "dbg": lambda *_a: None}
 
+    @unittest.skipUnless(platform.system() == "Linux", "extract 只在 Linux 上跑这个策略")
     def test_unlogged_account_is_skipped_without_touching_wechat(self):
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(self.mod, "_ATTEMPTED", True), \
@@ -242,6 +243,7 @@ class MultiAccountGateTest(unittest.TestCase):
             stop.assert_not_called()      # 关键：不许杀用户的微信
             launch.assert_not_called()
 
+    @unittest.skipUnless(platform.system() == "Linux", "extract 只在 Linux 上跑这个策略")
     def test_first_account_still_bootstraps(self):
         """第一次注入必须照旧：用户没登录时也要把微信拉起来让他扫码。"""
         with tempfile.TemporaryDirectory() as td, \
