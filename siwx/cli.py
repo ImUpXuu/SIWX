@@ -243,8 +243,8 @@ def main() -> int:
     import os
     import platform
     # macOS 支持已通过 macos_lldb 策略实现
-    if platform.system() not in ("Windows", "Darwin"):
-        print("stories-in-wx 仅支持 Windows 和 macOS。")
+    if platform.system() not in ("Windows", "Darwin", "Linux"):
+        print("stories-in-wx 仅支持 Windows、macOS 和 Linux。")
         return 1
     # CLI 模式也装崩溃钩子 + siwx.log（审计 §2.3：此前 keys/decrypt/auto/mcp/
     # doctor 崩溃没有 crash.log）。serve 模式下 server 导入会二次调用（幂等）。
