@@ -185,3 +185,98 @@ def status():
     """任务状态（前端轮询）：progress/msg/logs/result。"""
     with _lock:
         return jsonify(_job)
+
+
+# ── 恢复：analyze（解包暂存 + 只读 diff）→ apply（独立任务槽）────
+
+_restore_lock = threading.Lock()
+_restore_job = {"running": False, "done": False, "ok": False, "progress": 0,
+                "msg": "", "logs": [], "result": None, "error": None}
+
+
+def _pack_path_in_exports(raw: str) -> Path:
+    p = Path(raw or "")
+    root = _paths.exports_root().resolve()
+    target = (root / p).resolve() if not p.is_absolute() else p.resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        raise FileNotFoundError("备份包不存在（仅支持 exports/ 内的 .siwxpack）")
+    return target
+
+
+@bp.post("/restore/analyze")
+def restore_analyze():
+    """阶段 1+2：验密码解包到暂存目录 + 只读 diff 报告（不写缓存库）。"""
+    from siwx import restore as _restore
+    data = request.get_json(silent=True) or {}
+    password = data.get("password")
+    if not isinstance(password, str) or not password:
+        return jsonify({"error": "请输入备份密码"}), 400
+    try:
+        target = _pack_path_in_exports(data.get("path", ""))
+    except FileNotFoundError as e:
+        return jsonify({"error": str(e)}), 404
+    try:
+        stage = _restore.stage_pack(target, password)
+        report = _restore.analyze(stage)
+    except Exception as e:  # noqa: BLE001 — 密码错/包损坏统一回到前端提示
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 400
+    return jsonify(report)
+
+
+@bp.post("/restore/apply")
+def restore_apply():
+    """阶段 3：把暂存的包合入缓存库（apply 前目标文件已冷备）。"""
+    from siwx import restore as _restore
+    data = request.get_json(silent=True) or {}
+    stage_id = data.get("stage_id")
+    if not stage_id:
+        return jsonify({"error": "缺少 stage_id（先执行分析）"}), 400
+    try:
+        stage = _restore.load_stage(stage_id)
+    except _restore.RestoreError as e:
+        return jsonify({"error": str(e)}), 404
+    with _restore_lock:
+        if _restore_job["running"]:
+            return jsonify({"error": "已有恢复任务在运行"}), 409
+        _restore_job.update({"running": True, "done": False, "ok": False,
+                             "progress": 0, "msg": "", "logs": [],
+                             "result": None, "error": None})
+
+    def jlog(msg):
+        with _restore_lock:
+            _restore_job["logs"].append(f"{datetime.now():%H:%M:%S} {msg}")
+            if len(_restore_job["logs"]) > 400:
+                del _restore_job["logs"][:150]
+
+    def progress(pct, msg):
+        with _restore_lock:
+            _restore_job["progress"] = int(pct)
+            _restore_job["msg"] = str(msg)
+
+    def runner():
+        import shutil as _shutil
+        try:
+            result = _restore.apply(stage, log=jlog, progress=progress)
+            with _restore_lock:
+                _restore_job.update({"ok": True, "result": result})
+            jlog("恢复完成")
+            _shutil.rmtree(stage["dir"], ignore_errors=True)  # 成功后清暂存
+        except Exception as e:  # noqa: BLE001
+            with _restore_lock:
+                _restore_job["ok"] = False
+                _restore_job["error"] = f"{type(e).__name__}: {e}"
+            jlog(f"恢复失败: {_restore_job['error']}（暂存保留，可重试）")
+            _log.warn("restore", f"恢复任务失败: {_restore_job['error']}")
+        finally:
+            with _restore_lock:
+                _restore_job["running"] = False
+                _restore_job["done"] = True
+
+    threading.Thread(target=runner, daemon=True).start()
+    return jsonify({"started": True})
+
+
+@bp.get("/restore/status")
+def restore_status():
+    with _restore_lock:
+        return jsonify(_restore_job)

@@ -1,68 +1,107 @@
-<div class="export-wrap">
-  <!-- 左侧会话列表：与导出页同一套（e-list/e-sess + 头像），样式由
-       backup.css @import export.css 提供。全量模式下整列置灰。 -->
-  <aside class="e-list" id="b-list">
-    <div class="e-top">
-      <input id="e-search" placeholder="搜索会话…" aria-label="搜索会话">
-      <label class="e-selall"><input type="checkbox" id="e-selall"> 全选</label>
-    </div>
-    <div id="e-sessions"></div>
-  </aside>
+<!-- 加密备份页：一级入口 = 新建备份 / 恢复备份；二级各自面板。
+     新建 = 原备份流程；恢复 = .siwxpack → SIWX 缓存库（不碰微信）。 -->
+<div class="b-entry" id="b-entry">
+  <label class="b-entry-card">
+    <input type="radio" name="b-action" value="create" checked>
+    <span class="b-entry-body"><b>新建备份</b><i>把当前账号打包为加密 .siwxpack（可选联系人 / 类别 / 时间）</i></span>
+  </label>
+  <label class="b-entry-card">
+    <input type="radio" name="b-action" value="restore">
+    <span class="b-entry-body"><b>恢复备份</b><i>把 .siwxpack 恢复到 SIWX 缓存库——先看差异报告，确认后才写入，不碰微信数据</i></span>
+  </label>
+</div>
 
-  <section class="e-side">
-    <div class="card">
-      <div class="card-head"><h2>加密备份（.siwxpack）</h2><span class="hint" id="b-hint"></span></div>
-
-      <div class="b-modes">
-        <label class="b-mode">
-          <input type="radio" name="b-mode" value="full">
-          <span class="b-mode-body"><b>整账号全量</b><i>全部数据库（含朋友圈 / 语音 / 收藏），恢复力最强、体积最大</i></span>
-        </label>
-        <label class="b-mode">
-          <input type="radio" name="b-mode" value="selective" checked>
-          <span class="b-mode-body"><b>自定义选择</b><i>勾选联系人 × 消息类别 × 时间窗</i></span>
-        </label>
+<!-- ═══ 新建备份 ═══ -->
+<div id="b-create-panel">
+  <div class="export-wrap">
+    <aside class="e-list" id="b-list">
+      <div class="e-top">
+        <input id="e-search" placeholder="搜索会话…" aria-label="搜索会话">
+        <label class="e-selall"><input type="checkbox" id="e-selall"> 全选</label>
       </div>
+      <div id="e-sessions"></div>
+    </aside>
 
-      <div id="b-filter-block">
-        <div class="b-types f-checks" id="b-types">
-          <label class="f-chk"><input type="checkbox" value="1"> 文本</label>
-          <label class="f-chk"><input type="checkbox" value="3"> 图片</label>
-          <label class="f-chk"><input type="checkbox" value="34"> 语音</label>
-          <label class="f-chk"><input type="checkbox" value="43"> 视频</label>
-          <label class="f-chk"><input type="checkbox" value="6"> 文件</label>
-          <label class="f-chk"><input type="checkbox" value="49"> 应用消息</label>
-          <label class="f-chk"><input type="checkbox" value="47"> 表情</label>
-          <label class="f-chk"><input type="checkbox" value="57"> 引用回复</label>
+    <section class="e-side">
+      <div class="card">
+        <div class="card-head"><h2>加密备份（.siwxpack）</h2><span class="hint" id="b-hint"></span></div>
+
+        <div class="b-modes">
+          <label class="b-mode">
+            <input type="radio" name="b-mode" value="full">
+            <span class="b-mode-body"><b>整账号全量</b><i>全部数据库（含朋友圈 / 语音 / 收藏），恢复力最强、体积最大</i></span>
+          </label>
+          <label class="b-mode">
+            <input type="radio" name="b-mode" value="selective" checked>
+            <span class="b-mode-body"><b>自定义选择</b><i>勾选联系人 × 消息类别 × 时间窗</i></span>
+          </label>
         </div>
-        <div class="f-grid2">
-          <label>开始日期<div id="b-start"></div></label>
-          <label>结束日期<div id="b-end"></div></label>
+
+        <div id="b-filter-block">
+          <div class="b-types f-checks" id="b-types">
+            <label class="f-chk"><input type="checkbox" value="1"> 文本</label>
+            <label class="f-chk"><input type="checkbox" value="3"> 图片</label>
+            <label class="f-chk"><input type="checkbox" value="34"> 语音</label>
+            <label class="f-chk"><input type="checkbox" value="43"> 视频</label>
+            <label class="f-chk"><input type="checkbox" value="6"> 文件</label>
+            <label class="f-chk"><input type="checkbox" value="49"> 应用消息</label>
+            <label class="f-chk"><input type="checkbox" value="47"> 表情</label>
+            <label class="f-chk"><input type="checkbox" value="57"> 引用回复</label>
+          </div>
+          <div class="f-grid2">
+            <label>开始日期<div id="b-start"></div></label>
+            <label>结束日期<div id="b-end"></div></label>
+          </div>
+          <div class="hint b-gap">不勾会话 = 备份全部会话；类别都不勾 / 时间不填 = 不限</div>
         </div>
-        <div class="hint b-gap">不勾会话 = 备份全部会话；类别都不勾 / 时间不填 = 不限</div>
+
+        <div class="f-grid2 b-gap">
+          <label>备份密码<input type="password" id="b-pw1" class="b-pw" placeholder="至少 8 位" autocomplete="new-password"></label>
+          <label>确认密码<input type="password" id="b-pw2" class="b-pw" placeholder="再输入一遍" autocomplete="new-password"></label>
+        </div>
+        <div class="hint">scrypt + AES-256-GCM 加密，密码是唯一钥匙——忘了密码包就打不开。</div>
+        <div class="hint" id="b-wechat"></div>
+        <div class="g-nav"><button id="b-run" class="btn btn-primary">开始备份</button></div>
       </div>
 
-      <div class="f-grid2 b-gap">
-        <label>备份密码<input type="password" id="b-pw1" class="b-pw" placeholder="至少 8 位" autocomplete="new-password"></label>
-        <label>确认密码<input type="password" id="b-pw2" class="b-pw" placeholder="再输入一遍" autocomplete="new-password"></label>
+      <div class="card hidden" id="b-progress-card">
+        <div class="card-head"><h2>备份进度</h2><span class="hint" id="b-pct">0%</span></div>
+        <div class="progress"><div class="bar" id="b-bar" style="width:0%"></div></div>
+        <div class="console" id="b-log"></div>
+        <div id="b-result"></div>
       </div>
-      <div class="hint">scrypt + AES-256-GCM 加密，密码是唯一钥匙——忘了密码包就打不开。</div>
-      <div class="hint" id="b-wechat"></div>
-      <div class="g-nav"><button id="b-run" class="btn btn-primary">开始备份</button></div>
-    </div>
+    </section>
+  </div>
+</div>
 
-    <div class="card hidden" id="b-progress-card">
-      <div class="card-head"><h2>备份进度</h2><span class="hint" id="b-pct">0%</span></div>
-      <div class="progress"><div class="bar" id="b-bar" style="width:0%"></div></div>
-      <div class="console" id="b-log"></div>
-      <div id="b-result"></div>
+<!-- ═══ 恢复备份 ═══ -->
+<div id="b-restore-panel" class="hidden">
+  <div class="card">
+    <div class="card-head"><h2>选择备份包</h2><span class="hint">仅支持 exports/ 目录内的 .siwxpack</span></div>
+    <div id="b-packs"><div class="b-empty-list">暂无备份包</div></div>
+    <div class="f-grid2 b-gap">
+      <label>备份密码<input type="password" id="r-pw" class="b-pw" placeholder="解包密码" autocomplete="off"></label>
+      <label>&nbsp;</label>
     </div>
+    <div class="hint">恢复只写 SIWX 的缓存库（output/）：消息合入专用恢复分片（重新解密不会覆盖），会话与联系人按用户名合并；全程不读写微信数据目录。</div>
+  </div>
 
-    <div class="card">
-      <div class="card-head"><h2>备份文件</h2><span class="hint">位于 exports/ 目录</span></div>
-      <div id="b-packs"><div class="b-empty-list">暂无备份包</div></div>
+  <div class="card hidden" id="r-report-card">
+    <div class="card-head"><h2>差异报告（尚未写入）</h2><span class="hint" id="r-report-meta"></span></div>
+    <div id="r-report-summary"></div>
+    <div id="r-report-chats"></div>
+    <div class="g-nav">
+      <button class="btn" id="r-cancel">取消</button>
+      <button class="btn btn-primary" id="r-apply">确认恢复</button>
     </div>
-  </section>
+  </div>
+
+  <div class="card hidden" id="r-apply-card">
+    <div class="card-head"><h2>恢复进度</h2><span class="hint" id="r-pct">0%</span></div>
+    <div class="progress"><div class="bar" id="r-bar" style="width:0%"></div></div>
+    <div class="console" id="r-log"></div>
+    <div id="r-result"></div>
+  </div>
 </div>
 
 <div class="b-kill-mask hidden" id="b-kill-mask">

@@ -5298,5 +5298,177 @@ class TestBackupApi(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
 
 
+class TestRestoreEngine(unittest.TestCase):
+    """恢复引擎：analyze 只读 diff / apply 合入专用恢复分片 / 幂等 / 全新安装。"""
+
+    PW = "restore-test-pass"
+    ACC = "wxid_test_acc"
+
+    def _mk_target(self, out_root: Path):
+        """目标缓存库：账号目录里已有 chat A 的 2 条消息（sid 101,102）。"""
+        import hashlib as _h
+        acc = out_root / self.ACC
+        (acc / "message").mkdir(parents=True, exist_ok=True)
+        (acc / "session").mkdir(parents=True, exist_ok=True)
+        (acc / "contact").mkdir(parents=True, exist_ok=True)
+        ta = "Msg_" + _h.md5(TestBackupSelective.CHAT_A.encode()).hexdigest()
+        m = acc / "message" / "message_0.db"
+        c = sqlite3.connect(str(m))
+        c.execute("CREATE TABLE Name2Id(user_name TEXT, is_session INTEGER)")
+        c.execute("INSERT INTO Name2Id VALUES(?, 1)", (TestBackupSelective.CHAT_A,))
+        c.execute(MSG_DDL.format(tag=_h.md5(TestBackupSelective.CHAT_A.encode()).hexdigest()))
+        base = 1900000000
+        for i, sid in enumerate((101, 102), start=1):
+            c.execute(
+                f"INSERT INTO [{ta}] (local_id, server_id, local_type, sort_seq, "
+                "real_sender_id, create_time, status, server_seq, origin_source, "
+                "source, message_content) VALUES(?,?,1,?,1,?,3,?,2,'s',?)",
+                (i, sid, (base + i) * 1000, base + i, sid * 10, f"target-{sid}"))
+        c.commit()
+        c.close()
+        s = acc / "session" / "session.db"
+        c = sqlite3.connect(str(s))
+        c.execute("CREATE TABLE SessionTable(username TEXT, summary TEXT, "
+                  "last_timestamp INTEGER)")
+        c.execute("CREATE TABLE Name2Id(user_name TEXT)")
+        c.execute("INSERT INTO SessionTable VALUES(?,?,?)",
+                  (TestBackupSelective.CHAT_A, "old", base))
+        c.execute("INSERT INTO Name2Id VALUES(?)", (TestBackupSelective.CHAT_A,))
+        c.commit()
+        c.close()
+        ct = acc / "contact" / "contact.db"
+        c = sqlite3.connect(str(ct))
+        c.execute("CREATE TABLE contact(id INTEGER PRIMARY KEY, username TEXT, "
+                  "nick_name TEXT)")
+        c.execute("CREATE TABLE name2id(username TEXT)")
+        c.execute("INSERT INTO contact VALUES(1, ?, 'A-old')",
+                  (TestBackupSelective.CHAT_A,))
+        c.execute("INSERT INTO name2id VALUES(?)", (TestBackupSelective.CHAT_A,))
+        c.commit()
+        c.close()
+        return acc
+
+    def _mk_pack(self, td: Path) -> Path:
+        """用 build_selective_plain 造一个含 chat A 全部 4 条消息的真包。"""
+        from siwx.backup import build_selective_plain
+        from siwx.pack import write_pack
+        (td / "src").mkdir(parents=True, exist_ok=True)
+        shard, sess, contact = TestBackupSelective()._fixture(td / "src")
+        built = build_selective_plain(
+            [shard], sess, contact, chats=[TestBackupSelective.CHAT_A],
+            payload_dir=td / "payload", log=lambda *_a: None)
+        pack = td / "p.siwxpack"
+        write_pack(pack, self.PW, built["files"],
+                   {"mode": "selective", "account": self.ACC,
+                    "created_at": "2026-10-24T12:00:00", "selection": {}})
+        return pack
+
+    def _stage(self, td, out_root):
+        from siwx import restore as _restore
+        pack = self._mk_pack(td / "mk")
+        self._mk_target(out_root)
+        return _restore.stage_pack(pack, self.PW, stage_root=td / "stages")
+
+    def test_analyze_diff_counts(self):
+        from siwx import restore as _restore
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            stage = self._stage(td, td / "out")
+            rep = _restore.analyze(stage, out_root=td / "out")
+            self.assertFalse(rep["fresh"])
+            self.assertEqual(rep["total_pack"], 4)      # 包内 4 条
+            self.assertEqual(rep["total_dup"], 2)       # 101,102 已存在
+            self.assertEqual(rep["total_insert"], 2)    # 103,104 将恢复
+            chat = next(c for c in rep["chats"]
+                        if c["username"] == TestBackupSelective.CHAT_A)
+            self.assertEqual(chat["to_insert"], 2)
+            self.assertEqual(chat["display"], "A")      # 包 contact 优先于目标
+            # analyze 是只读的：目标库行数不变
+            import hashlib as _h2
+            m = td / "out" / self.ACC / "message" / "message_0.db"
+            c = sqlite3.connect(str(m))
+            n = c.execute("SELECT COUNT(*) FROM Msg_"
+                          + _h2.md5(
+                              TestBackupSelective.CHAT_A.encode()).hexdigest()
+                          ).fetchone()[0]
+            c.close()
+            self.assertEqual(n, 2)
+
+    def test_apply_then_idempotent(self):
+        from siwx import restore as _restore
+        import hashlib as _h
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            stage = self._stage(td, td / "out")
+            res = _restore.apply(stage, out_root=td / "out",
+                                 log=lambda *_a: None)
+            self.assertEqual(res["mode"], "merge")
+            self.assertEqual(res["inserted"], 2)
+            self.assertEqual(res["dup"], 2)
+            rshard = td / "out" / self.ACC / "message" / "message_restore_0.db"
+            self.assertTrue(rshard.is_file())
+            c = sqlite3.connect(str(rshard))
+            ta = "Msg_" + _h.md5(TestBackupSelective.CHAT_A.encode()).hexdigest()
+            sids = {r[0] for r in c.execute(
+                f"SELECT server_id FROM [{ta}]")}
+            self.assertEqual(sids, {103, 104})
+            mx = c.execute(f"SELECT MAX(local_id) FROM [{ta}]").fetchone()[0]
+            cnt = c.execute(f"SELECT COUNT(*) FROM [{ta}]").fetchone()[0]
+            seq = c.execute("SELECT seq FROM sqlite_sequence WHERE name=?",
+                            (ta,)).fetchone()
+            self.assertEqual((mx, cnt, seq[0]), (2, 2, 2))
+            c.close()
+            # session 行被包内较新版本覆盖
+            s = sqlite3.connect(str(td / "out" / self.ACC / "session" / "session.db"))
+            self.assertEqual(
+                s.execute("SELECT summary FROM SessionTable WHERE username=?",
+                          (TestBackupSelective.CHAT_A,)).fetchone()[0], "sa")
+            s.close()
+
+            # 幂等：同包再 stage+analyze → 0 条将恢复
+            stage2 = _restore.stage_pack(td / "mk" / "p.siwxpack", self.PW,
+                                         stage_root=td / "stages")
+            rep2 = _restore.analyze(stage2, out_root=td / "out")
+            self.assertEqual(rep2["total_insert"], 0)
+            self.assertEqual(rep2["total_dup"], 4)
+
+    def test_fresh_install(self):
+        from siwx import restore as _restore
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            pack = self._mk_pack(td / "mk")
+            stage = _restore.stage_pack(pack, self.PW, stage_root=td / "stages")
+            rep = _restore.analyze(stage, out_root=td / "empty_out")
+            self.assertTrue(rep["fresh"])
+            res = _restore.apply(stage, out_root=td / "empty_out",
+                                 log=lambda *_a: None)
+            self.assertEqual(res["mode"], "install")
+            self.assertEqual(res["files"], 3)   # message/session/contact
+            self.assertTrue((td / "empty_out" / self.ACC /
+                             "message" / "message_0.db").is_file())
+
+    def test_api_analyze_wrong_password(self):
+        from siwx import server
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            exports = td / "exports"
+            exports.mkdir()
+            shutil.copy2(self._mk_pack(td / "mk"), exports / "p.siwxpack")
+            client = server.app.test_client()
+            with mock.patch("siwx.api_backup._paths.exports_root",
+                            side_effect=lambda: exports), \
+                 mock.patch("siwx.restore._paths.data_dir",
+                            side_effect=lambda: td / "data"):
+                r = client.post("/api/backup/restore/analyze",
+                                json={"path": str(exports / "p.siwxpack"),
+                                      "password": "wrong-password"})
+                self.assertEqual(r.status_code, 400)
+                r2 = client.post("/api/backup/restore/analyze",
+                                 json={"path": str(exports / "p.siwxpack"),
+                                       "password": self.PW})
+                self.assertEqual(r2.status_code, 200)
+                self.assertIn("stage_id", r2.get_json())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
