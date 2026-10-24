@@ -250,8 +250,23 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
 
     try:
         om.execute("BEGIN IMMEDIATE")
+        # 合成库统一**重编号 local_id**（INSERT 不带该列，AUTOINCREMENT 分配）：
+        # 同一会话的表跨多个分片且各分片 local_id 独立编号（实测同一 Msg 表
+        # 分布在 6 个分片、各自都有 local_id=1），照抄合并必撞主键。包内编号
+        # 自洽即可——排序键是 sort_seq(=create_time*1000)、去重键是 server_id，
+        # 恢复合回微信时本就要按目标库重新编号。
+        insert_cols = [c for c in MSG_COLUMNS if c != "local_id"]
+        colspec = ", ".join(insert_cols)
+        qmarks = ", ".join("?" * len(insert_cols))
+        # SELECT 行按全列 MSG_COLUMNS 取索引；INSERT vals 按去 local_id 后的
+        # insert_cols 取索引——两套索引不能混用（实测混用后把 sort_seq 大数
+        # 当 real_sender_id 写进包，sender 映射全断）
+        src_si = MSG_COLUMNS.index("real_sender_id")
+        dst_si = insert_cols.index("real_sender_id")
+        sid = MSG_COLUMNS.index("server_id")
         for chat, locs in table_loc.items():
             total_rows = 0
+            seen_sids = set()   # 跨分片 server_id 去重兜底
             for sp, tbl in locs:
                 sc = sqlite3.connect(str(sp))
                 try:
@@ -261,18 +276,22 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
                         pass
                     where, params = _filter_sql(types, start, end)
                     shard_cache = {}
-                    colspec = ", ".join(MSG_COLUMNS)
-                    si = MSG_COLUMNS.index("real_sender_id")
                     for row in sc.execute(
-                            f"SELECT {colspec} FROM [{tbl}]{where}", params):
-                        vals = list(row)
-                        new_id, _u = _sender_id(sc, shard_cache, row[si])
+                            f"SELECT {', '.join(MSG_COLUMNS)} "
+                            f"FROM [{tbl}]{where}", params):
+                        row_sid = row[sid]
+                        if row_sid in seen_sids:
+                            stats["dup_skipped"] = stats.get("dup_skipped", 0) + 1
+                            continue
+                        seen_sids.add(row_sid)
+                        vals = [v for k, v in zip(MSG_COLUMNS, row)
+                                if k != "local_id"]
+                        new_id, _u = _sender_id(sc, shard_cache, row[src_si])
                         if new_id is not None:
-                            vals[si] = new_id
+                            vals[dst_si] = new_id
                         om.execute(
                             f"INSERT INTO [{msg_table_of(chat)}] "
-                            f"({colspec}) VALUES ({', '.join('?' * len(MSG_COLUMNS))})",
-                            vals)
+                            f"({colspec}) VALUES ({qmarks})", vals)
                         total_rows += 1
                 finally:
                     sc.close()
