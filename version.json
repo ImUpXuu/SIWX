@@ -1,12 +1,12 @@
 {
   "version": "5.1.0",
-  "date": "2026-10-23 16:46:10",
+  "date": "2026-10-24 05:29:04",
   "notes": "## 加密备份与恢复——.siwxpack 全新子系统\n\n> 新增「加密备份」页；备份/恢复全程本地，不碰任何第三方服务。全量测试 722 通过 / 3 跳过。\n\n### 新建备份（.siwxpack）\n- 自研加密容器：scrypt（内存难解）+ AES-256-GCM 分帧认证，密码是唯一钥匙；错密码/篡改/截断均被干净拦截\n- 两种模式：整账号全量（全部数据库）/ 自定义（勾选联系人 × 消息类别 × 时间窗，合成可浏览可恢复的同构库）\n- 备份前强制微信完全退出（两段式确认终止），残留 -wal 自动检测并随包附带；密钥不全时自动提取（Windows）\n\n### 恢复备份（三阶段，默认不写任何东西）\n- 分析 → 只读差异报告（包内/已存在/将恢复，按联系人明细）→ 确认后才写入\n- 目标一：SIWX 缓存库——消息合入专用恢复分片（重新解密永不覆盖），可作离线档案账号\n- 目标二：微信源库（真机实战验证）——按联系人勾选恢复；每分片冷备份、保 salt 重加密、往返校验、同卷原子替换，可一键回滚\n- 会话列表/联系人按用户名合并，last_timestamp 只升不降\n\n### 基础设施\n- 新增 sqlcipher.encrypt_database（解密器镜像，保 salt）+ reserved=80 防线（拒绝加密非解密产物形态的库）\n- 修：同名账号多副本按密钥覆盖选优（曾误报密钥缺失）；macOS 抓密钥时机表述统一为「登录期间抓取」\n- CLI 新增 backup 子命令；恢复引擎与诊断脚本 diag_restore_probe/diag_merge_to_wechat 可复现实验\n\n### 已知限制\n- 恢复到微信的消息不进微信全文搜索（FTS 私有分词器不写）；媒体文件不回填（v2）\n- 被删会话的「恢复到微信」为实验性，建议先用小号验证；本地插入的消息不参与服务端同步",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.13/stories-in-wx-v5.0.13-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.13/stories-in-wx-v5.0.13-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.0/stories-in-wx-v5.1.0-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.0/stories-in-wx-v5.1.0-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.0.13/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.0/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
