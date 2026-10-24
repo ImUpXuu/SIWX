@@ -9,10 +9,10 @@
  * 选中值经 SX.getAccount() 对所有页面可见；切换后当前页面自动重载。
  */
 (function () {
-  const PAGES_BUILTIN = ['chat', 'sns', 'stats', 'export', 'mcp', 'logs', 'settings'];
+  const PAGES_BUILTIN = ['chat', 'sns', 'stats', 'export', 'backup', 'mcp', 'logs', 'settings'];
   // 静态资源缓存戳（同时作为页面模块的 ?v=）。改了 ui/ 下的 js/css 就 +1，
   // 并同步 siwx/ui/index.html 的 /common.js?v= 与 /app.js?v=（tests/test_version_sync.py 断言两者一致）。
-  const UI_VERSION = '2026102302';
+  const UI_VERSION = '2026102401';
   // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
   const DISCLAIMER_VERSION = '20260925';
 

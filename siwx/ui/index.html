@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#f6f6f4">
 <title>stories-in-wx</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%2307c160'/%3E%3Ctext%20x='32'%20y='44'%20font-size='36'%20text-anchor='middle'%20fill='%23ffffff'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/app.css?v=2026101702">
+<link rel="stylesheet" href="/app.css?v=2026102401">
 </head>
 <body>
 <div class="shell">
@@ -35,6 +35,7 @@
       <a href="#/sns" data-page="sns"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 2.8 3 15.2 0 18M12 3c-3 2.8-3 15.2 0 18"/></svg></span><span>朋友圈</span></a>
       <a href="#/stats" data-page="stats"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M7 21v-8M12 21V5M17 21V10"/></svg></span><span>聊天统计</span></a>
       <a href="#/export" data-page="export"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg></span><span>导出</span></a>
+      <a href="#/backup" data-page="backup"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/></svg></span><span>加密备份</span></a>
       <a href="#/mcp" data-page="mcp"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 13.5a4.6 4.6 0 0 0 6.5 0l2.3-2.3a4.6 4.6 0 1 0-6.5-6.5l-1.2 1.2"/><path d="M13.5 10.5a4.6 4.6 0 0 0-6.5 0l-2.3 2.3a4.6 4.6 0 1 0 6.5 6.5l1.2-1.2"/></svg></span><span>MCP</span></a>
       <a href="#/logs" data-page="logs"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 6H21M8.5 12H21M8.5 18H21"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg></span><span>日志</span></a>
       <a href="#/settings" data-page="settings"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6h-6M9 6H3M21 12h-9M6 12H3M21 18h-3M12 18H3"/><circle cx="12" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="15" cy="18" r="2"/></svg></span><span>设置</span></a>
@@ -47,7 +48,7 @@
   </aside>
   <main id="view" class="view"></main>
 </div>
-<script src="/vendor/vue.global.prod.js?v=2026100101"></script>
+<script src="/vendor/vue.global.prod.js?v=2026102401"></script>
 <script>
 /* 前端异常上报：必须在所有业务脚本之前挂载，启动期错误也能被抓到。
  * 上报走 /api/logs/client → 后端结构化日志轨，日志页直接可见；
@@ -81,7 +82,7 @@
   });
 })();
 </script>
-<script src="/common.js?v=2026102302"></script>
-<script src="/app.js?v=2026102302"></script>
+<script src="/common.js?v=2026102401"></script>
+<script src="/app.js?v=2026102401"></script>
 </body>
 </html>

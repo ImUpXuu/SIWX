@@ -189,7 +189,7 @@ stories-in-wx-py/
     │   ├── mmkv.py         # MMKV 离线提取
     │   ├── config_cipher.py    # WCDB Config.Cipher 扫描（Windows 主力）
     │   ├── memscan.py      # 内存字面量兜底
-    │   └── macos_lldb.py   # LLDB 断点捕获（macOS 专属）
+    │   └── macos_lldb.py   # LLDB 登录期断点捕获（macOS 专属）
     │
     └── ui/                 # Web 前端（Flask 托管，原生 HTML/CSS/JS + Vue 3）
         ├── vendor/         # 内置 Vue 3 生产版（不依赖 CDN）

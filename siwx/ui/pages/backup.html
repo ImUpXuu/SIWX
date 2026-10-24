@@ -1,0 +1,79 @@
+<div class="export-wrap">
+  <!-- 左侧会话列表：与导出页同一套（e-list/e-sess + 头像），样式由
+       backup.css @import export.css 提供。全量模式下整列置灰。 -->
+  <aside class="e-list" id="b-list">
+    <div class="e-top">
+      <input id="e-search" placeholder="搜索会话…" aria-label="搜索会话">
+      <label class="e-selall"><input type="checkbox" id="e-selall"> 全选</label>
+    </div>
+    <div id="e-sessions"></div>
+  </aside>
+
+  <section class="e-side">
+    <div class="card">
+      <div class="card-head"><h2>加密备份（.siwxpack）</h2><span class="hint" id="b-hint"></span></div>
+
+      <div class="b-modes">
+        <label class="b-mode">
+          <input type="radio" name="b-mode" value="full">
+          <span class="b-mode-body"><b>整账号全量</b><i>全部数据库（含朋友圈 / 语音 / 收藏），恢复力最强、体积最大</i></span>
+        </label>
+        <label class="b-mode">
+          <input type="radio" name="b-mode" value="selective" checked>
+          <span class="b-mode-body"><b>自定义选择</b><i>勾选联系人 × 消息类别 × 时间窗</i></span>
+        </label>
+      </div>
+
+      <div id="b-filter-block">
+        <div class="b-types f-checks" id="b-types">
+          <label class="f-chk"><input type="checkbox" value="1"> 文本</label>
+          <label class="f-chk"><input type="checkbox" value="3"> 图片</label>
+          <label class="f-chk"><input type="checkbox" value="34"> 语音</label>
+          <label class="f-chk"><input type="checkbox" value="43"> 视频</label>
+          <label class="f-chk"><input type="checkbox" value="6"> 文件</label>
+          <label class="f-chk"><input type="checkbox" value="49"> 应用消息</label>
+          <label class="f-chk"><input type="checkbox" value="47"> 表情</label>
+          <label class="f-chk"><input type="checkbox" value="57"> 引用回复</label>
+        </div>
+        <div class="f-grid2">
+          <label>开始日期<div id="b-start"></div></label>
+          <label>结束日期<div id="b-end"></div></label>
+        </div>
+        <div class="hint b-gap">不勾会话 = 备份全部会话；类别都不勾 / 时间不填 = 不限</div>
+      </div>
+
+      <div class="f-grid2 b-gap">
+        <label>备份密码<input type="password" id="b-pw1" class="b-pw" placeholder="至少 8 位" autocomplete="new-password"></label>
+        <label>确认密码<input type="password" id="b-pw2" class="b-pw" placeholder="再输入一遍" autocomplete="new-password"></label>
+      </div>
+      <div class="hint">scrypt + AES-256-GCM 加密，密码是唯一钥匙——忘了密码包就打不开。</div>
+      <div class="hint" id="b-wechat"></div>
+      <div class="g-nav"><button id="b-run" class="btn btn-primary">开始备份</button></div>
+    </div>
+
+    <div class="card hidden" id="b-progress-card">
+      <div class="card-head"><h2>备份进度</h2><span class="hint" id="b-pct">0%</span></div>
+      <div class="progress"><div class="bar" id="b-bar" style="width:0%"></div></div>
+      <div class="console" id="b-log"></div>
+      <div id="b-result"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>备份文件</h2><span class="hint">位于 exports/ 目录</span></div>
+      <div id="b-packs"><div class="b-empty-list">暂无备份包</div></div>
+    </div>
+  </section>
+</div>
+
+<div class="b-kill-mask hidden" id="b-kill-mask">
+  <div class="b-kill-dialog">
+    <h3>需要先退出微信</h3>
+    <p>检测到微信正在运行（进程 <span class="b-kill-pids" id="b-kill-pids"></span>）。
+      备份要求快照一致，必须先让微信完全退出。</p>
+    <p class="b-kill-sub">是否允许 SIWX 现在终止微信进程？会先尝试优雅退出，超时才强制结束。</p>
+    <div class="b-kill-btns">
+      <button class="btn" id="b-kill-no">我先手动退出</button>
+      <button class="btn btn-primary" id="b-kill-yes">允许终止并继续</button>
+    </div>
+  </div>
+</div>

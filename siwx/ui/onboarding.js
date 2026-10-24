@@ -251,7 +251,7 @@ function showExtract() {
   const isMac = navigator.platform === 'MacIntel' || navigator.platform.includes('Mac');
   body.innerHTML = `
     <h2 class="g-title">提取密钥并解密</h2>
-    ${isMac ? '<div class="g-macos-hint">macOS 提示：若密钥未缓存，请在点击「提取并解密」前 <b>60 秒内重新登录微信</b>（退出再打开），确保密钥在内存中。</div>' : ''}
+    ${isMac ? '<div class="g-macos-hint">macOS 提示：密钥在微信<b>登录期间</b>抓取——若密钥未缓存，请点击「提取并解密」后 <b>60 秒内重新登录微信</b>（完全退出再登录），已登录跑着的微信不会再触发。</div>' : ''}
     <p class="dim g-desc" id="ob-extract-hint"></p>
     <div id="ob-wxwarn" class="ob-warn" hidden>
       <b>未检测到微信进程。</b>提取密钥需要微信正在运行并已登录；也可离线提取（仅使用已缓存的密钥）。

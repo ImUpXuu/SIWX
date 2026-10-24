@@ -243,10 +243,11 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
         log("  2. 微信版本不支持 — 需要 WeChat 4.1.x (Windows) 或 4.1.8+ (macOS)")
         log("  3. 密钥已过期 — 尝试在微信中重新打开聊天后重跑")
         if platform.system() == "Darwin":
-            # PR #27/#30：断点只在数据库连接新建时命中，且 SIP 开启时 root 也
-            # 无法 attach——这两个成因不点破，用户会反复重试而永不生效。
-            log("  4. macOS 断点窗口只在微信新建数据库连接时打开 — 完整退出")
-            log("     微信（建议 killall WeChat）后重开，并立即重跑本命令")
+            # PR #27/#30：密钥只在登录期间抓取（登录一刻微信新建全部数据库
+            # 连接），且 SIP 开启时 root 也无法 attach——这两个成因不点破，
+            # 用户会反复重试而永不生效。
+            log("  4. macOS 密钥在登录期间抓取 — 完整退出微信（建议 killall WeChat）")
+            log("     后重新登录，并在登录窗口期内立即重跑本命令")
             log("  5. SIP 未关闭 — 开启时 root 也无法 attach，必须 csrutil disable")
             log("     （详见 MACOS_SUPPORT.md 注意事项）")
         from siwx.discover import find_wechat_pids
