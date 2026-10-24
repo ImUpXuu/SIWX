@@ -79,6 +79,9 @@ python run.py keys extract
 
 ## 注意事项
 
+- **一次登录只覆盖当前账号。** 钩子抓到的是登录态的 WCDB passphrase，桌面上存在
+  多个微信账号目录时，只有正在登录的那个账号的库能派生成功（实测 25/25）；其余
+  账号的库会显示 0/N，需要换那个账号登录后重跑。这不是失败，是方案的固有边界。
 - **偏移是构建相关的。** 微信升级后用 `find_hook_offset()` 重算即可，不需要改代码；
   定位失败会明确报 `HookNotFoundError`，不会静默 0 命中。
 - **不要直接运行 `/opt/apps/com.tencent.wechat/files/wechat`。** 官方 deb 布局下
