@@ -17,19 +17,22 @@ diff/去重口径：server_id（消息服务端 id，收发双方与各分片一
 local_id 在恢复分片内统一重编号；real_sender_id 经 Name2Id 按 username
 重映射（分片内 rowid 不通用，实测同一人跨分片 rowid 1/6/46 各不相同）。
 """
+import hashlib
 import json
+import re
 import shutil
 import sqlite3
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
+from siwx import keystore
 from siwx import paths as _paths
 from siwx import logger as _slog
 from siwx.pack import read_pack
-
-RESTORE_SHARD = "message_restore_0.db"
-STAGE_TTL = 24 * 3600          # 暂存目录保留时长（未 apply 的分析产物）
+from siwx.sqlcipher import (collect_db_files, decrypt_database,
+                            encrypt_database, verify_enc_key)
 
 MSG_COLUMNS = [
     "local_id", "server_id", "local_type", "sort_seq", "real_sender_id",
@@ -37,6 +40,11 @@ MSG_COLUMNS = [
     "origin_source", "source", "message_content", "compress_content",
     "packed_info_data", "WCDB_CT_message_content", "WCDB_CT_source",
 ]
+
+RESTORE_SHARD = "message_restore_0.db"
+STAGE_TTL = 24 * 3600          # 暂存目录保留时长（未 apply 的分析产物）
+INSERT_COLS = [c for c in MSG_COLUMNS if c != "local_id"]
+
 
 
 class RestoreError(Exception):
@@ -653,3 +661,582 @@ def _ensure_backup(backup_dir: Path, target: Path) -> Path:
     dest = backup_dir / target.name
     shutil.copy2(target, dest)
     return dest
+
+
+# ══ 恢复到微信源库（diag_merge_to_wechat 实战验证管线的正式化）══
+#
+# 安全模型升级：目标是微信自己的数据库（SQLCipher 加密态）。
+#   - 门禁：微信进程必须完全退出（api 层负责 needKill 两段式确认）；
+#   - 每个被改写的分片文件先冷备 wechat_backup/<stamp>/；
+#   - 写路径 = 副本解密 → 单事务合并 → integrity_check → 保 salt 重加密
+#     → 解密回读哈希比对 → 同卷原子替换；
+#   - 消息行 INSERT 不带 local_id（AUTOINCREMENT 重编号），去重靠 server_id，
+#     排序靠 sort_seq；real_sender_id 经 Name2Id 按 username 重映射；
+#   - 会话表被删（微信删会话会 DROP 表）时在活跃分片重建表 + 恢复
+#     SessionTable 行 + 清 SessionDeleteTable（实验性，diag_restore_probe
+#     副本级验证过，真库验收待用户小号）。
+#   - FTS 索引不写（微信私有分词器）：恢复的消息在微信内搜索搜不到，
+#     属预期；resource/媒体不动。
+
+WECHAT_MSG_SHARD_RE = None  # 占位见 _wechat_msg_shards
+
+
+def _wechat_account_dir(account: str, store: dict, log=print) -> Path:
+    """正身定位：同名多副本按（密钥覆盖, 库数, 最新 mtime）选优。"""
+    from siwx.discover import find_wechat_data_dirs
+    hits = []
+    for w, d in find_wechat_data_dirs():
+        if w != account:
+            continue
+        try:
+            es = collect_db_files(d)
+        except Exception:
+            continue
+        covered = sum(1 for e in es if e.salt_hex in store)
+        try:
+            latest = max((e.path.stat().st_mtime for e in es), default=0)
+        except OSError:
+            latest = 0
+        hits.append((covered, len(es), latest, d))
+    if not hits:
+        raise RestoreError(f"账号 {account[:3]}*** 不在本机微信数据目录中")
+    hits.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+    best = hits[0]
+    if len(hits) > 1:
+        log(f"[restore-wechat] ⚠ 该账号有 {len(hits)} 个数据目录，"
+            f"已选密钥覆盖最高的（{best[0]}/{best[1]} 库）")
+    if not best[1] or best[0] < best[1]:
+        # 覆盖不满：apply 前必须补齐（extract 由 api 层负责引导/执行）
+        raise RestoreError(
+            f"微信库密钥覆盖 {best[0]}/{best[1]}——请先在控制台完成一次密钥提取")
+    return best[3]
+
+
+def _wechat_msg_shards(db_dir: Path) -> list:
+    return [e for e in collect_db_files(db_dir)
+            if re.fullmatch(r"message/message_\d+\.db",
+                            e.rel.replace("\\", "/"))]
+
+
+def _decrypt_to(entry, key: bytes, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.is_file():
+        decrypt_database(entry.path, dest, key)
+    return dest
+
+
+def _wechat_require_closed():
+    from siwx.discover import find_wechat_pids
+    pids = find_wechat_pids()
+    if pids:
+        raise RestoreError(f"微信正在运行 (pids={pids})——恢复到微信要求完全退出")
+
+
+def _snapshot_wechat_tables(db_dir: Path, store: dict, work: Path,
+                            want_chat: str = None) -> dict:
+    """解密全部分片到 work（只读分析用），返回 {table: {"sids": set,
+    "shards": [(rel, max_ct)]}, "shard_keys": {rel: key_hex},
+    "entries": {rel: DbEntry}, "active": rel}。"""
+    entries = {e.rel.replace("\\", "/"): e
+               for e in collect_db_files(db_dir)}
+    shards = {rel: e for rel, e in entries.items()
+              if re.fullmatch(r"message/message_\d+\.db", rel)}
+    snap = {"shards": {}, "keys": {}, "entries": entries, "active": None,
+            "tables": {}}
+    global_ct = {}
+    for rel, e in sorted(shards.items()):
+        key = bytes.fromhex(store[e.salt_hex]["key"])
+        snap["keys"][rel] = store[e.salt_hex]["key"]
+        plain = _decrypt_to(e, key, work / rel.replace("/", "_"))
+        c = sqlite3.connect(str(plain))
+        try:
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name LIKE 'Msg_%'")]
+            for tbl in tables:
+                mx, cnt = c.execute(
+                    f"SELECT MAX(create_time), COUNT(*) FROM [{tbl}]"
+                ).fetchone()
+                ent = snap["tables"].setdefault(
+                    tbl, {"sids": set(), "shards": []})
+                if want_chat is None or _sids_any(c, tbl, want_chat, cnt):
+                    ent["sids"] |= _server_ids(c, tbl)
+                ent["shards"].append((rel, mx or 0, cnt))
+                global_ct[rel] = max(global_ct.get(rel, 0), mx or 0)
+        finally:
+            c.close()
+    snap["active"] = (max(global_ct, key=global_ct.get)
+                      if global_ct else sorted(shards)[0])
+    return snap
+
+
+def _sids_any(c, tbl, want_chat, cnt):
+    return True
+
+
+def analyze_wechat(stage: dict, log=print, work: Path = None) -> dict:
+    """对微信真库做只读 diff（要求微信退出）。报告结构与 analyze() 对齐，
+    增加 target 字段与 shard 分布。"""
+    _wechat_require_closed()
+    payload = stage["dir"] / "payload"
+    manifest = stage["manifest"]
+    account = manifest.get("account") or ""
+    store = keystore.load()
+    db_dir = _wechat_account_dir(account, store, log)
+    work = work or (stage["dir"] / "wechat_probe")
+    snap = _snapshot_wechat_tables(db_dir, store, work)
+    pack_shards = _pack_msg_shards(payload, manifest)
+    rev = _reverse_usernames(payload, manifest, pack_shards)
+    names = _display_names(payload, _out_root() / account)
+
+    pack_tables = {}
+    for sp in pack_shards:
+        c = sqlite3.connect(str(sp))
+        try:
+            for (tbl,) in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name LIKE 'Msg_%'"):
+                pack_tables.setdefault(tbl, set()).update(_server_ids(c, tbl))
+        finally:
+            c.close()
+
+    chats, total_pack, total_dup, total_new = [], 0, 0, 0
+    for tbl, sids in pack_tables.items():
+        live = snap["tables"].get(tbl, {"sids": set(), "shards": []})
+        dup = len(sids & live["sids"])
+        ins = len(sids) - dup
+        username = rev.get(tbl, "")
+        chats.append({
+            "username": username,
+            "display": names.get(username, username or tbl[:12] + "…"),
+            "pack_rows": len(sids),
+            "existing": len(live["sids"]),
+            "dup": dup,
+            "to_insert": ins,
+            "table_exists": bool(live["shards"]),
+            "shards": [s for s, _m, _c in live["shards"]],
+        })
+        total_pack += len(sids)
+        total_dup += dup
+        total_new += ins
+    chats.sort(key=lambda e: (-e["to_insert"], e["display"]))
+    return {
+        "stage_id": stage["id"],
+        "account": account,
+        "target": "wechat",
+        "fresh": False,
+        "pack_mode": manifest.get("mode"),
+        "pack_created": manifest.get("created_at"),
+        "chats": chats[:200],
+        "chats_count": len(chats),
+        "total_pack": total_pack,
+        "total_dup": total_dup,
+        "total_insert": total_new,
+        "sessions_new": 0,
+        "contacts_new": 0,
+        "active_shard": snap["active"],
+    }
+
+
+def _merge_rows_into_plain(plain: Path, tbl: str, rows, pack_senders,
+                           rev_tbl_user: str, stats: dict):
+    """在明文微信库副本上合并行（单事务由调用方管理之外——这里自带事务）。"""
+    c = _conn(plain)
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            have = _server_ids(c, tbl)
+        except sqlite3.Error:
+            have = set()
+        n2i = {u: rid for rid, u in c.execute(
+            "SELECT rowid, user_name FROM Name2Id").fetchall()}
+        meta = dict(c.execute(
+            "SELECT user_name, is_session FROM Name2Id").fetchall())
+        src_si = MSG_COLUMNS.index("real_sender_id")
+        dst_si = INSERT_COLS.index("real_sender_id")
+        sid_i = MSG_COLUMNS.index("server_id")
+        for row in rows:
+            sid = row[sid_i]
+            if sid in have:
+                stats["dup"] = stats.get("dup", 0) + 1
+                continue
+            have.add(sid)
+            vals = [v for k, v in zip(MSG_COLUMNS, row) if k != "local_id"]
+            u = pack_senders.get(row[src_si])
+            if u and u not in n2i:
+                cur = c.execute(
+                    "INSERT INTO Name2Id(user_name, is_session) VALUES(?, ?)",
+                    (u, 0))
+                n2i[u] = cur.lastrowid
+            if u:
+                vals[dst_si] = n2i[u]
+            c.execute(
+                f"INSERT INTO [{tbl}] ({', '.join(INSERT_COLS)}) "
+                f"VALUES ({', '.join('?' * len(INSERT_COLS))})", vals)
+            stats["inserted"] = stats.get("inserted", 0) + 1
+            per = stats.setdefault("chats", {}).setdefault(
+                rev_tbl_user or tbl[:12], {"inserted": 0, "dup": 0})
+            per["inserted"] += 1
+        mx = c.execute(f"SELECT MAX(local_id) FROM [{tbl}]").fetchone()[0] or 0
+        cur = c.execute("UPDATE sqlite_sequence SET seq=? WHERE name=?",
+                        (mx, tbl))
+        if cur.rowcount == 0:
+            c.execute("INSERT INTO sqlite_sequence(name, seq) VALUES(?, ?)",
+                      (tbl, mx))
+        c.execute("COMMIT")
+    except Exception:
+        try:
+            c.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        _finish(c)
+    cleanup_sidecars(plain)
+
+
+def _rewrite_wechat_db(db_path: Path, key: bytes, mutate, log=print) -> dict:
+    """真库安全写路径（diag 实战验证版）：冷备 → 副本手术 → integrity →
+    保 salt 重加密 → 回读哈希 → 同卷原子替换。失败原库未动。"""
+    raw = db_path.read_bytes()
+    salt = raw[:16]
+    bdir = _paths.data_dir() / "wechat_backup" / time.strftime("%Y%m%d_%H%M%S")
+    bdir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(db_path, bdir / db_path.name)
+    (bdir / "manifest.json").write_text(json.dumps({
+        "original": str(db_path), "salt": salt.hex(),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "time": datetime.now().isoformat(timespec="seconds"),
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+    log(f"[restore-wechat] 冷备 {db_path.name} → {bdir.name}")
+
+    work = _paths.data_dir() / "restore_wechat_work"
+    work.mkdir(parents=True, exist_ok=True)
+    plain = work / (db_path.stem + "_plain.db")
+    decrypt_database(db_path, plain, key)
+    stats = mutate(plain)
+    ic = sqlite3.connect(str(plain))
+    try:
+        chk = ic.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        ic.close()
+    if chk != "ok":
+        raise RestoreError(f"明文 integrity_check 失败: {chk}")
+    # 加密产物落目标同目录：os.replace 的原子性只在同一卷成立
+    enc = db_path.with_name(db_path.name + ".siwx.part")
+    encrypt_database(plain, enc, key, salt=salt)
+    if not verify_enc_key(key, enc.read_bytes()[:4096]):
+        raise RestoreError("重加密产物 page-1 HMAC 校验失败")
+    back = work / (db_path.stem + "_back.db")
+    decrypt_database(enc, back, key)
+    h1 = hashlib.sha256(plain.read_bytes()).hexdigest()
+    h2 = hashlib.sha256(back.read_bytes()).hexdigest()
+    if h1 != h2:
+        raise RestoreError("解密回读与明文不一致（往返哈希不等）")
+    import os
+    os.replace(enc, db_path)
+    for p in (plain, back):
+        p.unlink(missing_ok=True)
+        cleanup_sidecars(p)
+    shutil.rmtree(work, ignore_errors=True)
+    log(f"[restore-wechat] {db_path.name} 重写完成 → 原子替换 ✓")
+    return stats
+
+
+def sid_i():
+    return MSG_COLUMNS.index("server_id")
+
+
+def _pack_tables(pack_shards) -> set:
+    out = set()
+    for sp in pack_shards:
+        c = sqlite3.connect(str(sp))
+        try:
+            out |= {r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name LIKE 'Msg_%'")}
+        finally:
+            c.close()
+    return out
+
+
+def _snapshot_wechat_tables(db_dir: Path, store: dict, work: Path) -> dict:
+    """解密全部分片到 work（只读扫描用）。返回表分布/密钥/活跃分片。"""
+    entries = {e.rel.replace("\\", "/"): e
+               for e in collect_db_files(db_dir)}
+    shards = {rel: e for rel, e in entries.items()
+              if re.fullmatch(r"message/message_\d+\.db", rel)}
+    snap = {"tables": {}, "keys": {}, "entries": entries, "active": None}
+    global_ct = {}
+    for rel, e in sorted(shards.items()):
+        key = bytes.fromhex(store[e.salt_hex]["key"])
+        snap["keys"][rel] = store[e.salt_hex]["key"]
+        plain = _decrypt_to(e, key, work / rel.replace("/", "_"))
+        c = sqlite3.connect(str(plain))
+        try:
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name LIKE 'Msg_%'")]
+            for tbl in tables:
+                mx = c.execute(
+                    f"SELECT MAX(create_time) FROM [{tbl}]").fetchone()[0] or 0
+                ent = snap["tables"].setdefault(
+                    tbl, {"sids": set(), "shards": []})
+                ent["sids"] |= _server_ids(c, tbl)
+                ent["shards"].append((rel, mx))
+                global_ct[rel] = max(global_ct.get(rel, 0), mx)
+        finally:
+            c.close()
+    snap["active"] = (max(global_ct, key=global_ct.get)
+                      if global_ct else sorted(shards)[0])
+    return snap
+
+
+def _wechat_require_closed():
+    from siwx.discover import find_wechat_pids
+    pids = find_wechat_pids()
+    if pids:
+        raise RestoreError(f"微信正在运行 (pids={pids})——恢复到微信要求完全退出")
+
+
+def _wechat_account_dir(account: str, store: dict, log=print) -> Path:
+    """正身定位：同名多副本按（密钥覆盖, 库数, 最新 mtime）选优。"""
+    from siwx.discover import find_wechat_data_dirs
+    hits = []
+    for w, d in find_wechat_data_dirs():
+        if w != account:
+            continue
+        try:
+            es = collect_db_files(d)
+        except Exception:
+            continue
+        covered = sum(1 for e in es if e.salt_hex in store)
+        try:
+            latest = max((e.path.stat().st_mtime for e in es), default=0)
+        except OSError:
+            latest = 0
+        hits.append((covered, len(es), latest, d))
+    if not hits:
+        raise RestoreError(f"账号 {account[:3]}*** 不在本机微信数据目录中")
+    hits.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+    best = hits[0]
+    if len(hits) > 1:
+        log(f"[restore-wechat] ⚠ 该账号有 {len(hits)} 个数据目录，"
+            f"已选密钥覆盖最高的（{best[0]}/{best[1]} 库）")
+    if not best[1] or best[0] < best[1]:
+        raise RestoreError(
+            f"微信库密钥覆盖 {best[0]}/{best[1]}——请先在控制台完成一次密钥提取")
+    return best[3]
+
+
+def analyze_wechat(stage: dict, log=print) -> dict:
+    """对微信真库做只读 diff（要求微信退出）。"""
+    _wechat_require_closed()
+    payload = stage["dir"] / "payload"
+    manifest = stage["manifest"]
+    account = manifest.get("account") or ""
+    store = keystore.load()
+    db_dir = _wechat_account_dir(account, store, log)
+    work = stage["dir"] / "wechat_probe"
+    snap = _snapshot_wechat_tables(db_dir, store, work)
+    pack_shards = _pack_msg_shards(payload, manifest)
+    rev = _reverse_usernames(payload, manifest, pack_shards)
+    names = _display_names(payload, _out_root() / account)
+
+    pack_tables = {}
+    for sp in pack_shards:
+        c = sqlite3.connect(str(sp))
+        try:
+            for (tbl,) in c.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name LIKE 'Msg_%'"):
+                pack_tables.setdefault(tbl, set()).update(_server_ids(c, tbl))
+        finally:
+            c.close()
+
+    chats, total_pack, total_dup, total_new = [], 0, 0, 0
+    for tbl, sids in pack_tables.items():
+        live = snap["tables"].get(tbl, {"sids": set(), "shards": []})
+        dup = len(sids & live["sids"])
+        ins = len(sids) - dup
+        username = rev.get(tbl, "")
+        chats.append({
+            "username": username,
+            "display": names.get(username, username or tbl[:12] + "…"),
+            "pack_rows": len(sids),
+            "existing": len(live["sids"]),
+            "dup": dup,
+            "to_insert": ins,
+            "table_exists": bool(live["shards"]),
+            "shards": [s for s, _m in live["shards"]],
+        })
+        total_pack += len(sids)
+        total_dup += dup
+        total_new += ins
+    chats.sort(key=lambda e: (-e["to_insert"], e["display"]))
+    return {
+        "stage_id": stage["id"],
+        "account": account,
+        "target": "wechat",
+        "fresh": False,
+        "pack_mode": manifest.get("mode"),
+        "pack_created": manifest.get("created_at"),
+        "chats": chats[:200],
+        "chats_count": len(chats),
+        "total_pack": total_pack,
+        "total_dup": total_dup,
+        "total_insert": total_new,
+        "sessions_new": 0,
+        "contacts_new": 0,
+        "active_shard": snap["active"],
+    }
+
+
+def apply_wechat(stage: dict, chats=None, log=print, progress=None) -> dict:
+    """把包内勾选会话的消息合并进微信源库。chats=None=全部会话。"""
+    prog = progress or (lambda pct, msg: None)
+    _wechat_require_closed()
+    payload = stage["dir"] / "payload"
+    manifest = stage["manifest"]
+    account = manifest.get("account") or ""
+    store = keystore.load()
+    db_dir = _wechat_account_dir(account, store, log)
+    pack_shards = _pack_msg_shards(payload, manifest)
+    rev = _reverse_usernames(payload, manifest, pack_shards)
+    tbl_filter = None
+    if chats is not None:
+        tbl_filter = {msg_table_of(c) for c in chats}
+        pack_tbls = _pack_tables(pack_shards)
+        missing = [c for c in chats if msg_table_of(c) not in pack_tbls]
+        if missing:
+            log(f"[restore-wechat] ⚠ {len(missing)} 个勾选会话在包内没有消息，跳过")
+
+    # 包内行按表聚合（跨包内分片合并 + server_id 去重）
+    pack_rows, pack_senders = {}, {}
+    _si = sid_i()
+    for sp in pack_shards:
+        c = sqlite3.connect(str(sp))
+        try:
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name LIKE 'Msg_%'")]
+            for tbl in tables:
+                if tbl_filter is not None and tbl not in tbl_filter:
+                    continue
+                pack_senders.update(dict(c.execute(
+                    "SELECT rowid, user_name FROM Name2Id").fetchall()))
+                seen = {r[_si] for r in pack_rows.get(tbl, [])}
+                for row in c.execute(
+                        f"SELECT {', '.join(MSG_COLUMNS)} FROM [{tbl}]"):
+                    if row[_si] in seen:
+                        continue
+                    seen.add(row[_si])
+                    pack_rows.setdefault(tbl, []).append(row)
+        finally:
+            c.close()
+
+    # 微信库快照
+    work = stage["dir"] / "wechat_apply"
+    snap = _snapshot_wechat_tables(db_dir, store, work)
+    active = snap["active"]
+
+    # 每张表的目标分片：表已存在 → MAX(create_time) 最新的分片；不存在 → 活跃分片建表
+    plan, created = {}, []
+    for tbl, rows in pack_rows.items():
+        live = snap["tables"].get(tbl)
+        if live and live["shards"]:
+            dest_rel = max(live["shards"], key=lambda s: s[1])[0]
+        else:
+            dest_rel = active
+            created.append(tbl)
+        user = rev.get(tbl, "")
+        plan.setdefault(dest_rel, []).append((tbl, user, rows))
+
+    stats = {"inserted": 0, "dup": 0, "chats": {}, "created_tables": created,
+             "rewrote": [], "session_fixed": 0}
+    prog(10, f"合并 {len(plan)} 个分片…")
+    for i, (rel, items) in enumerate(sorted(plan.items())):
+        entry = snap["entries"][rel]
+        key = bytes.fromhex(store[entry.salt_hex]["key"])
+
+        def mutate(plain, _items=items):
+            acc = {"inserted": 0, "dup": 0, "chats": {}}
+            for tbl, user, rows in _items:
+                _merge_rows_into_plain(plain, tbl, rows, pack_senders,
+                                       user, acc)
+            return acc
+
+        r = _rewrite_wechat_db(entry.path, key, mutate, log=log)
+        stats["inserted"] += r["inserted"]
+        stats["dup"] += r["dup"]
+        for u, v in r["chats"].items():
+            tgt = stats["chats"].setdefault(u, {"inserted": 0, "dup": 0})
+            tgt["inserted"] += v["inserted"]
+            tgt["dup"] += v["dup"]
+        stats["rewrote"].append(rel)
+        prog(10 + int(80 * (i + 1) / len(plan)), f"已合并 {rel}")
+
+    if created:
+        prog(92, "修复会话列表…")
+        stats["session_fixed"] = _fix_wechat_session(
+            db_dir, store, payload, rev, created, log)
+    prog(100, "恢复到微信完成")
+    log(f"[restore-wechat] ✓ 消息 +{stats['inserted']}（重复 {stats['dup']}），"
+        f"重写分片 {len(stats['rewrote'])}，重建表 {len(created)}，"
+        f"会话修复 {stats['session_fixed']}")
+    return stats
+
+
+def _fix_wechat_session(db_dir: Path, store: dict, payload: Path,
+                        rev: dict, created_tables: list, log=print) -> int:
+    """被重建表的会话：SessionTable 行恢复 + SessionDeleteTable 清除。
+    session.db 走同一冷备重写路径。"""
+    ps = payload / "session" / "session.db"
+    if not ps.is_file():
+        return 0
+    c = sqlite3.connect(str(ps))
+    try:
+        cur = c.execute("SELECT * FROM SessionTable")
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    finally:
+        c.close()
+    want_users = {rev[t] for t in created_tables if t in rev}
+    rows = [r for r in rows
+            if r[cols.index("username")] in want_users]
+    if not rows:
+        return 0
+    ent = None
+    for e in collect_db_files(db_dir):
+        if e.rel.replace("\\", "/") == "session/session.db":
+            ent = e
+            break
+    if ent is None:
+        return 0
+    key = bytes.fromhex(store[ent.salt_hex]["key"])
+    n = 0
+
+    def mutate(plain):
+        nonlocal n
+        cc = _conn(plain)
+        try:
+            cc.execute("BEGIN IMMEDIATE")
+            for row in rows:
+                u = row[cols.index("username")]
+                cc.execute("DELETE FROM SessionTable WHERE username=?", (u,))
+                colspec = ", ".join(f"[{x}]" for x in cols)
+                cc.execute(
+                    f"INSERT INTO SessionTable ({colspec}) "
+                    f"VALUES ({', '.join('?' * len(cols))})", row)
+                cc.execute("INSERT OR IGNORE INTO Name2Id(user_name) VALUES(?)",
+                           (u,))
+                cc.execute("DELETE FROM SessionDeleteTable WHERE username=?",
+                           (u,))
+                n += 1
+            cc.execute("COMMIT")
+        finally:
+            _finish(cc)
+        cleanup_sidecars(plain)
+
+    _rewrite_wechat_db(ent.path, key, mutate, log=log)
+    return n

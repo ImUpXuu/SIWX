@@ -75,6 +75,15 @@
   border-bottom: 1px solid var(--line-soft);
 }
 
+/* 微信目标：报告行带勾选列 */
+.b-report-row.has-sel {
+  grid-template-columns: 26px minmax(0, 1fr) 56px 56px 64px;
+}
+
+.b-report-sel { text-align: center; }
+
+.b-report-sel input { accent-color: var(--accent); }
+
 .b-report-row-head {
   color: var(--muted);
   font-weight: 700;

@@ -249,19 +249,32 @@ def cmd_delete(args):
     removed = {}
 
     def mutate(c, stats):
-        rows = c.execute(
-            f"SELECT local_id, server_id, create_time, message_content FROM "
-            f"[{tbl}] WHERE (local_type & 0xFFFF)=1 ORDER BY create_time"
-        ).fetchall()
-        if len(rows) < args.count:
-            die(f"text 行只有 {len(rows)} 条，不够删 {args.count} 条")
-        # 均匀取 3 条（头/中/尾），删除更醒目
-        step = max(1, len(rows) // args.count)
-        picks = [rows[i * step] for i in range(args.count)]
-        for lid, sid, ctime, content in picks:
+        if args.sids:
+            # 指定消息删除：按 server_id 后 6 位匹配（跨库唯一，需校验唯一性）
+            wanted = [s.strip() for s in args.sids.split(",") if s.strip()]
+            allrows = c.execute(
+                f"SELECT local_id, server_id, create_time, message_content, "
+                f"local_type FROM [{tbl}]").fetchall()
+            picks = []
+            for w in wanted:
+                hit = [r for r in allrows if str(r[1]).endswith(w)]
+                if len(hit) != 1:
+                    die(f"server_id 后缀 {w} 命中 {len(hit)} 条（需唯一）")
+                picks.append(hit[0])
+        else:
+            rows = c.execute(
+                f"SELECT local_id, server_id, create_time, message_content, "
+                f"local_type FROM [{tbl}] WHERE (local_type & 0xFFFF)=1 "
+                f"ORDER BY create_time").fetchall()
+            if len(rows) < args.count:
+                die(f"text 行只有 {len(rows)} 条，不够删 {args.count} 条")
+            step = max(1, len(rows) // args.count)
+            picks = [rows[i * step] for i in range(args.count)]
+        for lid, sid, ctime, content, ltype in picks:
             c.execute(f"DELETE FROM [{tbl}] WHERE local_id=?", (lid,))
-            removed[str(sid)] = {"create_time": ctime,
-                                 "preview": (content or "")[:24]}
+            removed[str(sid)] = {
+                "create_time": ctime, "local_type": ltype,
+                "preview": (content or b"").decode("utf-8", "replace")[:24]}
         stats["deleted"] = len(picks)
 
     rewrite_db(target, key, mutate)
@@ -438,6 +451,8 @@ def main():
     d = sub.add_parser("delete")
     d.add_argument("--chat", required=True)
     d.add_argument("--count", type=int, default=3)
+    d.add_argument("--sids", default=None,
+                   help="逗号分隔的 server_id 后 6 位（指定删除；与 --count 二选一）")
     d.set_defaults(fn=cmd_delete)
     a = sub.add_parser("analyze")
     a.add_argument("--pack", required=True)

@@ -20,7 +20,14 @@ let pollTimer = null;
 let pendingPayload = null;      // 等待 kill 确认的请求体
 let rStage = null;              // 恢复：analyze 返回的 stage_id
 let rPollTimer = null;
+let rTargetPack = null;         // 恢复：分析的包路径
+let rPendingApply = null;       // 等待 kill 确认的恢复请求体
 const avaFailed = new Set();
+
+function rTarget() {
+  const r = document.querySelector('input[name="r-target"]:checked');
+  return r ? r.value : 'cache';
+}
 
 /* ── 公共 ─────────────────────────────────────────── */
 
@@ -35,6 +42,17 @@ function fmtSize(n) {
   if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
   if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
   return n + ' B';
+}
+
+function rResultText(res) {
+  if (res.mode === 'install') return `全新安装 ${res.files} 个文件，刷新聊天查看页可见`;
+  const parts = [`消息 +${res.inserted}（跳过重复 ${res.dup}）`];
+  if (res.rewrote) parts.push(`重写微信分片 ${res.rewrote.length} 个`);
+  if (res.created_tables && res.created_tables.length) parts.push(`重建会话表 ${res.created_tables.length} 张`);
+  if (res.session_fixed) parts.push(`会话列表修复 ${res.session_fixed}`);
+  if (res.sessions != null) parts.push(`会话行 ${res.sessions}`);
+  if (res.contacts != null) parts.push(`联系人 +${res.contacts}`);
+  return parts.join(' · ');
 }
 
 function action() {
@@ -138,6 +156,7 @@ function showKillDialog(pids) {
 function hideKillDialog() {
   el('b-kill-mask').classList.add('hidden');
   pendingPayload = null;
+  rPendingApply = null;
 }
 
 async function startBackup(allowKill) {
@@ -298,8 +317,9 @@ async function onAnalyze(path, btn) {
     const rep = await fetchJSON('/api/backup/restore/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, password: pw }),
+      body: JSON.stringify({ path, password: pw, target: rTarget() }),
     });
+    rTargetPack = path;
     renderReport(rep, path);
   } catch (e) {
     toast(`分析失败：${e.message}`, true);
@@ -309,17 +329,29 @@ async function onAnalyze(path, btn) {
   }
 }
 
+function rSelectedChats() {
+  if (rTarget() !== 'wechat') return null;          // 缓存库恢复不勾选（全量语义）
+  const boxes = [...document.querySelectorAll('.r-chat-sel')];
+  if (!boxes.length) return null;                   // 没有勾选 UI = 全部
+  const picked = boxes.filter(b => b.checked).map(b => b.dataset.u);
+  return picked.length ? picked : [];               // 全不勾 = 明确的空选择
+}
+
 function renderReport(rep, path) {
   rStage = rep.stage_id;
+  const wechat = rep.target === 'wechat';
   el('r-report-card').classList.remove('hidden');
   el('r-apply-card').classList.add('hidden');
-  const meta = `${Path_name(path)} · ${rep.pack_mode === 'full' ? '全量' : '自定义'}包 · ${rep.pack_created || ''}`;
+  const meta = `${Path_name(path)} · ${rep.pack_mode === 'full' ? '全量' : '自定义'}包 · ${rep.pack_created || ''}`
+    + (wechat ? ' · 目标：微信源库' : '');
   el('r-report-meta').textContent = meta;
 
   if (rep.fresh) {
     el('r-report-summary').innerHTML = `
-      <div class="b-ok">目标账号（${esc(rep.account.slice(0, 6))}***）在本机还没有缓存库</div>
-      <div class="hint">确认后将<b>全新安装</b>：包内 ${rep.total_pack} 条消息与全部会话/联系人直接落地为可浏览的档案账号。</div>`;
+      <div class="b-ok">目标账号（${esc(rep.account.slice(0, 6))}***）在本机还没有${wechat ? '微信数据目录' : '缓存库'}</div>
+      <div class="hint">${wechat
+        ? '全新微信设备场景：确认后将把包内数据<b>直接写入微信</b>（含会话列表修复）——实验性，建议先用小号验证。'
+        : '确认后将<b>全新安装</b>：包内 ' + rep.total_pack + ' 条消息与全部会话/联系人直接落地为可浏览的档案账号。'}</div>`;
     el('r-report-chats').innerHTML = '';
     return;
   }
@@ -328,20 +360,25 @@ function renderReport(rep, path) {
     <div class="b-report-line">
       包内消息 <b>${rep.total_pack}</b> 条 ·
       <span class="b-dup">已存在（跳过）${rep.total_dup}</span> ·
-      <span class="b-new">将恢复 ${rep.total_insert}</span> ·
-      新会话行 ${rep.sessions_new} · 新联系人 ${rep.contacts_new}
+      <span class="b-new">将恢复 ${rep.total_insert}</span>
+      ${wechat ? '' : `· 新会话行 ${rep.sessions_new} · 新联系人 ${rep.contacts_new}`}
     </div>
     ${rep.total_insert === 0
-      ? '<div class="hint">包内消息已全部存在于缓存库——无需恢复（重复执行是安全的，结果不变）。</div>'
-      : '<div class="hint">确认后：消息合入专用恢复分片（重新解密不会覆盖），会话摘要与联系人按用户名合并；被改写文件先自动冷备。</div>'}`;
+      ? '<div class="hint">包内消息已全部存在于目标库——无需恢复（重复执行是安全的，结果不变）。</div>'
+      : (wechat
+        ? '<div class="hint">确认后：消息直接合并进微信源库对应分片（要求微信已退出，恢复期间 SIWX 会替你终止它）；被改写文件先自动冷备、可回滚。已在下方勾选有差异的联系人，可自行调整。</div>'
+        : '<div class="hint">确认后：消息合入专用恢复分片（重新解密不会覆盖），会话摘要与联系人按用户名合并；被改写文件先自动冷备。</div>')}`;
 
   const rows = (rep.chats || []).slice(0, 30);
+  const rowCls = wechat ? 'b-report-row has-sel' : 'b-report-row';
   el('r-report-chats').innerHTML = rows.length ? `
-    <div class="b-report-head">会话（按将恢复条数排序，前 ${rows.length}/${rep.chats_count}）</div>
-    <div class="b-report-row b-report-row-head">
-      <span>会话</span><span>包内</span><span>已有</span><span>将恢复</span>
+    <div class="b-report-head">${wechat ? '联系人（勾选要恢复的）' : '会话'}（按将恢复条数排序，前 ${rows.length}/${rep.chats_count}）</div>
+    <div class="${rowCls} b-report-row-head">
+      ${wechat ? '<span class="b-report-sel"></span>' : ''}
+      <span>${wechat ? '联系人' : '会话'}</span><span>包内</span><span>已有</span><span>将恢复</span>
     </div>` + rows.map(c => `
-    <div class="b-report-row">
+    <div class="${rowCls}">
+      ${wechat ? `<span class="b-report-sel"><input type="checkbox" class="r-chat-sel" data-u="${esc(c.username)}" ${c.to_insert > 0 ? 'checked' : ''}></span>` : ''}
       <span class="b-report-name">${esc(c.display)}</span>
       <span>${c.pack_rows}</span>
       <span class="b-dup">${c.dup}</span>
@@ -353,20 +390,66 @@ function Path_name(p) {
   return String(p).split(/[\\/]/).pop();
 }
 
-function onCancelRestore() {
-  rStage = null;
-  el('r-report-card').classList.add('hidden');
-}
-
-async function onApply() {
-  if (!rStage) return;
+async function startRestoreApply(allowKill) {
+  const body = rPendingApply
+    ? { ...rPendingApply, allowKill: true }
+    : { stage_id: rStage, target: rTarget(), chats: rSelectedChats() };
   try {
     const r = await fetchJSON('/api/backup/restore/apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stage_id: rStage }),
+      body: JSON.stringify(body),
     });
+    if (r.needKill) { rPendingApply = body; return; }
+    rPendingApply = null;
+    el('r-apply-card').classList.remove('hidden');
+    el('r-log').innerHTML = '';
+    el('r-result').innerHTML = '';
+    startRestorePolling();
+  } catch (e) {
+    rPendingApply = null;
+    toast(`恢复启动失败：${e.message}`, true);
+  }
+}
+
+function onCancelRestore() {
+  rStage = null;
+  rPendingApply = null;
+  el('r-report-card').classList.add('hidden');
+}
+
+function rTargetHint() {
+  return rTarget() === 'wechat'
+    ? '恢复到微信源库：消息直接合并进微信对应分片（要求微信完全退出，分析/恢复前 SIWX 会提示确认）；被改写文件自动冷备、可回滚。目前仅恢复文本与包内已有类型，表情/媒体文件不回填。'
+    : '恢复只写 SIWX 的缓存库（output/）：消息合入专用恢复分片（重新解密不会覆盖），会话与联系人按用户名合并；全程不读写微信数据目录。';
+}
+
+async function onApply() {
+  if (!rStage) return;
+  const chats = rSelectedChats();
+  if (chats && chats.length === 0) {
+    toast('没有勾选任何联系人——请至少勾选一个，或点取消', true);
+    return;
+  }
+  const body = { stage_id: rStage, target: rTarget(), chats };
+  try {
+    const r = await fetchJSON('/api/backup/restore/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.needKill) {
+      rPendingApply = body;
+      el('b-kill-title').textContent = '恢复到微信需要先退出微信';
+      el('b-kill-text').innerHTML = '检测到微信正在运行（进程 <span class="b-kill-pids" id="b-kill-pids"></span>）。'
+        + '把消息合并进微信源库必须在其完全退出后进行。';
+      el('b-kill-pids').textContent = (r.pids || []).join(', ');
+      el('b-kill-mask').classList.remove('hidden');
+      return;
+    }
     if (!r.started) throw new Error(r.error || '启动失败');
+    el('b-kill-mask').classList.add('hidden');
+    rPendingApply = null;
     el('r-apply-card').classList.remove('hidden');
     el('r-log').innerHTML = '';
     el('r-result').innerHTML = '';
@@ -408,8 +491,8 @@ async function rPoll() {
       const res = st.result || {};
       if (st.ok) {
         el('r-result').innerHTML = `
-          <div class="b-ok">✓ 恢复完成（${res.mode === 'install' ? `全新安装 ${res.files} 个文件` : `消息 +${res.inserted}（跳过重复 ${res.dup}）· 会话 ${res.sessions} · 联系人 +${res.contacts}`}）</div>
-          <div class="hint">聊天查看页刷新后即可看到恢复的会话。</div>`;
+          <div class="b-ok">✓ 恢复完成${res.target === 'wechat' || res.rewrote ? '（微信源库）' : ''}</div>
+          <div class="hint">${esc(rResultText(res))}</div>`;
         el('r-pw').value = '';
       } else {
         el('r-result').innerHTML = `<div class="b-fail">✗ ${esc(st.error || '恢复失败')}</div>`;
@@ -435,6 +518,12 @@ async function init() {
 
   document.querySelectorAll('input[name="b-action"]').forEach(r =>
     r.addEventListener('change', applyAction));
+  document.querySelectorAll('input[name="r-target"]').forEach(r =>
+    r.addEventListener('change', () => {
+      el('r-target-hint').textContent = rTargetHint();
+      // 切目标后旧报告失效（diff 基准不同）
+      onCancelRestore();
+    }));
   document.querySelectorAll('input[name="b-mode"]').forEach(r =>
     r.addEventListener('change', applyMode));
   el('e-sessions').addEventListener('change', (e) => {
@@ -462,8 +551,18 @@ async function init() {
     applyMode();
   });
   el('b-run').addEventListener('click', onRun);
-  el('b-kill-yes').addEventListener('click', () => { hideKillDialog(); startBackup(true); });
-  el('b-kill-no').addEventListener('click', () => { hideKillDialog(); toast('请手动退出微信后再点「开始备份」'); });
+  el('b-kill-yes').addEventListener('click', () => {
+    const applyPending = !!rPendingApply;
+    hideKillDialog();
+    if (applyPending) startRestoreApply(true);
+    else startBackup(true);
+  });
+  el('b-kill-no').addEventListener('click', () => {
+    hideKillDialog();
+    toast(action() === 'restore' || rPendingApply
+      ? '请手动退出微信后再点「确认恢复」'
+      : '请手动退出微信后再点「开始备份」');
+  });
   el('b-packs').addEventListener('click', (e) => {
     const ana = e.target.closest('button[data-analyze]');
     if (ana) { onAnalyze(ana.dataset.analyze, ana); return; }

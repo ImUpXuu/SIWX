@@ -205,32 +205,61 @@ def _pack_path_in_exports(raw: str) -> Path:
 
 @bp.post("/restore/analyze")
 def restore_analyze():
-    """阶段 1+2：验密码解包到暂存目录 + 只读 diff 报告（不写缓存库）。"""
+    """阶段 1+2：验密码解包到暂存目录 + 只读 diff 报告（不写任何库）。
+
+    target: cache（默认，对 SIWX 缓存库）| wechat（对微信源库，要求微信退出）。
+    """
     from siwx import restore as _restore
     data = request.get_json(silent=True) or {}
     password = data.get("password")
     if not isinstance(password, str) or not password:
         return jsonify({"error": "请输入备份密码"}), 400
+    target = data.get("target") or "cache"
+    if target not in ("cache", "wechat"):
+        return jsonify({"error": f"未知恢复目标: {target}"}), 400
     try:
-        target = _pack_path_in_exports(data.get("path", ""))
+        target_path = _pack_path_in_exports(data.get("path", ""))
     except FileNotFoundError as e:
         return jsonify({"error": str(e)}), 404
     try:
-        stage = _restore.stage_pack(target, password)
-        report = _restore.analyze(stage)
-    except Exception as e:  # noqa: BLE001 — 密码错/包损坏统一回到前端提示
+        stage = _restore.stage_pack(target_path, password)
+        if target == "wechat":
+            report = _restore.analyze_wechat(stage)
+        else:
+            report = _restore.analyze(stage)
+    except Exception as e:  # noqa: BLE001 — 密码错/包损坏/微信未退出统一回前端
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 400
     return jsonify(report)
 
 
 @bp.post("/restore/apply")
 def restore_apply():
-    """阶段 3：把暂存的包合入缓存库（apply 前目标文件已冷备）。"""
+    """阶段 3：把暂存的包写入目标。
+
+    target=cache：合入缓存库（不碰微信）。
+    target=wechat：合并进微信源库——两段式确认（微信在跑时返回 needKill，
+    用户允许后带 allowKill 重发，后端负责优雅终止微信再执行）；
+    chats: username 数组（None=全部）。
+    """
     from siwx import restore as _restore
+    from siwx.discover import find_wechat_pids
     data = request.get_json(silent=True) or {}
     stage_id = data.get("stage_id")
     if not stage_id:
         return jsonify({"error": "缺少 stage_id（先执行分析）"}), 400
+    target = data.get("target") or "cache"
+    if target not in ("cache", "wechat"):
+        return jsonify({"error": f"未知恢复目标: {target}"}), 400
+    chats = data.get("chats") or None
+    if chats is not None and not (isinstance(chats, list)
+                                  and all(isinstance(c, str) and c for c in chats)):
+        return jsonify({"error": "chats 需为 username 字符串数组"}), 400
+
+    if target == "wechat":
+        pids = [int(p) for p in find_wechat_pids()]
+        if pids and not data.get("allowKill"):
+            return jsonify({"needKill": True, "pids": pids})
+
     try:
         stage = _restore.load_stage(stage_id)
     except _restore.RestoreError as e:
@@ -256,7 +285,41 @@ def restore_apply():
     def runner():
         import shutil as _shutil
         try:
-            result = _restore.apply(stage, log=jlog, progress=progress)
+            if target == "wechat":
+                # 用户已通过两段式确认；此处负责把微信送走（优雅优先）
+                pids = find_wechat_pids()
+                if pids:
+                    jlog(f"终止微信进程 {pids}…")
+                    import platform
+                    import subprocess as _sp
+                    import os as _os
+                    if platform.system() == "Windows":
+                        for pid in pids:
+                            _sp.run(["taskkill", "/PID", str(pid)],
+                                    capture_output=True)
+                    else:
+                        import signal
+                        for pid in pids:
+                            try:
+                                _os.kill(pid, signal.SIGTERM)
+                            except (ProcessLookupError, PermissionError):
+                                pass
+                    import time as _time
+                    t0 = _time.time()
+                    while find_wechat_pids() and _time.time() - t0 < 20:
+                        _time.sleep(0.5)
+                    left = find_wechat_pids()
+                    if left:
+                        for pid in left:
+                            _sp.run(["taskkill", "/F", "/PID", str(pid)],
+                                    capture_output=True)
+                        _time.sleep(2)
+                    if find_wechat_pids():
+                        raise RuntimeError("无法终止微信进程，恢复中止")
+                result = _restore.apply_wechat(stage, chats=chats,
+                                               log=jlog, progress=progress)
+            else:
+                result = _restore.apply(stage, log=jlog, progress=progress)
             with _restore_lock:
                 _restore_job.update({"ok": True, "result": result})
             jlog("恢复完成")
@@ -273,7 +336,7 @@ def restore_apply():
                 _restore_job["done"] = True
 
     threading.Thread(target=runner, daemon=True).start()
-    return jsonify({"started": True})
+    return jsonify({"started": True, "target": target})
 
 
 @bp.get("/restore/status")

@@ -334,6 +334,14 @@ def encrypt_database(src: Path, dst: Path, enc_key: bytes, salt: bytes = None,
         head = fin.read(PAGE_SZ)
         if head[:len(SQLITE_HDR)] != SQLITE_HDR:
             raise ValueError(f"不是 SQLite 明文库 src={src.name}")
+        # 页布局防线：SQLCipher 解密产物的 reserved 恒为 80（header offset 20），
+        # 加密按「数据区 4016 + reserve 80」切分。reserved 非 80 的 SQLite 库
+        # （原生建的默认 0）页尾 80 字节是真实数据——照常加密会静默砍掉它
+        # （实测 fixture 库 malformed）。硬拒绝，防止把损坏库写回微信。
+        if head[20] != RESERVE_SZ:
+            raise ValueError(
+                f"明文库 header reserved={head[20]}（应为 {RESERVE_SZ}）"
+                f"——不是 SQLCipher 解密产物，拒绝加密 src={src.name}")
         mac_key = _mac_key(enc_key, salt)
 
         dst.parent.mkdir(parents=True, exist_ok=True)

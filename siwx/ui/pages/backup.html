@@ -77,13 +77,27 @@
 <!-- ═══ 恢复备份 ═══ -->
 <div id="b-restore-panel" class="hidden">
   <div class="card">
+    <div class="card-head"><h2>恢复目标</h2><span class="hint">先分析看差异，确认后才写入</span></div>
+    <div class="b-modes" id="r-targets">
+      <label class="b-mode">
+        <input type="radio" name="r-target" value="cache" checked>
+        <span class="b-mode-body"><b>恢复到 SIWX 缓存库</b><i>只写 output/ 的档案库，可离线浏览；全程不碰微信</i></span>
+      </label>
+      <label class="b-mode">
+        <input type="radio" name="r-target" value="wechat">
+        <span class="b-mode-body"><b>恢复到微信源库</b><i>消息合并回微信本体（要求退出微信）；消息合入专用分片，被改写文件先冷备</i></span>
+      </label>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-head"><h2>选择备份包</h2><span class="hint">仅支持 exports/ 目录内的 .siwxpack</span></div>
     <div id="b-packs"><div class="b-empty-list">暂无备份包</div></div>
     <div class="f-grid2 b-gap">
       <label>备份密码<input type="password" id="r-pw" class="b-pw" placeholder="解包密码" autocomplete="off"></label>
       <label>&nbsp;</label>
     </div>
-    <div class="hint">恢复只写 SIWX 的缓存库（output/）：消息合入专用恢复分片（重新解密不会覆盖），会话与联系人按用户名合并；全程不读写微信数据目录。</div>
+    <div class="hint" id="r-target-hint">恢复只写 SIWX 的缓存库（output/）：消息合入专用恢复分片（重新解密不会覆盖），会话与联系人按用户名合并；全程不读写微信数据目录。</div>
   </div>
 
   <div class="card hidden" id="r-report-card">
@@ -106,8 +120,8 @@
 
 <div class="b-kill-mask hidden" id="b-kill-mask">
   <div class="b-kill-dialog">
-    <h3>需要先退出微信</h3>
-    <p>检测到微信正在运行（进程 <span class="b-kill-pids" id="b-kill-pids"></span>）。
+    <h3 id="b-kill-title">需要先退出微信</h3>
+    <p id="b-kill-text">检测到微信正在运行（进程 <span class="b-kill-pids" id="b-kill-pids"></span>）。
       备份要求快照一致，必须先让微信完全退出。</p>
     <p class="b-kill-sub">是否允许 SIWX 现在终止微信进程？会先尝试优雅退出，超时才强制结束。</p>
     <div class="b-kill-btns">
