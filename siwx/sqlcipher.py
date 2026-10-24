@@ -44,13 +44,22 @@ def mask_key(k: str) -> str:
     return f"{k[:6]}…{k[-4:]}"
 
 
+def _mac_key(enc_key: bytes, salt: bytes) -> bytes:
+    """页 HMAC 密钥：PBKDF2-HMAC-SHA512(enc_key, salt^0x3A, 2) → 32 字节。
+
+    与 verify_enc_key 同一套参数——加解密两侧必须共用，否则 WeChat 认不出
+    写出来的库。
+    """
+    mac_salt = bytes(b ^ 0x3A for b in salt)
+    return hashlib.pbkdf2_hmac("sha512", enc_key, mac_salt, 2, dklen=KEY_SZ)
+
+
 def verify_enc_key(enc_key: bytes, page1: bytes) -> bool:
     """SQLCipher 4 page-1 HMAC 校验（恒时比较）。"""
     if len(page1) < PAGE_SZ:
         return False
     salt = page1[:SALT_SZ]
-    mac_salt = bytes(b ^ 0x3A for b in salt)
-    mac_key = hashlib.pbkdf2_hmac("sha512", enc_key, mac_salt, 2, dklen=KEY_SZ)
+    mac_key = _mac_key(enc_key, salt)
     hmac_data = page1[SALT_SZ: PAGE_SZ - RESERVE_SZ + IV_SZ]
     stored = page1[PAGE_SZ - HMAC_SZ:]
     hm = hmac.new(mac_key, hmac_data, hashlib.sha512)
@@ -278,5 +287,105 @@ def decrypt_database(src: Path, dst: Path, enc_key: bytes, progress=None) -> int
         if tmp_out is not None:
             try:
                 tmp_out.unlink(missing_ok=True)   # 失败路径清理半成品
+            except OSError:
+                pass
+
+
+def encrypt_database(src: Path, dst: Path, enc_key: bytes, salt: bytes = None,
+                     progress=None) -> int:
+    """流式整库加密：明文 SQLite → SQLCipher 4 密文（decrypt_database 的逆运算）。
+
+    写入微信源库时**必须传原库的 salt**：salt 是密钥库的主键（keystore 以
+    salt_hex 索引密钥），salt 变了等于给同一个库换了个身份——密钥库条目、
+    缓存清单全部对不上。加密器不替调用方做这个决定，由调用方显式传入。
+
+    页面布局（与 decrypt_database 严格对称）：
+      第 1 页：[salt 16][密文 4000][reserve: IV 16 + HMAC 64]
+      其余页：[密文 4016][reserve: IV 16 + HMAC 64]
+      密文区 = AES-256-CBC(body)，IV 每页随机；HMAC-SHA512 覆盖
+      「密文 + IV」（页 1 从 salt 之后开始），末尾追加小端页号。
+
+    明文侧：reserve 区保持 SQLite 的 80 字节保留空间（零），故明文页长
+    4096、数据区 4016（第 1 页前 16 字节是 "SQLite format 3\\0" 文件头）。
+
+    返回总页数。写入同样是「临时文件 + 原子替换」，中途失败不会留下半个
+    目标文件。
+    """
+    from Crypto.Cipher import AES
+
+    src = Path(src)
+    dst = Path(dst)
+    if len(enc_key) != KEY_SZ:
+        raise ValueError("密钥长度不是 32 字节")
+    if salt is None:
+        salt = os.urandom(SALT_SZ)
+    if len(salt) != SALT_SZ:
+        raise ValueError("salt 长度不是 16 字节")
+
+    tmp_out = None
+    try:
+        fin = open(src, "rb", buffering=8 * 1024 * 1024)
+    except OSError as e:
+        raise OSError(f"打开明文库失败 src={src}: {e}") from e
+    try:
+        size = os.fstat(fin.fileno()).st_size
+        if size < PAGE_SZ:
+            raise ValueError("明文库不足一页")
+        head = fin.read(PAGE_SZ)
+        if head[:len(SQLITE_HDR)] != SQLITE_HDR:
+            raise ValueError(f"不是 SQLite 明文库 src={src.name}")
+        # 页布局防线：SQLCipher 解密产物的 reserved 恒为 80（header offset 20），
+        # 加密按「数据区 4016 + reserve 80」切分。reserved 非 80 的 SQLite 库
+        # （原生建的默认 0）页尾 80 字节是真实数据——照常加密会静默砍掉它
+        # （实测 fixture 库 malformed）。硬拒绝，防止把损坏库写回微信。
+        if head[20] != RESERVE_SZ:
+            raise ValueError(
+                f"明文库 header reserved={head[20]}（应为 {RESERVE_SZ}）"
+                f"——不是 SQLCipher 解密产物，拒绝加密 src={src.name}")
+        mac_key = _mac_key(enc_key, salt)
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        total_pages = (size + PAGE_SZ - 1) // PAGE_SZ
+        fd, _tmp_name = tempfile.mkstemp(prefix=dst.name + ".", suffix=".enc.part",
+                                        dir=dst.parent)
+        os.close(fd)
+        tmp_out = Path(_tmp_name)
+        try:
+            fout = open(tmp_out, "wb", buffering=8 * 1024 * 1024)
+        except OSError as e:
+            raise OSError(f"输出临时文件创建失败 dst={dst}: {e}") from e
+
+        with fout:
+            # 第 1 页：数据区跳过 16 字节 SQLite 文件头
+            iv = os.urandom(IV_SZ)
+            body = head[SALT_SZ: PAGE_SZ - RESERVE_SZ]
+            ct = AES.new(enc_key, AES.MODE_CBC, iv).encrypt(body)
+            hm = hmac.new(mac_key, ct + iv, hashlib.sha512)
+            hm.update(struct.pack("<I", 1))
+            fout.write(salt + ct + iv + hm.digest())
+            if progress:
+                progress(1, total_pages)
+
+            for pgno, chunk in enumerate(iter(lambda: fin.read(PAGE_SZ), b""), start=2):
+                if len(chunk) < PAGE_SZ:
+                    chunk = chunk + b"\x00" * (PAGE_SZ - len(chunk))
+                iv = os.urandom(IV_SZ)
+                body = chunk[:PAGE_SZ - RESERVE_SZ]
+                ct = AES.new(enc_key, AES.MODE_CBC, iv).encrypt(body)
+                hm = hmac.new(mac_key, ct + iv, hashlib.sha512)
+                hm.update(struct.pack("<I", pgno))
+                fout.write(ct + iv + hm.digest())
+                if progress and pgno % 100 == 0:
+                    progress(pgno, total_pages)
+            if progress:
+                progress(total_pages, total_pages)
+        os.replace(tmp_out, dst)   # 原子替换
+        tmp_out = None
+        return total_pages
+    finally:
+        fin.close()
+        if tmp_out is not None:
+            try:
+                tmp_out.unlink(missing_ok=True)
             except OSError:
                 pass

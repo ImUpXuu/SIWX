@@ -2,10 +2,14 @@
 
 On macOS WeChat 4.1.x (verified on 4.1.13), raw keys are no longer cached in
 memory, only a 32-byte passphrase remains. This strategy uses LLDB to set a
-breakpoint on sqlite3_key / sqlite3_key_v2, captures the passphrase, then
-derives per-database keys using PBKDF2-SHA512 (256000 iterations).
+breakpoint on sqlite3_key / sqlite3_key_v2 and captures the passphrase **while
+WeChat is logging in** — login is when WeChat opens all its databases and the
+key material passes through sqlite3_key. It then derives per-database keys
+using PBKDF2-SHA512 (256000 iterations). An already-logged-in, long-running
+WeChat never hits the breakpoint: keys are captured during login only.
 
-Requires: macOS + lldb CLI + WeChat logged in.
+Requires: macOS + lldb CLI + WeChat logging in (re-login within the capture
+window; an already-running logged-in session is not enough).
 """
 import hashlib
 import os

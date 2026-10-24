@@ -194,7 +194,7 @@ HEX_RE = re.compile(rb"x'([0-9a-fA-F]{64,192})'")
 
 **原理**:
 1. 使用 LLDB 在 `wechat.dylib` 的 `sqlite3_key` / `sqlite3_key_v2` 函数上设断点
-2. 等微信打开数据库时，从寄存器中捕获 32 字节 passphrase
+2. **在微信登录期间**（登录一刻微信会新建全部数据库连接）从寄存器中捕获 32 字节 passphrase——密钥只在登录期间抓取，已登录跑着的微信不会再触发
 3. 用 PBKDF2-SHA512（256000 次迭代，salt 取自每个数据库文件前 16 字节）为每个数据库派生独立密钥
 4. 用 SQLCipher 4 的 page-1 HMAC 验证派生密钥的正确性
 

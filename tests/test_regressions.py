@@ -4853,5 +4853,830 @@ class TestConvertDirReport(unittest.TestCase):
         self.assertEqual(convert_dir(self.root, ["md"]), 0)
 
 
+class TestEncryptDatabase(unittest.TestCase):
+    """加密器（decrypt_database 的逆运算）回归。
+
+    写入微信源库的功能依赖"加密产物能被现有解密器读回"，因此这里的守门
+    指标是**往返字节等价**与**页级布局对称**，而不是加密学本身。
+    """
+
+    @staticmethod
+    def _plain(pages=3, tail=0):
+        """构造一份「解密产物形态」的明文：SQLite 头 + 确定性伪随机页内容，
+        每页末 80 字节（reserve 区）为零 —— 与 decrypt_database 的输出一致。"""
+        import hashlib as _h
+        buf = bytearray()
+        buf += b"SQLite format 3\x00"
+        total = pages * 4096
+        while len(buf) < total:
+            buf += _h.sha256(bytes(buf)).digest()
+        buf = buf[:total]
+        buf[20] = 80                    # reserved=80，过 encrypt_database 校验
+        for pg in range(pages):
+            off = pg * 4096
+            if off + 4096 <= len(buf):
+                buf[off + 4016: off + 4096] = b"\x00" * 80
+        if tail:
+            buf += b"\xAB" * tail
+        return bytes(buf)
+
+    def test_round_trip_is_byte_identical(self):
+        from siwx.sqlcipher import decrypt_database, encrypt_database
+        plain = self._plain(3)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            src, enc, back = td / "p.db", td / "e.db", td / "b.db"
+            src.write_bytes(plain)
+            key = bytes(range(32))
+            salt = bytes(range(16, 32))
+            pages = encrypt_database(src, enc, key, salt=salt)
+            self.assertEqual(pages, 3)
+            decrypt_database(enc, back, key)
+            self.assertEqual(back.read_bytes(), plain)
+
+    def test_hmac_verifies_and_salt_preserved(self):
+        """加密产物必须能通过现有 HMAC 校验，且 salt 原样保留。
+
+        salt 是密钥库的主键（keystore 以 salt_hex 索引密钥）：写回微信源库
+        时 salt 变了，等于给同一个库换了个身份，密钥库与缓存清单全部对不上。
+        """
+        from siwx.sqlcipher import encrypt_database, verify_enc_key
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            src, enc = td / "p.db", td / "e.db"
+            src.write_bytes(self._plain(2))
+            key = bytes(range(32))
+            salt = bytes(range(16, 32))
+            encrypt_database(src, enc, key, salt=salt)
+            raw = enc.read_bytes()
+            self.assertTrue(verify_enc_key(key, raw[:4096]))
+            self.assertEqual(raw[:16], salt)
+
+    def test_layout_is_symmetric_to_decrypt_side(self):
+        """页内布局必须与解密侧严格对称：
+        页 1 = salt(16) + ct(4000) + IV(16) + HMAC(64)
+        其余 = ct(4016) + IV(16) + HMAC(64)
+        """
+        import hashlib as _h
+        import hmac as _hm
+        import struct as _st
+        from siwx.sqlcipher import encrypt_database
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            src, enc = td / "p.db", td / "e.db"
+            src.write_bytes(self._plain(3))
+            key = bytes(range(32))
+            salt = bytes(range(16, 32))
+            encrypt_database(src, enc, key, salt=salt)
+            raw = enc.read_bytes()
+            self.assertEqual(len(raw), 3 * 4096)
+            # 页 1：IV 在 4016，HMAC 在 4032
+            self.assertEqual(len(raw[16:4016]), 4000)
+            self.assertEqual(len(raw[4016:4032]), 16)
+            self.assertEqual(len(raw[4032:4096]), 64)
+            # 页 2：密文区从 0 开始
+            self.assertEqual(len(raw[4096:4096 + 4016]), 4016)
+            # HMAC 覆盖「密文 + IV」，末尾追加小端页号（实测确认的口径）
+            mac_salt = bytes(b ^ 0x3A for b in salt)
+            mac_key = _h.pbkdf2_hmac("sha512", key, mac_salt, 2, dklen=32)
+            pg2 = raw[4096:8192]
+            hm = _hm.new(mac_key, pg2[:4032], _h.sha512)
+            hm.update(_st.pack("<I", 2))
+            self.assertTrue(_hm.compare_digest(hm.digest(), pg2[4032:4096]))
+
+    def test_partial_tail_page_is_padded(self):
+        """末页不足一页时按整页补零（与解密侧行为对称）。"""
+        from siwx.sqlcipher import decrypt_database, encrypt_database
+        plain = self._plain(2, tail=100)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            src, enc, back = td / "p.db", td / "e.db", td / "b.db"
+            src.write_bytes(plain)
+            key = bytes(range(32))
+            pages = encrypt_database(src, enc, key, salt=bytes(range(16)))
+            self.assertEqual(pages, 3)
+            decrypt_database(enc, back, key)
+            got = back.read_bytes()
+            self.assertEqual(got[:len(plain)], plain)
+            self.assertEqual(got[len(plain):], b"\x00" * (4096 - 100))
+
+    def test_rejects_non_sqlite_plaintext(self):
+        from siwx.sqlcipher import encrypt_database
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            src = td / "x.bin"
+            src.write_bytes(b"NOT-A-SQLITE" + b"\x00" * 5000)
+            with self.assertRaises(ValueError):
+                encrypt_database(src, td / "e.db", bytes(range(32)))
+
+    def test_rejects_wrong_key_length(self):
+        from siwx.sqlcipher import encrypt_database
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            src = td / "p.db"
+            src.write_bytes(self._plain(1))
+            with self.assertRaises(ValueError):
+                encrypt_database(src, td / "e.db", b"short-key")
+
+
+class TestSiwxPack(unittest.TestCase):
+    """SIWXPAK1 加密备份容器：往返/错密码/截断/篡改/路径白名单。"""
+
+    PW = "correct horse battery staple"
+
+    @staticmethod
+    def _mkfile(p: Path, size: int, seed=b"x") -> Path:
+        import hashlib as _h
+        buf = bytearray()
+        while len(buf) < size:
+            buf += _h.sha256(seed + bytes([len(buf) % 251])).digest()
+        p.write_bytes(bytes(buf[:size]))
+        return p
+
+    def test_round_trip_multi_frame(self):
+        from siwx.pack import read_pack, write_pack
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            f1 = self._mkfile(td / "a.db", 5 * 1024 * 1024 + 7)   # 跨多帧+尾帧
+            f2 = self._mkfile(td / "b.json", 300, seed=b"y")
+            rep = write_pack(td / "p.siwxpack", self.PW,
+                             [("message/a.db", f1), ("meta/b.json", f2)],
+                             {"mode": "test", "account": "wxid_test_pack"})
+            self.assertEqual(rep["files"], 2)
+            self.assertEqual(rep["payload_len"], f1.stat().st_size + f2.stat().st_size)
+            out = td / "out"
+            manifest = read_pack(td / "p.siwxpack", self.PW, out)
+            self.assertEqual(manifest["account"], "wxid_test_pack")
+            self.assertEqual((out / "message" / "a.db").read_bytes(), f1.read_bytes())
+            self.assertEqual((out / "meta" / "b.json").read_bytes(), f2.read_bytes())
+
+    def test_wrong_password_rejected_cleanly(self):
+        from siwx.pack import PackPasswordError, read_pack, write_pack
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            f = self._mkfile(td / "a.db", 100)
+            write_pack(td / "p.siwxpack", self.PW, [("a.db", f)], {})
+            with self.assertRaises(PackPasswordError):
+                read_pack(td / "p.siwxpack", "wrong password!", td / "out")
+
+    def test_short_password_rejected(self):
+        from siwx.pack import PackError, write_pack
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            f = self._mkfile(td / "a.db", 10)
+            with self.assertRaises(PackError):
+                write_pack(td / "p.siwxpack", "short", [("a.db", f)], {})
+
+    def test_truncated_pack_fails(self):
+        from siwx.pack import PackError, read_pack, write_pack
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            f = self._mkfile(td / "a.db", 10 * 1024 * 1024)
+            pack = td / "p.siwxpack"
+            write_pack(pack, self.PW, [("a.db", f)], {})
+            raw = pack.read_bytes()
+            pack.write_bytes(raw[:-20])       # 尾部截断
+            with self.assertRaises(PackError):
+                read_pack(pack, self.PW, td / "out")
+
+    def test_tampered_frame_fails(self):
+        from siwx.pack import PackError, read_pack, write_pack
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            f = self._mkfile(td / "a.db", 4096)
+            pack = td / "p.siwxpack"
+            write_pack(pack, self.PW, [("a.db", f)], {})
+            raw = bytearray(pack.read_bytes())
+            # 定位第一帧：magic(8) + ver/hlen(6) + header + iv(12) + mlen(4) + manifest
+            import struct as _st
+            hlen = _st.unpack("<I", bytes(raw[10:14]))[0]
+            off = 8 + 6 + hlen
+            (mlen,) = _st.unpack("<I", bytes(raw[off + 12:off + 16]))
+            frame_start = off + 12 + 4 + mlen
+            self.assertLess(frame_start + 30, len(raw))
+            raw[frame_start + 30] ^= 0xFF       # 篡改第一帧密文
+            pack.write_bytes(bytes(raw))
+            with self.assertRaises(PackError):
+                read_pack(pack, self.PW, td / "out")
+
+    def test_traversal_rel_rejected(self):
+        from siwx.pack import PackError, write_pack
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            f = self._mkfile(td / "a.db", 10)
+            with self.assertRaises(PackError):
+                write_pack(td / "p.siwxpack", self.PW,
+                           [("../evil", f)], {})
+
+    def test_peek_pack_needs_no_password(self):
+        from siwx.pack import peek_pack, write_pack
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            f = self._mkfile(td / "a.db", 10)
+            write_pack(td / "p.siwxpack", self.PW, [("a.db", f)], {})
+            info = peek_pack(td / "p.siwxpack")
+            self.assertEqual(info["format"], 1)
+            self.assertEqual(info["kdf"]["alg"], "scrypt")
+
+
+MSG_DDL = (
+    "CREATE TABLE Msg_{tag}(local_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "server_id INTEGER, local_type INTEGER, sort_seq INTEGER, "
+    "real_sender_id INTEGER, create_time INTEGER, status INTEGER, "
+    "upload_status INTEGER, download_status INTEGER, server_seq INTEGER, "
+    "origin_source INTEGER, source TEXT, message_content TEXT, "
+    "compress_content TEXT, packed_info_data BLOB, "
+    "WCDB_CT_message_content INTEGER DEFAULT NULL, "
+    "WCDB_CT_source INTEGER DEFAULT NULL)"
+)
+
+
+class TestBackupSelective(unittest.TestCase):
+    """选择性载荷构建：过滤 + Name2Id 重映射 + session/contact 合成。"""
+
+    CHAT_A = "wxid_test_aaa111"
+    CHAT_B = "wxid_test_bbb222"
+
+    def _fixture(self, td: Path):
+        import hashlib as _h
+        shard = td / "message_0.db"
+        c = sqlite3.connect(str(shard))
+        c.execute("CREATE TABLE Name2Id(user_name TEXT, is_session INTEGER)")
+        c.execute("INSERT INTO Name2Id VALUES(?, 1)", (self.CHAT_A,))
+        c.execute("INSERT INTO Name2Id VALUES(?, 1)", (self.CHAT_B,))
+        c.execute("INSERT INTO Name2Id VALUES(?, 0)", ("wxid_test_sender",))
+        ta = "Msg_" + _h.md5(self.CHAT_A.encode()).hexdigest()
+        tb = "Msg_" + _h.md5(self.CHAT_B.encode()).hexdigest()
+        c.execute(MSG_DDL.format(tag=_h.md5(self.CHAT_A.encode()).hexdigest()))
+        c.execute(MSG_DDL.format(tag=_h.md5(self.CHAT_B.encode()).hexdigest()))
+        base = 1900000000
+        rows = [
+            # (tbl, local_id, server_id, type, sender_rowid, ctime, 内容)
+            (ta, 1, 101, 1, 3, base, "in-text"),        # 保留：文本+窗内
+            (ta, 2, 102, 1, 1, base + 10, "out-text"),  # 保留
+            (ta, 3, 103, 3, 1, base + 20, "<img>"),     # 过滤：类别 3
+            (ta, 4, 104, 1, 1, base - 999999, "old"),   # 过滤：窗外
+            (tb, 1, 201, 1, 1, base + 5, "b-text"),     # 过滤：未勾选 B
+        ]
+        for tbl, lid, sid, t, sender, ctime, content in rows:
+            c.execute(
+                f"INSERT INTO [{tbl}] (local_id, server_id, local_type, sort_seq, "
+                "real_sender_id, create_time, status, upload_status, "
+                "download_status, server_seq, origin_source, source, "
+                "message_content, compress_content, packed_info_data) "
+                "VALUES(?,?,?,?,?,?,3,0,0,?,2,'src',?, '', NULL)",
+                (lid, sid, t, ctime * 1000, sender, ctime, sid * 10, content))
+        c.commit()
+        c.close()
+
+        sess = td / "session.db"
+        c = sqlite3.connect(str(sess))
+        c.execute("CREATE TABLE SessionTable(username TEXT, summary TEXT, "
+                  "last_timestamp INTEGER)")
+        c.execute("CREATE TABLE Name2Id(user_name TEXT)")
+        c.execute("INSERT INTO SessionTable VALUES(?,?,?)",
+                  (self.CHAT_A, "sa", base + 10))
+        c.execute("INSERT INTO SessionTable VALUES(?,?,?)",
+                  (self.CHAT_B, "sb", base + 5))
+        c.execute("INSERT INTO Name2Id VALUES(?)", (self.CHAT_A,))
+        c.commit()
+        c.close()
+
+        contact = td / "contact.db"
+        c = sqlite3.connect(str(contact))
+        c.execute("CREATE TABLE contact(id INTEGER PRIMARY KEY, username TEXT, "
+                  "nick_name TEXT)")
+        c.execute("CREATE TABLE name2id(username TEXT)")
+        c.execute("INSERT INTO contact VALUES(1, ?, 'A')", (self.CHAT_A,))
+        c.execute("INSERT INTO contact VALUES(2, ?, 'B')", (self.CHAT_B,))
+        c.execute("INSERT INTO name2id VALUES(?)", (self.CHAT_A,))
+        c.commit()
+        c.close()
+        return shard, sess, contact
+
+    def test_selective_filters_and_remaps(self):
+        from siwx.backup import build_selective_plain, msg_table_of
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            shard, sess, contact = self._fixture(td)
+            built = build_selective_plain(
+                [shard], sess, contact,
+                chats=[self.CHAT_A], types=[1],
+                start=1900000000 - 100, end=1900000000 + 100,
+                payload_dir=td / "payload", log=lambda *_a: None)
+            st = built["stats"]
+            self.assertEqual(st["chats_count"], 1)
+            self.assertEqual(st["chats"][self.CHAT_A], 2)
+            self.assertEqual(st["messages"], 2)
+
+            om = sqlite3.connect(str(td / "payload" / "message" / "message_0.db"))
+            try:
+                ta = msg_table_of(self.CHAT_A)
+                tb = msg_table_of(self.CHAT_B)
+                have = {r[0] for r in om.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                self.assertIn(ta, have)
+                self.assertNotIn(tb, have)
+                rows = om.execute(
+                    f"SELECT local_id, server_id, real_sender_id, message_content "
+                    f"FROM [{ta}] ORDER BY local_id").fetchall()
+                self.assertEqual([r[3] for r in rows], ["in-text", "out-text"])
+                self.assertEqual([r[0] for r in rows], [1, 2])
+                # sender 重映射：新 rowid → username 必须对得上原发送者
+                n2i = {rid: u for rid, u in om.execute(
+                    "SELECT rowid, user_name FROM Name2Id")}
+                src_sender = {1: self.CHAT_A, 3: "wxid_test_sender"}
+                for row in om.execute(f"SELECT real_sender_id FROM [{ta}]"):
+                    pass
+                senders = {r[0] for r in om.execute(
+                    f"SELECT real_sender_id FROM [{ta}]")}
+                mapped = {n2i.get(s) for s in senders}
+                self.assertEqual(mapped, {self.CHAT_A, "wxid_test_sender"})
+                seq = om.execute("SELECT seq FROM sqlite_sequence WHERE name=?",
+                                 (ta,)).fetchone()
+                self.assertEqual(seq[0], 2)
+            finally:
+                om.close()
+
+            oss = sqlite3.connect(str(td / "payload" / "session" / "session.db"))
+            try:
+                users = {r[0] for r in oss.execute(
+                    "SELECT username FROM SessionTable")}
+                self.assertEqual(users, {self.CHAT_A})
+            finally:
+                oss.close()
+
+            oc = sqlite3.connect(str(td / "payload" / "contact" / "contact.db"))
+            try:
+                nicks = {r[0] for r in oc.execute(
+                    "SELECT nick_name FROM contact")}
+                self.assertEqual(nicks, {"A"})
+            finally:
+                oc.close()
+
+    def test_selective_all_chats(self):
+        from siwx.backup import build_selective_plain
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            shard, sess, contact = self._fixture(td)
+            built = build_selective_plain(
+                [shard], sess, contact, chats=None,
+                payload_dir=td / "payload", log=lambda *_a: None)
+            self.assertEqual(built["stats"]["chats_count"], 2)
+            self.assertEqual(built["stats"]["messages"], 5)
+
+
+class TestBackupApi(unittest.TestCase):
+    """/api/backup/*：两段式杀进程确认 + 参数校验 + 任务槽。"""
+
+    @staticmethod
+    def _client():
+        from siwx import server
+        return server.app.test_client()
+
+    def _wait_done(self, client, timeout=60):
+        for _ in range(int(timeout / 0.05)):
+            st = client.get("/api/backup/status").get_json()
+            if st["done"]:
+                return st
+            time.sleep(0.05)
+        return client.get("/api/backup/status").get_json()
+
+    def test_wechat_state_shape(self):
+        r = self._client().get("/api/backup/wechat")
+        self.assertEqual(r.status_code, 200)
+        j = r.get_json()
+        self.assertIn("running", j)
+        self.assertIsInstance(j["pids"], list)
+
+    def test_start_validates_password_types_time(self):
+        c = self._client()
+        ok = {"mode": "full", "password": "long-enough-pw"}
+        r = c.post("/api/backup/start", json={**ok, "password": "short"})
+        self.assertEqual(r.status_code, 400)
+        r = c.post("/api/backup/start", json={**ok, "types": ["a"]})
+        self.assertEqual(r.status_code, 400)
+        r = c.post("/api/backup/start", json={**ok, "start": "not-a-date"})
+        self.assertEqual(r.status_code, 400)
+        r = c.post("/api/backup/start", json={**ok, "chats": [123]})
+        self.assertEqual(r.status_code, 400)
+
+    def test_need_kill_two_phase_then_run(self):
+        """微信在跑：不带 allowKill 只报状态不启动；带 allowKill 才真正跑。"""
+        c = self._client()
+        fake = {"path": "x.siwxpack", "size": 123, "files": 2,
+                "mode": "full", "stats": {}, "wal": []}
+        with mock.patch("siwx.discover.find_wechat_pids", return_value=[4321]), \
+                mock.patch("siwx.backup.run_backup", return_value=fake) as rb:
+            r = c.post("/api/backup/start",
+                       json={"mode": "full", "password": "long-enough-pw"})
+            j = r.get_json()
+            self.assertTrue(j.get("needKill"))
+            self.assertEqual(j["pids"], [4321])
+            # 未获允许：任务不应启动
+            st = c.get("/api/backup/status").get_json()
+            self.assertFalse(st["running"])
+
+            r2 = c.post("/api/backup/start",
+                        json={"mode": "full", "password": "long-enough-pw",
+                              "allowKill": True})
+            self.assertTrue(r2.get_json().get("started"))
+            st = self._wait_done(c)
+            self.assertTrue(st["ok"], st.get("error"))
+            self.assertEqual(st["result"]["files"], 2)
+            rb.assert_called_once()
+            # 密码绝不能进任务状态/日志
+            self.assertNotIn("long-enough-pw", json.dumps(st))
+        # 复位任务槽，避免影响后续测试
+        from siwx.api_backup import _job
+        _job.update({"running": False, "done": False, "ok": False,
+                     "progress": 0, "msg": "", "logs": [], "result": None,
+                     "error": None})
+
+    def test_peek_rejects_outside_exports(self):
+        c = self._client()
+        r = c.post("/api/backup/peek", json={"path": "../../etc/passwd"})
+        self.assertEqual(r.status_code, 404)
+
+
+class TestRestoreEngine(unittest.TestCase):
+    """恢复引擎：analyze 只读 diff / apply 合入专用恢复分片 / 幂等 / 全新安装。"""
+
+    PW = "restore-test-pass"
+    ACC = "wxid_test_acc"
+
+    def _mk_target(self, out_root: Path):
+        """目标缓存库：账号目录里已有 chat A 的 2 条消息（sid 101,102）。"""
+        import hashlib as _h
+        acc = out_root / self.ACC
+        (acc / "message").mkdir(parents=True, exist_ok=True)
+        (acc / "session").mkdir(parents=True, exist_ok=True)
+        (acc / "contact").mkdir(parents=True, exist_ok=True)
+        ta = "Msg_" + _h.md5(TestBackupSelective.CHAT_A.encode()).hexdigest()
+        m = acc / "message" / "message_0.db"
+        c = sqlite3.connect(str(m))
+        c.execute("CREATE TABLE Name2Id(user_name TEXT, is_session INTEGER)")
+        c.execute("INSERT INTO Name2Id VALUES(?, 1)", (TestBackupSelective.CHAT_A,))
+        c.execute(MSG_DDL.format(tag=_h.md5(TestBackupSelective.CHAT_A.encode()).hexdigest()))
+        base = 1900000000
+        for i, sid in enumerate((101, 102), start=1):
+            c.execute(
+                f"INSERT INTO [{ta}] (local_id, server_id, local_type, sort_seq, "
+                "real_sender_id, create_time, status, server_seq, origin_source, "
+                "source, message_content) VALUES(?,?,1,?,1,?,3,?,2,'s',?)",
+                (i, sid, (base + i) * 1000, base + i, sid * 10, f"target-{sid}"))
+        c.commit()
+        c.close()
+        s = acc / "session" / "session.db"
+        c = sqlite3.connect(str(s))
+        c.execute("CREATE TABLE SessionTable(username TEXT, summary TEXT, "
+                  "last_timestamp INTEGER)")
+        c.execute("CREATE TABLE Name2Id(user_name TEXT)")
+        c.execute("INSERT INTO SessionTable VALUES(?,?,?)",
+                  (TestBackupSelective.CHAT_A, "old", base))
+        c.execute("INSERT INTO Name2Id VALUES(?)", (TestBackupSelective.CHAT_A,))
+        c.commit()
+        c.close()
+        ct = acc / "contact" / "contact.db"
+        c = sqlite3.connect(str(ct))
+        c.execute("CREATE TABLE contact(id INTEGER PRIMARY KEY, username TEXT, "
+                  "nick_name TEXT)")
+        c.execute("CREATE TABLE name2id(username TEXT)")
+        c.execute("INSERT INTO contact VALUES(1, ?, 'A-old')",
+                  (TestBackupSelective.CHAT_A,))
+        c.execute("INSERT INTO name2id VALUES(?)", (TestBackupSelective.CHAT_A,))
+        c.commit()
+        c.close()
+        return acc
+
+    def _mk_pack(self, td: Path) -> Path:
+        """用 build_selective_plain 造一个含 chat A 全部 4 条消息的真包。"""
+        from siwx.backup import build_selective_plain
+        from siwx.pack import write_pack
+        (td / "src").mkdir(parents=True, exist_ok=True)
+        shard, sess, contact = TestBackupSelective()._fixture(td / "src")
+        built = build_selective_plain(
+            [shard], sess, contact, chats=[TestBackupSelective.CHAT_A],
+            payload_dir=td / "payload", log=lambda *_a: None)
+        pack = td / "p.siwxpack"
+        write_pack(pack, self.PW, built["files"],
+                   {"mode": "selective", "account": self.ACC,
+                    "created_at": "2026-10-24T12:00:00", "selection": {}})
+        return pack
+
+    def _stage(self, td, out_root):
+        from siwx import restore as _restore
+        pack = self._mk_pack(td / "mk")
+        self._mk_target(out_root)
+        return _restore.stage_pack(pack, self.PW, stage_root=td / "stages")
+
+    def test_analyze_diff_counts(self):
+        from siwx import restore as _restore
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            stage = self._stage(td, td / "out")
+            rep = _restore.analyze(stage, out_root=td / "out")
+            self.assertFalse(rep["fresh"])
+            self.assertEqual(rep["total_pack"], 4)      # 包内 4 条
+            self.assertEqual(rep["total_dup"], 2)       # 101,102 已存在
+            self.assertEqual(rep["total_insert"], 2)    # 103,104 将恢复
+            chat = next(c for c in rep["chats"]
+                        if c["username"] == TestBackupSelective.CHAT_A)
+            self.assertEqual(chat["to_insert"], 2)
+            self.assertEqual(chat["display"], "A")      # 包 contact 优先于目标
+            # analyze 是只读的：目标库行数不变
+            import hashlib as _h2
+            m = td / "out" / self.ACC / "message" / "message_0.db"
+            c = sqlite3.connect(str(m))
+            n = c.execute("SELECT COUNT(*) FROM Msg_"
+                          + _h2.md5(
+                              TestBackupSelective.CHAT_A.encode()).hexdigest()
+                          ).fetchone()[0]
+            c.close()
+            self.assertEqual(n, 2)
+
+    def test_apply_then_idempotent(self):
+        from siwx import restore as _restore
+        import hashlib as _h
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            stage = self._stage(td, td / "out")
+            res = _restore.apply(stage, out_root=td / "out",
+                                 log=lambda *_a: None)
+            self.assertEqual(res["mode"], "merge")
+            self.assertEqual(res["inserted"], 2)
+            self.assertEqual(res["dup"], 2)
+            rshard = td / "out" / self.ACC / "message" / "message_restore_0.db"
+            self.assertTrue(rshard.is_file())
+            c = sqlite3.connect(str(rshard))
+            ta = "Msg_" + _h.md5(TestBackupSelective.CHAT_A.encode()).hexdigest()
+            sids = {r[0] for r in c.execute(
+                f"SELECT server_id FROM [{ta}]")}
+            self.assertEqual(sids, {103, 104})
+            mx = c.execute(f"SELECT MAX(local_id) FROM [{ta}]").fetchone()[0]
+            cnt = c.execute(f"SELECT COUNT(*) FROM [{ta}]").fetchone()[0]
+            seq = c.execute("SELECT seq FROM sqlite_sequence WHERE name=?",
+                            (ta,)).fetchone()
+            self.assertEqual((mx, cnt, seq[0]), (2, 2, 2))
+            c.close()
+            # session 行被包内较新版本覆盖
+            s = sqlite3.connect(str(td / "out" / self.ACC / "session" / "session.db"))
+            self.assertEqual(
+                s.execute("SELECT summary FROM SessionTable WHERE username=?",
+                          (TestBackupSelective.CHAT_A,)).fetchone()[0], "sa")
+            s.close()
+
+            # 幂等：同包再 stage+analyze → 0 条将恢复
+            stage2 = _restore.stage_pack(td / "mk" / "p.siwxpack", self.PW,
+                                         stage_root=td / "stages")
+            rep2 = _restore.analyze(stage2, out_root=td / "out")
+            self.assertEqual(rep2["total_insert"], 0)
+            self.assertEqual(rep2["total_dup"], 4)
+
+    def test_fresh_install(self):
+        from siwx import restore as _restore
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            pack = self._mk_pack(td / "mk")
+            stage = _restore.stage_pack(pack, self.PW, stage_root=td / "stages")
+            rep = _restore.analyze(stage, out_root=td / "empty_out")
+            self.assertTrue(rep["fresh"])
+            res = _restore.apply(stage, out_root=td / "empty_out",
+                                 log=lambda *_a: None)
+            self.assertEqual(res["mode"], "install")
+            self.assertEqual(res["files"], 3)   # message/session/contact
+            self.assertTrue((td / "empty_out" / self.ACC /
+                             "message" / "message_0.db").is_file())
+
+    def test_api_analyze_wrong_password(self):
+        from siwx import server
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            exports = td / "exports"
+            exports.mkdir()
+            shutil.copy2(self._mk_pack(td / "mk"), exports / "p.siwxpack")
+            client = server.app.test_client()
+            with mock.patch("siwx.api_backup._paths.exports_root",
+                            side_effect=lambda: exports), \
+                 mock.patch("siwx.restore._paths.data_dir",
+                            side_effect=lambda: td / "data"):
+                r = client.post("/api/backup/restore/analyze",
+                                json={"path": str(exports / "p.siwxpack"),
+                                      "password": "wrong-password"})
+                self.assertEqual(r.status_code, 400)
+                r2 = client.post("/api/backup/restore/analyze",
+                                 json={"path": str(exports / "p.siwxpack"),
+                                       "password": self.PW})
+                self.assertEqual(r2.status_code, 200)
+                self.assertIn("stage_id", r2.get_json())
+
+
+class TestRestoreWechat(unittest.TestCase):
+    """恢复到微信源库：analyze_wechat diff / apply_wechat 合并 / 勾选过滤 / 幂等。
+
+    用 encrypt_database 构造假的微信 db_storage（真 SQLCipher 格式），并 mock
+    账号发现——不依赖真实微信环境。"""
+
+    PW = "restore-test-pass"
+    ACC = "wxid_test_acc"
+    CHAT = TestBackupSelective.CHAT_A
+    SENDER = "wxid_test_sender"
+
+    def _build_fake_wechat(self, db_dir: Path, key: bytes, rows_spec):
+        """rows_spec: [(sid, ctime, content)] → 加密的 message_0.db + session.db
+
+        库体必须以 reserved=80 的空库为种子自举（原生 sqlite3 建的库
+        reserved=0，页尾 80 字节会被 encrypt_database 拒绝/砍掉）。"""
+        import hashlib as _h
+        from siwx.sqlcipher import encrypt_database as _enc, \
+            decrypt_database as _dec
+        msg_dir = db_dir / "message"
+        sess_dir = db_dir / "session"
+        msg_dir.mkdir(parents=True, exist_ok=True)
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        tbl = "Msg_" + _h.md5(self.CHAT.encode()).hexdigest()
+
+        def reserved80_empty(dest: Path):
+            """手工构造合法 SQLite 空库（page_size=4096、reserved=80）。
+            原生 sqlite3 建的库 reserved=0，会被 encrypt_database 拒绝。"""
+            b = bytearray(4096)
+            b[0:16] = b"SQLite format 3\x00"
+            b[16:18] = (4096).to_bytes(2, "big")
+            b[18] = 1
+            b[19] = 1
+            b[20] = 80                                   # reserved ← 关键
+            b[21] = 64
+            b[22] = 32
+            b[23] = 32
+            b[24:28] = (1).to_bytes(4, "big")            # change counter
+            b[28:32] = (1).to_bytes(4, "big")            # size in pages
+            b[40:44] = (1).to_bytes(4, "big")            # schema cookie
+            b[44:48] = (4).to_bytes(4, "big")            # schema format
+            b[56:60] = (1).to_bytes(4, "big")            # utf8
+            b[92:96] = (3045001).to_bytes(4, "big")
+            b[100] = 0x0D                                # leaf table b-tree
+            b[103:105] = (0).to_bytes(2, "big")          # ncell = 0
+            b[105:107] = (4016).to_bytes(2, "big")       # content start
+            b[107] = 0                                   # fragmented
+            dest.write_bytes(bytes(b))
+
+        plain = db_dir / "_plain_m0.db"
+        reserved80_empty(plain)
+        c = sqlite3.connect(str(plain))
+        c.execute("CREATE TABLE Name2Id(user_name TEXT, is_session INTEGER)")
+        c.execute("INSERT INTO Name2Id VALUES(?, 1)", (self.CHAT,))
+        c.execute("INSERT INTO Name2Id VALUES(?, 0)", (self.SENDER,))
+        c.execute(MSG_DDL.format(tag=_h.md5(self.CHAT.encode()).hexdigest()))
+        for i, (sid, ctime, content) in enumerate(rows_spec, start=1):
+            c.execute(
+                f"INSERT INTO [{tbl}] (local_id, server_id, local_type, "
+                "sort_seq, real_sender_id, create_time, status, server_seq, "
+                "origin_source, source, message_content) "
+                "VALUES(?,?,1,?,2,?,3,?,2,'s',?)",
+                (i, sid, ctime * 1000, ctime, sid * 10, content))
+        c.commit()
+        c.close()
+        _enc(plain, msg_dir / "message_0.db", key)
+        plain.unlink()
+        sp = sess_dir / "session.db"
+        splain = db_dir / "_plain_s.db"
+        reserved80_empty(splain)
+        c = sqlite3.connect(str(splain))
+        c.execute("CREATE TABLE SessionTable(username TEXT, summary TEXT, "
+                  "last_timestamp INTEGER)")
+        c.execute("CREATE TABLE Name2Id(user_name TEXT)")
+        c.execute("CREATE TABLE SessionDeleteTable(username TEXT, "
+                  "delete_time INTEGER)")
+        c.commit()
+        c.close()
+        _enc(splain, sp, key)
+        splain.unlink()
+
+    def _fake_env(self, td: Path, live_rows, pack_rows):
+        """返回 (stage, store, db_dir)。live_rows=真库已有；pack_rows=包内。"""
+        import hashlib as _h
+        from siwx.pack import write_pack
+        key = bytes(range(32))
+        db_dir = td / "fake_wechat" / self.ACC / "db_storage"
+        self._build_fake_wechat(db_dir, key, live_rows)
+        # 两个加密库的 salt 都要注册进 keystore（collect_db_files 全收集）
+        store = {}
+        for f in (db_dir / "message" / "message_0.db",
+                  db_dir / "session" / "session.db"):
+            salt_hex = f.read_bytes()[:16].hex()
+            store[salt_hex] = {"key": key.hex(), "strategy": "test",
+                               "updated": 0}
+        # 包：构造包内明文 message_0.db（含 pack_rows），打包
+        src = td / "pack_src"
+        src.mkdir(parents=True, exist_ok=True)
+        c = sqlite3.connect(str(src / "message_0.db"))
+        c.execute("CREATE TABLE Name2Id(user_name TEXT, is_session INTEGER)")
+        c.execute("INSERT INTO Name2Id VALUES(?, 1)", (self.CHAT,))
+        c.execute("INSERT INTO Name2Id VALUES(?, 0)", (self.SENDER,))
+        c.execute(MSG_DDL.format(tag=_h.md5(self.CHAT.encode()).hexdigest()))
+        for i, (sid, ctime, content) in enumerate(pack_rows, start=1):
+            c.execute(
+                f"INSERT INTO [Msg_{_h.md5(self.CHAT.encode()).hexdigest()}] "
+                "(local_id, server_id, local_type, sort_seq, real_sender_id, "
+                "create_time, status, server_seq, origin_source, source, "
+                "message_content) VALUES(?,?,1,?,2,?,3,?,2,'s',?)",
+                (i, sid, ctime * 1000, ctime, sid * 10, content))
+        c.commit()
+        c.close()
+        files = [("message/message_0.db", src / "message_0.db")]
+        from siwx.pack import write_pack as _wp
+        pack = td / "p.siwxpack"
+        _wp(pack, self.PW, files,
+            {"mode": "selective", "account": self.ACC,
+             "created_at": "2026-10-24T12:00:00", "selection": {}})
+        from siwx import restore as _restore
+        stage = _restore.stage_pack(pack, self.PW, stage_root=td / "stages")
+        return stage, store, db_dir
+
+    def test_analyze_wechat_diff_and_apply_idempotent(self):
+        import hashlib as _h
+        from siwx import restore as _restore
+        base = 1900000000
+        live = [(101, base, "a"), (102, base + 10, "b")]
+        pack = [(101, base, "a"), (102, base + 10, "b"),
+                (103, base + 20, "c"), (104, base + 30, "d")]
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            stage, store, db_dir = self._fake_env(td, live, pack)
+            with mock.patch("siwx.discover.find_wechat_data_dirs",
+                            return_value=[(self.ACC, db_dir)]), \
+                 mock.patch("siwx.discover.find_wechat_pids", return_value=[]), \
+                 mock.patch("siwx.keystore.load", return_value=store):
+                rep = _restore.analyze_wechat(stage)
+            self.assertEqual(rep["target"], "wechat")
+            self.assertEqual(rep["total_pack"], 4)
+            self.assertEqual(rep["total_dup"], 2)
+            self.assertEqual(rep["total_insert"], 2)
+            chat = next(c for c in rep["chats"]
+                        if c["username"] == self.CHAT)
+            self.assertTrue(chat["table_exists"])
+
+            # apply（全库会话）→ 插 2 条进假微信库
+            with mock.patch("siwx.discover.find_wechat_data_dirs",
+                            return_value=[(self.ACC, db_dir)]), \
+                 mock.patch("siwx.discover.find_wechat_pids", return_value=[]), \
+                 mock.patch("siwx.keystore.load", return_value=store):
+                res = _restore.apply_wechat(stage, log=lambda *_a: None)
+            self.assertEqual(res["inserted"], 2)
+            self.assertIn("message/message_0.db", res["rewrote"])
+            # 解密重写后的真库验证
+            tbl = "Msg_" + _h.md5(self.CHAT.encode()).hexdigest()
+            from siwx.sqlcipher import decrypt_database
+            back = td / "verify.db"
+            decrypt_database(db_dir / "message" / "message_0.db", back, bytes(range(32)))
+            c = sqlite3.connect(str(back))
+            sids = {r[0] for r in c.execute(f"SELECT server_id FROM [{tbl}]")}
+            mx = c.execute(f"SELECT MAX(local_id) FROM [{tbl}]").fetchone()[0]
+            seq = c.execute("SELECT seq FROM sqlite_sequence WHERE name=?",
+                            (tbl,)).fetchone()
+            c.close()
+            self.assertEqual(sids, {101, 102, 103, 104})
+            self.assertEqual((mx, seq[0]), (4, 4))
+
+            # 幂等：再 analyze → 0 将恢复
+            stage2 = _restore.stage_pack(
+                td / "p.siwxpack", self.PW, stage_root=td / "stages")
+            with mock.patch("siwx.discover.find_wechat_data_dirs",
+                            return_value=[(self.ACC, db_dir)]), \
+                 mock.patch("siwx.discover.find_wechat_pids", return_value=[]), \
+                 mock.patch("siwx.keystore.load", return_value=store):
+                rep2 = _restore.analyze_wechat(stage2)
+            self.assertEqual(rep2["total_insert"], 0)
+
+    def test_apply_wechat_chat_filter(self):
+        """勾选过滤：只恢复勾选的联系人——未勾选的不写入。"""
+        import hashlib as _h
+        from siwx import restore as _restore
+        base = 1900000000
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            # 复用 _fake_env（单会话 fixture）+ 一个包外联系人过滤即可验证过滤路径
+            stage, store, db_dir = self._fake_env(
+                td, [], [(201, base, "x"), (202, base + 5, "y")])
+            other = "wxid_test_not_in_pack"
+            with mock.patch("siwx.discover.find_wechat_data_dirs",
+                            return_value=[(self.ACC, db_dir)]), \
+                 mock.patch("siwx.discover.find_wechat_pids", return_value=[]), \
+                 mock.patch("siwx.keystore.load", return_value=store):
+                res = _restore.apply_wechat(stage, chats=[other],
+                                            log=lambda *_a: None)
+            # 勾选的联系人在包内没有消息 → 0 插入
+            self.assertEqual(res["inserted"], 0)
+            tbl = "Msg_" + _h.md5(self.CHAT.encode()).hexdigest()
+            from siwx.sqlcipher import decrypt_database
+            back = td / "v.db"
+            decrypt_database(db_dir / "message" / "message_0.db", back,
+                             bytes(range(32)))
+            c = sqlite3.connect(str(back))
+            n = c.execute(f"SELECT COUNT(*) FROM [{tbl}]").fetchone()[0]
+            c.close()
+            self.assertEqual(n, 0)     # 未勾选 → 未写入
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

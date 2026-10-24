@@ -21,7 +21,7 @@ def cmd_keys_extract(args) -> int:
     # 修复：--json 此前只被 argparse 接收、从未生效（docs/cli-commands.md 已承诺
     # 该参数输出 JSON）。此分支让 stdout 只输出 JSON，便于脚本消费。
     # --db-dir 同理（PR #27）：此前被静默忽略，多账号机器无法把 LLDB 的
-    # 断点捕获窗口留给目标账号。
+    # 登录期密钥捕获窗口留给目标账号。
     db_dir = getattr(args, "db_dir", None)
     if db_dir and not Path(db_dir).is_dir():
         msg = f"✗ --db-dir 目录不存在: {db_dir}"
@@ -162,6 +162,83 @@ def cmd_doctor(_args) -> int:
     return 0
 
 
+def cmd_backup(args) -> int:
+    """加密备份导出（.siwxpack）。杀进程必须显式确认；密码双输防手滑。"""
+    import getpass
+    from datetime import datetime as _dt
+    from siwx import backup as bk
+
+    if getattr(args, "password_stdin", False):
+        password = sys.stdin.readline().rstrip("\r\n")
+    else:
+        p1 = getpass.getpass("备份密码（至少 8 位）: ")
+        p2 = getpass.getpass("再输入一遍: ")
+        if p1 != p2:
+            tui.log("✗ 两次密码不一致")
+            return 1
+        password = p1
+
+    types = None
+    if getattr(args, "types", None):
+        try:
+            types = [int(x) for x in args.types.split(",") if x.strip()]
+        except ValueError:
+            tui.log("✗ --types 需要逗号分隔的整数（如 1,3,34）")
+            return 1
+
+    def _ts(val, label):
+        if not val:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                return int(_dt.strptime(val, fmt).timestamp())
+            except ValueError:
+                continue
+        tui.log(f"✗ {label} 时间格式应为 YYYY-MM-DD[ HH:MM[:SS]]: {val}")
+        raise SystemExit(1)
+
+    try:
+        start = _ts(args.start, "--start")
+        end = _ts(args.end, "--end")
+    except SystemExit:
+        return 1
+    chats = args.chat or None
+    mode = args.mode or ("selective" if (chats or types or start or end)
+                         else "full")
+
+    def confirm_kill(pids):
+        if getattr(args, "yes", False):
+            return True
+        try:
+            ans = input(f"\n检测到微信正在运行 (pid {pids})。\n"
+                        "备份要求先完全退出微信（保证快照一致）。\n"
+                        "是否允许 SIWX 终止微信进程？[y/N] ")
+            return ans.strip().lower() in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            return False
+
+    try:
+        rep = bk.run_backup(
+            password, mode=mode, chats=chats, types=types, start=start, end=end,
+            account=args.account, out=args.out, confirm_kill=confirm_kill,
+            log=tui.log,
+            progress=lambda pct, msg: tui.log(f"[{pct:>3}%] {msg}"))
+    except bk.BackupAborted as e:
+        tui.log(f"✗ {e}")
+        return 1
+    except Exception as e:  # noqa: BLE001 — CLI 边界：给用户看完整错误类型
+        tui.log(f"✗ 备份失败: {type(e).__name__}: {e}")
+        return 1
+    tui.log(f"✓ 备份完成: {rep['path']} ({rep['size'] / 1048576:.1f} MB, "
+            f"{rep['files']} 个文件)")
+    st = rep.get("stats") or {}
+    if st.get("chats_count") is not None:
+        tui.log(f"  会话 {st['chats_count']} 个, 消息 {st.get('messages', 0)} 条")
+    if rep.get("wal"):
+        tui.log(f"  ⚠ 残留 {len(rep['wal'])} 个非空 -wal，最新消息可能未包含")
+    return 0
+
+
 def main() -> int:
     import os
     import platform
@@ -222,6 +299,30 @@ def main() -> int:
     p_doc = sub.add_parser("doctor", parents=[common],
                            help="打印环境信息 (提 issue 时粘贴)")
     p_doc.set_defaults(fn=cmd_doctor)
+
+    p_bk = sub.add_parser("backup", parents=[common],
+                          help="加密备份导出 (.siwxpack)——要求先退出微信")
+    p_bk.add_argument("--mode", choices=["full", "selective"], default=None,
+                      help="full=整账号全量; selective=按联系人/类别/时间"
+                           "（默认按参数自动推断）")
+    p_bk.add_argument("--chat", action="append", metavar="USERNAME",
+                      help="要备份的会话 username（可多次；selective 不填=全部会话）")
+    p_bk.add_argument("--types", default=None, metavar="1,3,34",
+                      help="消息类别，逗号分隔整数（1=文本 3=图片 34=语音 "
+                           "43=视频 49=应用/引用…）")
+    p_bk.add_argument("--start", default=None, metavar="DATE",
+                      help="起始时间 YYYY-MM-DD[ HH:MM[:SS]]")
+    p_bk.add_argument("--end", default=None, metavar="DATE",
+                      help="结束时间 YYYY-MM-DD[ HH:MM[:SS]]")
+    p_bk.add_argument("--account", default=None,
+                      help="账号 wxid（多账号机器指定；默认自动挑密钥齐全的账号）")
+    p_bk.add_argument("--out", default=None,
+                      help="输出 .siwxpack 路径（默认 exports/ 下按时间命名）")
+    p_bk.add_argument("--yes", action="store_true",
+                      help="允许 SIWX 终止微信进程（免交互确认）")
+    p_bk.add_argument("--password-stdin", action="store_true",
+                      help="从 stdin 读密码（脚本/管道用，跳过双输交互）")
+    p_bk.set_defaults(fn=cmd_backup)
 
     # ── 插件子命令（插件贡献的 CLI 入口）─────────────────────
     _register_plugin_commands(sub, common)
