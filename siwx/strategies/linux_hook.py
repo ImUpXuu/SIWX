@@ -49,6 +49,13 @@ PBKDF2_DIGEST = "sha512"
 _LOG_ENV = "WXS_HOOK_LOG"
 _DEFAULT_LOG = "/tmp/siwx_linux_hook.log"
 
+# 启动器把微信拉起来需要的宽限期：这之前没看到进程属正常（dde-am → transient unit）。
+_LAUNCH_GRACE = 20.0
+
+# 一次 extract 里只允许"停微信 + 注入"发生一次。钩子抓的是当前登录态，
+# 多账号目录下未登录的账号再重启一次微信只会杀掉用户的会话并空等超时。
+_ATTEMPTED = False
+
 _CANDIDATE_RE = re.compile(r"a=([0-9a-f]+) b=([0-9a-f]+) data=([0-9a-f]{64})")
 
 
@@ -106,6 +113,36 @@ def _stop_wechat(binary: Path, log) -> None:
         if not _wechat_pids(binary):
             return
         time.sleep(0.25)
+
+
+def _account_is_live(db_dir) -> bool:
+    """该账号此刻是否已登录：有进程开着它 db_storage 下的文件。
+
+    只有登录态会建立数据库连接，所以这个探针等价于"这个账号现在能不能被抓到"。
+    """
+    if not db_dir:
+        return False
+    try:
+        root = str(Path(db_dir).resolve())
+    except OSError:
+        return False
+    if not root:
+        return False
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fds = list((entry / "fd").iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith(root):
+                return True
+    return False
 
 
 def _has_user_systemd() -> bool:
@@ -194,11 +231,19 @@ def _build_shim(hook_off: int, target_exe: str, workdir: Path) -> Path | None:
     return out if out.is_file() else None
 
 
-def _wait_for_candidates(log_path: Path, timeout: float, log) -> list[str]:
-    """轮询 shim 日志，收集 32 字节候选（去重、保序）。"""
+def _wait_for_candidates(log_path: Path, timeout: float, log,
+                         alive=None) -> list[str]:
+    """轮询 shim 日志，收集 32 字节候选（去重、保序）。
+
+    ``alive``：可选的"微信是否还活着"探针。启动后短暂没进程属正常（启动器在拉），
+    一旦出现过又消失，说明这一轮抓不到了——立刻结束等待，别拖到超时（否则
+    systemd 用户环境里的 LD_PRELOAD 要一起拖到最后才还原）。
+    """
     seen: list[str] = []
     deadline = time.monotonic() + timeout
+    start = time.monotonic()
     told = False
+    appeared = False
     while time.monotonic() < deadline:
         try:
             text = log_path.read_text(errors="replace")
@@ -210,6 +255,12 @@ def _wait_for_candidates(log_path: Path, timeout: float, log) -> list[str]:
                 seen.append(hexv)
         if seen:
             return seen
+        if alive is not None:
+            if alive():
+                appeared = True
+            elif appeared or time.monotonic() - start > _LAUNCH_GRACE:
+                log("[linux_hook] 微信进程已退出，停止等待并还原环境")
+                break
         if not told and time.monotonic() > deadline - timeout + 15:
             log("[linux_hook] >> 等待登录：如果微信显示扫码界面，请立刻扫码登录")
             told = True
@@ -266,6 +317,15 @@ def extract(ctx) -> int:
     if entry >= len(page1_by_salt):
         return 0
 
+    global _ATTEMPTED
+    # 钩子只能抓到"当前登录态"的 passphrase。已经注入过一个账号之后再遇到
+    # 未登录的账号目录（多账号机器很常见），重启微信只会打断用户正在用的会话
+    # 然后空等到超时——直接跳过，按文档要求换该账号登录后重跑。
+    if _ATTEMPTED and not _account_is_live(ctx.get("db_dir")):
+        log("[linux_hook] 该账号当前未登录（没有进程打开它的 db_storage），"
+            "跳过——换该账号登录后重跑")
+        return 0
+
     binary = _resolve_binary()
     if binary is None:
         log("[linux_hook] 未找到微信二进制，跳过")
@@ -305,10 +365,12 @@ def extract(ctx) -> int:
                 use_systemd = False
 
         extra = None if use_systemd else {"LD_PRELOAD": str(so), _LOG_ENV: str(log_path)}
+        _ATTEMPTED = True
         _launch_wechat(binary, log, extra_env=extra)
 
         timeout = float(os.environ.get("WXS_HOOK_TIMEOUT", "180"))
-        candidates = _wait_for_candidates(log_path, timeout, log)
+        candidates = _wait_for_candidates(
+            log_path, timeout, log, alive=lambda: bool(_wechat_pids(binary)))
         if not candidates:
             log("[linux_hook] 未捕获到候选 passphrase（未登录 / 超时 / 需要扫码）")
             return 0

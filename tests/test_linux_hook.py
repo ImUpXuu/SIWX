@@ -25,6 +25,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -208,6 +209,68 @@ class DeriveKeysTest(unittest.TestCase):
         n = self.mod._derive_keys(_PASSPHRASE.hex(), self.pages, key_map, attrib,
                                   self.logs.append, self.logs.append)
         self.assertEqual(n, 0)
+
+
+class MultiAccountGateTest(unittest.TestCase):
+    """多账号：未登录账号不许再重启微信。
+
+    真实事故（Windows/macOS 没有这条路径，Linux 独有）：extract 按账号目录循环，
+    第一个账号抓到 25/25 之后，对未登录的第二个账号又走一遍
+    "停微信 → 注入 → 拉起 → 等 300 秒"，把用户正在用的微信杀掉且必然空等到超时，
+    期间 systemd 用户环境的 LD_PRELOAD 也一直挂着不还原。
+    """
+
+    def setUp(self):
+        from siwx.strategies import linux_hook
+        self.mod = linux_hook
+
+    @staticmethod
+    def _ctx(db_dir) -> dict:
+        return {"db_dir": str(db_dir), "page1_by_salt": {"aa" * 16: b"x" * PAGE_SZ},
+                "key_map": {}, "attrib": {}, "log": lambda *_a: None,
+                "dbg": lambda *_a: None}
+
+    def test_unlogged_account_is_skipped_without_touching_wechat(self):
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(self.mod, "_ATTEMPTED", True), \
+             mock.patch.object(self.mod, "_account_is_live", return_value=False), \
+             mock.patch.object(self.mod, "_resolve_binary") as rb, \
+             mock.patch.object(self.mod, "_stop_wechat") as stop, \
+             mock.patch.object(self.mod, "_launch_wechat") as launch:
+            self.assertEqual(self.mod.extract(self._ctx(td)), 0)
+            rb.assert_not_called()
+            stop.assert_not_called()      # 关键：不许杀用户的微信
+            launch.assert_not_called()
+
+    def test_first_account_still_bootstraps(self):
+        """第一次注入必须照旧：用户没登录时也要把微信拉起来让他扫码。"""
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(self.mod, "_ATTEMPTED", False), \
+             mock.patch.object(self.mod, "_account_is_live", return_value=False), \
+             mock.patch.object(self.mod, "_resolve_binary", return_value=Path("/bin/true")), \
+             mock.patch.object(self.mod, "_DEFAULT_LOG", str(Path(td) / "hook.log")), \
+             mock.patch.object(self.mod, "_has_user_systemd", return_value=False), \
+             mock.patch("siwx.linux_hook.elfhook.find_hook_offset", return_value=0x10), \
+             mock.patch.object(self.mod, "_build_shim", return_value=Path("/fake/wxhook.so")), \
+             mock.patch.object(self.mod, "_wait_for_candidates", return_value=[]), \
+             mock.patch.object(self.mod, "_stop_wechat") as stop, \
+             mock.patch.object(self.mod, "_launch_wechat") as launch:
+            self.mod.extract(self._ctx(td))
+            stop.assert_called_once()
+            launch.assert_called_once()
+
+    def test_wait_aborts_when_wechat_vanishes(self):
+        """微信进程没了就立刻收工，别拖满超时（否则环境还原一起被拖住）。"""
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "hook.log"
+            logs: list[str] = []
+            t0 = time.monotonic()
+            with mock.patch.object(self.mod, "_LAUNCH_GRACE", 0.1):
+                out = self.mod._wait_for_candidates(missing, 30.0, logs.append,
+                                                   alive=lambda: False)
+            self.assertEqual(out, [])
+            self.assertLess(time.monotonic() - t0, 10.0, "微信没了还等满 30 秒就是 bug")
+            self.assertTrue(any("退出" in line for line in logs), logs)
 
 
 class KdfParamsTest(unittest.TestCase):
