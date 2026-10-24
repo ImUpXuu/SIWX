@@ -252,7 +252,14 @@ async function loadWechatHint() {
     let line = st.running
       ? '⚠ 微信正在运行：开始备份时会请求确认终止微信进程。'
       : '✓ 微信未运行，可以直接开始备份。';
-    const cur = (st.accounts || []).find(a => a.wxid === account);
+    // 同一账号可能有多个数据目录（迁移残留副本）：显示密钥覆盖最高的那个，
+    // 与后端 _resolve_account 的选优口径一致
+    const cands = (st.accounts || []).filter(a => a.wxid === account)
+      .sort((a, b) => b.keys - a.keys || b.dbs - a.dbs);
+    const cur = cands[0];
+    if (cands.length > 1) {
+      line += `（该账号有 ${cands.length} 个数据目录，已选密钥最全的）`;
+    }
     if (cur && cur.dbs > 0) {
       if (cur.keys >= cur.dbs) {
         line += ` 密钥 ${cur.keys}/${cur.dbs} ✓`;

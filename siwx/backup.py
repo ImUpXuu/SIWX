@@ -380,7 +380,7 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
 # ── 解密包装 + 编排 ──────────────────────────────────────────
 
 
-def _resolve_account(account, store) -> tuple:
+def _resolve_account(account, store, log=print) -> tuple:
     dirs = find_wechat_data_dirs()
     if not dirs:
         raise BackupAborted("未找到微信数据目录")
@@ -388,7 +388,30 @@ def _resolve_account(account, store) -> tuple:
         hits = [(w, d) for w, d in dirs if w == account]
         if not hits:
             raise BackupAborted(f"账号 {account[:3]}*** 不在本机账号列表中")
-        wxid, db_dir = hits[0]
+        if len(hits) == 1:
+            wxid, db_dir = hits[0]
+        else:
+            # 同名多副本（换盘迁移残留）：必须按密钥覆盖选优，不能取排序第一个。
+            # 实测踩坑：C 盘残留副本 16 库 0 密钥排在 D 盘正身（32 库 32/32）之前，
+            # hits[0] 命中残留 → 报"密钥缺失 16/16"，而用户选的账号明明密钥齐全。
+            ranked = []
+            for _w, d in hits:
+                try:
+                    es = collect_db_files(d)
+                except Exception:
+                    es = []
+                covered = sum(1 for e in es if e.salt_hex in store)
+                try:
+                    latest = max((e.path.stat().st_mtime for e in es), default=0)
+                except OSError:
+                    latest = 0
+                ranked.append((covered, len(es), latest, d))
+            # 覆盖优先、库数次之、写入时间兜底——实测残留副本（老 salt、老 mtime）
+            # 与正身（当前微信在写、密钥齐全）并存时三者都指向正身
+            ranked.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+            wxid, db_dir = account, ranked[0][3]
+            log(f"[backup] ⚠ 账号有 {len(hits)} 个数据目录（同名多副本），"
+                f"已选密钥覆盖最高的: {db_dir}")
     else:
         best = None
         for wxid, db_dir in dirs:
@@ -425,7 +448,7 @@ def run_backup(password: str, mode: str = "full",
     """
     prog = progress or (lambda pct, msg: None)
     store = keystore.load()
-    wxid, db_dir = _resolve_account(account, store)
+    wxid, db_dir = _resolve_account(account, store, log=log)
     log(f"[backup] 账号 {wxid[:3]}***  模式 {mode}")
 
     # 密钥门禁必须在杀微信**之前**：密钥提取依赖微信进程（Windows 内存扫描），
