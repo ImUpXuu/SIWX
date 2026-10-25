@@ -1,12 +1,12 @@
 {
   "version": "5.1.1",
-  "date": "2026-10-24 05:29:04",
+  "date": "2026-10-25 01:13:51",
   "notes": "## Linux 实验性支持与新手体验优化\n\n> 无破坏性变更，无需迁移。全量测试 737 通过 / 9 跳过（跳过项多为 Linux 平台闸门用例）。\n\n### Linux（实验性）\n- 新增 Linux 进程内 INT3 钩子密钥提取策略：微信 4.1.13.23 实测，需系统编译器，不需要 root（详见 LINUX_SUPPORT.md）\n- 未登录账号不再触发微信重启；微信退出即结束等待\n- 一次登录只覆盖当前账号：多账号目录下其余账号显示 0/N 不是失败\n\n### 新手引导与任务反馈\n- 首启向导新增「接下来做什么」，提取失败可暂时跳过，侧栏常驻「引导未完成」续跑入口\n- 新增 5 步使用导览（挖孔遮罩+气泡），配置完成后自动播放，侧栏可重看\n- 侧栏显示运行中任务类型/进度并可跳转；任务冲突提示带任务类型\n- 导出/补生成失败支持「打开目录」定位产物；切页/刷新后恢复任务现场\n\n### 一致性与细节\n- /api/status 账号扫描加 8s TTL 缓存，任务结束/手动保存后失效\n- 原生控件收敛为自绘下拉（朋友圈排序/格式、日志级别、备份账号）\n- 时间格式统一为 SX.fmtDate；非 JSON 响应给出中文提示\n- 多页重复样式收敛进 shared.css；聊天页增量同步可取消\n\n### 已知限制\n- Linux 支持为实验性，需源码运行（步骤与限制见 LINUX_SUPPORT.md）",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.0/stories-in-wx-v5.1.0-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.0/stories-in-wx-v5.1.0-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.1/stories-in-wx-v5.1.1-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.1/stories-in-wx-v5.1.1-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.0/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.1.1/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
