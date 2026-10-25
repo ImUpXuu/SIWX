@@ -214,7 +214,7 @@ _register_plugin_blueprints(app)
 # ── 全局状态（必须在路由和错误处理之前定义）──────────────────────
 _lock = threading.Lock()
 _job = {"running": False, "mode": None, "done": False, "ok": False,
-        "logs": [], "report": None, "error": None,
+        "logs": [], "report": None, "error": None, "export_dir": None,
         "progress": {"pct": 0, "msg": ""}}
 # 协作式取消：/api/job/cancel 置位，任务循环在各检查点轮询。优雅停止——
 # 已完成会话/文件的产物保留，报告带 cancelled=True，与失败（error）区分。
@@ -234,6 +234,20 @@ def _next_job_id() -> str:
     with _JOB_SEQ_LOCK:
         _JOB_SEQ += 1
         return f"job-{_JOB_SEQ:04d}"
+
+
+# 审计 §4.1：全局任务槽 409 拒绝时文案带上运行中任务的类型——被导出/
+# 同步/引导提取占着槽时，用户只看得到"已有任务在运行"却不知是什么在跑、
+# 去哪看。label 对齐各发起页按钮/入口的叫法，未登记的 mode 原样透出。
+_JOB_MODE_LABELS = {
+    "keys": "密钥提取",
+    "decrypt": "解密",
+    "auto": "提取并解密",
+    "sync": "增量同步",
+    "export": "导出",
+    "convert": "补生成",
+    "sns_export": "朋友圈导出",
+}
 
 
 # ── 全局错误处理：确保所有异常都有日志 + JSON 响应 ──────────────
@@ -541,12 +555,21 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
                     _job["progress"] = {"pct": pct, "msg": str(msg or "")}
                 _log(f"[convert] {done}/{total} {msg or ''}")
 
-            stats = json_export_convert.convert_dir_report(
-                root, formats,
-                template=data.get("template"),
-                overwrite=bool(data.get("overwrite")),
-                log=_log, progress=_convert_progress,
-                should_cancel=_cancel_event.is_set)
+            try:
+                stats = json_export_convert.convert_dir_report(
+                    root, formats,
+                    template=data.get("template"),
+                    overwrite=bool(data.get("overwrite")),
+                    log=_log, progress=_convert_progress,
+                    should_cancel=_cancel_event.is_set)
+            except Exception as e:
+                # 与 export 打包失败同一策略：目标目录在上面已验证存在，
+                # 随异常带回，前端失败分支据此渲染「打开目录」
+                try:
+                    e.export_dir = d
+                except Exception:
+                    pass
+                raise
             if stats.get("cancelled"):
                 _log("[convert] 已按用户请求取消：已完成会话的产物保留")
             report = {"kind": "convert", "dir": d, "formats": formats, **stats}
@@ -576,6 +599,12 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             # 失败原因单独成字段：前端四处（export/settings/onboarding）此前只能
             # 从 logs 末尾猜，误判成「完成/无导出结果」。
             _job["error"] = f"{type(e).__name__}: {e}"
+            # 导出/补生成任务的输出目录若已创建，随失败状态一并带回
+            # （exporter/convert 段把目录挂到异常对象的 export_dir 属性上）：
+            # 产物可能已完整落盘，前端失败分支据此渲染「打开目录」。
+            _export_dir = getattr(e, "export_dir", None)
+            if _export_dir:
+                _job["export_dir"] = str(_export_dir)
             _job["logs"].append([ts, msg])
             _LOG_RING.append([ts, msg])
             if len(_LOG_RING) > _LOG_RING_MAX:
@@ -587,6 +616,8 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
             _job["running"] = False
             _job["done"] = True
         _cancel_event.clear()
+        # 任务期间密钥/解密产物可能已变化，/api/status 的账号扫描缓存作废
+        _invalidate_status_scan()
         log.detailed("server", f"[{jid}] job 状态: running=False mode={mode} done=True")
         log.set_job_id("")  # 线程归还线程池/复用前清掉，防跨任务串 ID
 
@@ -682,8 +713,11 @@ def onboarding_js():
 def pages(filename: str):
     """模块化页面资源：pages/<name>.html / .js / .css
 
-    审计 F4：JS 里的静态资源缓存版本号（?v=…）由 siwx.__version__ 在响应时
-    注入，发版不再依赖手工改 5 个页面的版本串（漏改即用户端缓存旧 JS）。"""
+    审计 F4 / §5.1：JS 里的静态资源缓存版本号（?v=<数字>）在响应时统一
+    改写为 siwx.__version__——页面源码里写任何数字占位都会被替换，发版
+    不依赖手工同步各页面的版本串（漏改即用户端缓存旧 JS 的坑不再可能；
+    历史实现只替换字面量 "?v=2026100203"，而仓库里早已没有该字符串，
+    注入实为空操作）。"""
     target = (UI_DIR / "pages" / filename)
     try:
         target.resolve().relative_to((UI_DIR / "pages").resolve())
@@ -694,8 +728,10 @@ def pages(filename: str):
     if filename.endswith(".js"):
         try:
             from siwx import __version__ as _ver
-            text = target.read_text(encoding="utf-8").replace(
-                "?v=2026100203", f"?v={_ver}")
+            # 用 lambda 组装替换串：万一版本号未来含 \ 或 \g 序列，
+            # 直接 f-string 作 re.sub 的 repl 会被当反向引用解析。
+            text = re.sub(r"\?v=\d+", lambda _m: f"?v={_ver}",
+                          target.read_text(encoding="utf-8"))
             return Response(text, mimetype="text/javascript")
         except OSError:
             pass
@@ -732,9 +768,26 @@ def plugin_pages(plugin: str, filename: str):
     return send_from_directory(root, filename)
 
 
-@app.get("/api/status")
-def status():
-    pids = find_wechat_pids()
+# ── /api/status 账号扫描短 TTL 缓存（审计 §4.6）──────────────────
+# 侧栏每 5 秒轮询 /api/status，但只用 wechat_running/pids 两个字段；账号
+# 扫描却要对每个账号 os.walk 数据目录、逐库读首页验证密钥（被微信占用的
+# .db 还会整文件复制后读取，见 sqlcipher.py）。扫描结果加短 TTL 缓存：
+# wechat_running/pids 每次现算（进程枚举开销小、状态要新鲜），扫描大头
+# 在 TTL 内复用；任务结束与手动目录变更时主动失效（_invalidate_status_scan）。
+_STATUS_SCAN_TTL = 8.0          # 秒；≥ 轮询间隔才真能合并 consecutive 轮询
+_status_scan_cache = {"ts": 0.0, "value": None}
+_status_scan_lock = threading.Lock()
+
+
+def _invalidate_status_scan() -> None:
+    """密钥/账号可能已变化（任务结束、手动目录增删）：下个 /api/status 重新扫描。"""
+    with _status_scan_lock:
+        _status_scan_cache["ts"] = 0.0
+        _status_scan_cache["value"] = None
+
+
+def _scan_status_snapshot() -> dict:
+    """全量账号扫描（原 /api/status 内联段，抽出以便缓存复用）。"""
     accounts = []
     manual_set = {str(Path(db).resolve()).casefold()
                   for _wxid, db in load_manual_data_dirs()}
@@ -766,13 +819,25 @@ def status():
         accounts.append({"wxid": wxid, "db_dir": db, "db_count": total,
                          "keys_cached": cached, "total_salts": total,
                          "manual": is_manual})
+    return {"accounts": accounts, "stored_salts": len(store),
+            # 同名账号冲突：多个 db_dir 共用 output/<wxid>/，解密会互相覆盖
+            "conflicts": find_account_conflicts(all_dirs)}
+
+
+@app.get("/api/status")
+def status():
+    pids = find_wechat_pids()
+    # 持锁扫描：并发轮询合并为一次全量扫描（此前每次轮询各自全扫）
+    with _status_scan_lock:
+        snap = _status_scan_cache["value"]
+        if snap is None or time.monotonic() - _status_scan_cache["ts"] >= _STATUS_SCAN_TTL:
+            snap = _scan_status_snapshot()
+            _status_scan_cache["ts"] = time.monotonic()
+            _status_scan_cache["value"] = snap
     return jsonify({
         "wechat_running": bool(pids),
         "pids": pids,
-        "accounts": accounts,
-        "stored_salts": len(store),
-        # 同名账号冲突：多个 db_dir 共用 output/<wxid>/，解密会互相覆盖
-        "conflicts": find_account_conflicts(all_dirs),
+        **snap,
     })
 
 
@@ -804,10 +869,13 @@ def run():
                            f"workers={data.get('workers')}")
     with _lock:
         if _job["running"]:
-            log.warn("server", "任务被拒绝: 已有任务在运行")
-            return jsonify({"error": "已有任务在运行"}), 409
+            running_mode = _job.get("mode") or ""
+            label = _JOB_MODE_LABELS.get(running_mode, running_mode or "未知")
+            log.warn("server", f"任务被拒绝: 已有任务在运行（mode={running_mode}）")
+            return jsonify({"error": f"已有任务在运行（{label}），请等它完成后再试"}), 409
         _job.update({"running": True, "mode": data.get("mode", ""), "done": False,
                      "ok": False, "logs": [], "report": None, "error": None,
+                     "export_dir": None,
                      "progress": {"pct": 0, "msg": ""}})
     jid = _next_job_id()
     log.detailed("server", f"[{jid}] job 状态: running=True "
@@ -1099,6 +1167,7 @@ def api_job():
             "logs": _job["logs"],
             "report": _job["report"],
             "error": _job["error"],
+            "export_dir": _job.get("export_dir"),
             "progress": _job.get("progress") or {"pct": 0, "msg": ""},
         })
 
@@ -1242,6 +1311,9 @@ def api_validate_path():
     """验证并保存手动输入的微信存储路径。"""
     data = request.get_json(silent=True) or {}
     result = add_manual_data_dir(data.get("path", ""))
+    if result.get("saved"):
+        # 发现列表变了，/api/status 的账号扫描缓存作废（设置页保存后立刻可见）
+        _invalidate_status_scan()
     return jsonify(result)
 
 

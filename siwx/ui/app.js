@@ -12,7 +12,7 @@
   const PAGES_BUILTIN = ['chat', 'sns', 'stats', 'export', 'backup', 'mcp', 'logs', 'settings'];
   // 静态资源缓存戳（同时作为页面模块的 ?v=）。改了 ui/ 下的 js/css 就 +1，
   // 并同步 siwx/ui/index.html 的 /common.js?v= 与 /app.js?v=（tests/test_version_sync.py 断言两者一致）。
-  const UI_VERSION = '2026102403';
+  const UI_VERSION = '2026102404';
   // 免责声明条款版本：条款有实质更新时改此值，控制台会要求重新确认
   const DISCLAIMER_VERSION = '20260925';
 
@@ -345,6 +345,79 @@
     }
   }
 
+  /* ── 侧栏任务指示（审计 §4.1：全局任务槽只有一个，壳层却不显示）──
+   * 只读展示：与 sideStatus 共用 5s 轮询，GET /api/job 显示运行中任务的
+   * 类型与进度；点「查看」跳到对应页面（导出/补生成 → 导出页）。本模块
+   * 不写任何页面状态、不发起任何写请求，与 export.js 的任务恢复逻辑互不
+   * 抢状态；任务结束只在亲眼观察到 running→结束 的那一拍短暂显示终态，
+   * 页面刚打开时服务端残留的历史 done 不回放。 */
+  const JOB_MODE_LABELS = {
+    keys: '密钥提取', decrypt: '解密', auto: '提取并解密', sync: '增量同步',
+    export: '导出', convert: '补生成', sns_export: '朋友圈导出',
+  };
+  // 「查看」跳转目标：对齐各 mode 的发起页；未登记的一律去导出页
+  const JOB_MODE_PAGE = { export: 'export', convert: 'export', sync: 'chat', sns_export: 'sns' };
+  let jobWasRunning = false;
+  let jobLastMode = '';
+  let jobDoneTimer = null;
+
+  function jobLabel(mode) { return JOB_MODE_LABELS[mode] || mode || '任务'; }
+
+  function ensureSideJob() {
+    let btn = document.getElementById('side-job');
+    if (btn) return btn;
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'side-job';
+    btn.hidden = true;
+    btn.addEventListener('click', () => {
+      const target = JOB_MODE_PAGE[jobLastMode] || 'export';
+      if (currentPageName() !== target) location.hash = `#/${target}`;   // 已在目标页时不重复导航
+    });
+    const side = document.querySelector('.side');
+    const foot = side && side.querySelector('.side-foot');
+    if (!side || !foot) return btn;
+    side.insertBefore(btn, document.getElementById('side-tour') || foot);
+    return btn;
+  }
+
+  async function sideJob() {
+    if (document.hidden) return;             // 后台标签页暂停轮询（与 sideStatus 一致）
+    const btn = ensureSideJob();
+    if (!btn.isConnected) return;            // 侧栏尚未挂载
+    let j;
+    try {
+      j = await (await fetch('/api/job')).json();
+    } catch (e) {
+      btn.hidden = true;                     // 后端离线：sideStatus 已有提示，不留过期指示
+      return;
+    }
+    if (j.running) {
+      jobWasRunning = true;
+      jobLastMode = j.mode || '';
+      clearTimeout(jobDoneTimer);
+      const pct = j.progress && Number(j.progress.pct) > 0 ? ` · ${j.progress.pct}%` : '';
+      btn.className = 'side-job';
+      btn.innerHTML = '<span class="dot run"></span>' +
+        `<span class="side-job-label">${SX.esc(jobLabel(j.mode))}${pct} · 运行中</span>` +
+        '<span class="side-job-go">查看</span>';
+      btn.hidden = false;
+      return;
+    }
+    if (!jobWasRunning) return;              // 未见运行中的空闲拍（含历史 done）：不打扰
+    jobWasRunning = false;                   // 亲眼看到 running → 结束：短暂显示一次终态
+    const cancelled = !!(j.report && j.report.cancelled);
+    const ok = !!j.ok && !j.error && !cancelled;
+    const cls = ok ? 'ok' : (cancelled ? 'warn' : 'err');
+    const suffix = ok ? ' · 已完成' : (cancelled ? ' · 已取消' : ' · 已失败');
+    btn.className = 'side-job' + (ok ? ' done' : (cancelled ? ' cancel' : ' fail'));
+    btn.innerHTML = `<span class="dot ${cls}"></span>` +
+      `<span class="side-job-label">${SX.esc(jobLabel(jobLastMode))}${suffix}</span>`;
+    btn.hidden = false;
+    clearTimeout(jobDoneTimer);
+    jobDoneTimer = setTimeout(() => { btn.hidden = true; }, 6000);
+  }
+
   function initTheme() {
     const saved = localStorage.getItem('siwx-theme');
     if (saved === 'dark' || (!saved && matchMedia('(prefers-color-scheme: dark)').matches)) {
@@ -354,22 +427,32 @@
 
   /* ── 首启引导向导（onboarding.js）────────────────────────
    * 未完成配置时全屏接管；已配置用户从账号下拉 / 各页空态进入 add 模式。
-   * overlayOpen 与免责声明弹层共用：任一打开期间 navigate() 冻结。 */
+   * overlayOpen 与免责声明弹层共用：任一打开期间 navigate() 冻结。
+   * 跳过过引导的用户（siwx-setup-skipped）例外：向导以可关闭的 add 模式
+   * 续跑且 completable（完成提取即计为完成配置），不再被不可关闭向导锁死。 */
   let onboardingMod = null;
 
   function openOnboarding(mode) {
     if (overlayOpen) return;
-    if (mode === 'add' && !SX.setupDone()) mode = 'first';   // 未配置完不允许跳过完整向导
+    const done = SX.setupDone();
+    const skipped = setupSkipped();
+    if (mode === 'add' && !done && !skipped) mode = 'first';   // 未配置完不允许跳过完整向导
+    if (mode === 'first' && skipped) mode = 'add';             // 跳过过引导：不再进不可关闭的完整向导
     overlayOpen = true;
     (async () => {
       try {
         if (!onboardingMod) onboardingMod = await import(`/onboarding.js?v=${UI_VERSION}`);
         onboardingMod.open({
           mode,
+          completable: !done,              // 跳过后续跑：完成提取即视为完成配置
           disclaimerVersion: DISCLAIMER_VERSION,
-          closable: SX.setupDone(),
+          closable: done || skipped,
           onClose: async (res) => {
             overlayOpen = false;
+            if (res && res.finished) {
+              localStorage.removeItem(SETUP_SKIPPED_KEY);   // 完成配置：清除跳过痕迹
+            }
+            updateSetupHint();
             if (res && res.finished) {
               await loadAccounts();
               if (res.account && accounts.some(a => a.wxid === res.account)) {
@@ -377,6 +460,9 @@
               }
               if (currentPageName() !== 'chat') location.hash = '#/chat';
               else navigate();
+              // 本次向导真正完成了配置（first 完整向导 / 跳过后的续跑）：
+              // 首次进入主界面放一轮分步导览（看过或跳过即不再自动弹）
+              if (!done && !tourDone()) maybeStartTour(true);
             } else {
               navigate();          // 关闭向导后刷新当前页（账号列表可能已变化）
             }
@@ -394,6 +480,44 @@
 
   window.__sxOnboarding = { open: openOnboarding };
   window.__sxDisclaimer = { open: () => openDisclaimer('review') };
+
+  /* ── 侧栏「引导未完成」常驻提示 ─────────────────────────────
+   * 首启提取失败可「暂时跳过」（onboarding.js 写 siwx-setup-skipped）。
+   * 跳过不是完成：siwx-setup-done 仍为空，重启不再弹全屏向导，但本入口
+   * 常驻侧栏，点击以 add 模式续跑向导；完成配置后跳过痕迹一并清除。 */
+  const SETUP_SKIPPED_KEY = 'siwx-setup-skipped';
+  function setupSkipped() { return localStorage.getItem(SETUP_SKIPPED_KEY) === '1'; }
+
+  function updateSetupHint() {
+    let btn = document.getElementById('side-setup-hint');
+    if (!btn) {
+      const sideFoot = document.querySelector('.side .side-foot');
+      if (!sideFoot) return;
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = 'side-setup-hint';
+      btn.className = 'setup-hint';
+      btn.hidden = true;
+      btn.innerHTML = '<span class="dot warn"></span><span><b>引导未完成</b>，点击继续配置</span>';
+      btn.addEventListener('click', () => {
+        if (overlayOpen) return;
+        if (!disclaimerAcked()) { openDisclaimer('gate'); return; }  // 条款先行：跳过不豁免门禁
+        openOnboarding('add');
+      });
+      sideFoot.parentElement.insertBefore(btn, sideFoot);
+    }
+    btn.hidden = SX.setupDone() || !setupSkipped();
+  }
+
+  /* 弹层（向导/免责声明）打开期间壳层不可聚焦、不可交互：补齐导航冻结
+   * 之外的焦点门禁，键盘 Tab 也进不去被遮住的菜单。旧浏览器忽略 inert，
+   * 无副作用。onboarding.js 对自身生命周期做同样处理。 */
+  function shellInert(on) {
+    const shell = document.querySelector('.shell');
+    if (!shell) return;
+    if (on) shell.setAttribute('inert', '');
+    else shell.removeAttribute('inert');
+  }
 
   /* ── 免责声明弹层 ─────────────────────────────────────────
    * 常驻全文入口在「设置 → 隐私与免责声明」（window.__sxDisclaimer）。
@@ -424,8 +548,9 @@
 
     const sub = document.createElement('div');
     sub.className = 'disc-sub';
+    // gate 只对已配置用户弹出（首启确认由向导第 1 步承担），故措辞按「再确认」
     sub.textContent = mode === 'gate'
-      ? '首次使用需阅读并确认本声明后才能进入控制台；条款更新后会再次弹出。'
+      ? '条款已更新，请阅读并重新确认本声明后继续使用。'
       : '以下是本声明的全文。';
 
     const body = document.createElement('div');
@@ -434,25 +559,38 @@
 
     const actions = document.createElement('div');
     actions.className = 'disc-actions';
+    let accept = null;
     if (mode === 'gate') {
       const decline = document.createElement('button');
       decline.className = 'btn';
       decline.textContent = '不同意并退出';
       decline.addEventListener('click', () => {
         window.close();                       // 仅对脚本打开的窗口有效
+        actions.style.display = 'none';
         body.innerHTML = '';
         body.insertAdjacentHTML('beforeend',
           '<div class="card"><h2>你未同意免责声明</h2>' +
-          '<p class="dim">已停止提供服务，请关闭本页并删除本工具。若为误点，请刷新页面重新阅读。</p></div>');
-        actions.innerHTML = '';
+          '<p class="dim">已停止提供服务，请关闭本页并删除本工具。若为误点，可返回重新阅读。</p></div>');
+        const back = document.createElement('button');
+        back.className = 'btn';
+        back.textContent = '← 返回重新阅读';
+        back.style.marginTop = '10px';
+        back.addEventListener('click', () => {
+          actions.style.display = '';
+          loadBody();
+        });
+        body.appendChild(back);
       });
-      const accept = document.createElement('button');
+      accept = document.createElement('button');
       accept.className = 'btn btn-primary';
       accept.textContent = '我已阅读并同意';
+      accept.disabled = true;                 // 条款加载完成前禁止确认（fail-open 修复）
       accept.addEventListener('click', () => {
         localStorage.setItem('siwx-disclaimer-ack', DISCLAIMER_VERSION);
+        localStorage.setItem('siwx-disclaimer-ack-ts', String(Date.now()));  // 前端留痕：确认时间戳
         ov.remove();
         overlayOpen = false;
+        shellInert(false);
         navigate();
       });
       actions.append(decline, accept);
@@ -460,24 +598,231 @@
       const close = document.createElement('button');
       close.className = 'btn btn-primary';
       close.textContent = '关闭';
-      close.addEventListener('click', () => { ov.remove(); overlayOpen = false; });
+      close.addEventListener('click', () => { ov.remove(); overlayOpen = false; shellInert(false); });
       actions.append(close);
     }
 
     card.append(head, sub, body, actions);
     ov.appendChild(card);
     document.body.appendChild(ov);
-    try {
-      const r = await fetch(`/pages/disclaimer.html?v=${UI_VERSION}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      body.innerHTML = await r.text();
-    } catch (e) {
-      body.innerHTML = '';
-      body.insertAdjacentHTML('beforeend',
-        '<div class="card"><h2>免责声明加载失败</h2>' +
-        `<p class="dim">${SX.esc(String(e))}</p>` +
-        '<p class="dim">请前往 GitHub 仓库（github.com/ImUpXuu/SIWX）阅读 README 中的完整免责声明后，刷新本页重试。</p></div>');
+    shellInert(true);                         // 弹层打开期间壳层不可聚焦/不可交互
+
+    /* 全文加载（初始 + 重试共用）；gate 模式下加载失败保持「同意」禁用，
+       条款一字未显示不得完成法律确认。 */
+    async function loadBody() {
+      body.textContent = '加载中…';
+      try {
+        const r = await fetch(`/pages/disclaimer.html?v=${UI_VERSION}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        body.innerHTML = await r.text();
+        if (accept) accept.disabled = false;
+      } catch (e) {
+        body.innerHTML = '';
+        body.insertAdjacentHTML('beforeend',
+          '<div class="card"><h2>免责声明加载失败</h2>' +
+          `<p class="dim">${SX.esc(String(e))}</p>` +
+          '<p class="dim">请检查后端服务是否正常；也可前往 GitHub 仓库（github.com/ImUpXuu/SIWX）阅读 README 中的完整免责声明。</p></div>');
+        if (accept) accept.disabled = true;
+        const retry = document.createElement('button');
+        retry.className = 'btn';
+        retry.textContent = '重新加载';
+        retry.style.marginTop = '10px';
+        retry.addEventListener('click', loadBody);
+        body.appendChild(retry);
+      }
     }
+    loadBody();
+  }
+
+  /* ── 首进导览（分步遮罩，壳层组件；审计 §2.5：核心用法链零覆盖）──
+   * 半透明遮罩挖孔高亮目标元素 + 说明气泡；每步「下一步 / 跳过」，Esc 退出。
+   * 看完或跳过都写 siwx-tour-done：自动播放只出现一次；侧栏常驻
+   * 「使用导览」入口对所有人（含跳过过引导的用户与老用户）可重看。
+   * 目标元素不在当前页（如导出页的开始按钮）时先导航过去等它出现；等不到
+   * 就退化高亮侧栏对应菜单项，再不行气泡居中——导览绝不因元素变动报错卡死。 */
+  const TOUR_DONE_KEY = 'siwx-tour-done';
+  const TOUR_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.3a2.5 2.5 0 1 1 3.9 2.1c-.8.5-1.4 1-1.4 1.9"/><path d="M12 17h.01"/></svg>';
+
+  const TOUR_STEPS = [
+    { sel: '#menu', title: '侧栏导航：各页各管一摊',
+      text: '聊天查看浏览记录、朋友圈看动态、统计看数据、导出拿文件、日志排障、设置调选项——点菜单随时切换。' },
+    { sel: '#e-run', page: 'export', fb: '#menu a[data-page="export"]',
+      title: '导出三步',
+      text: '进入「导出」页：勾选要导出的会话 → 选格式与打包方式 → 点绿色「开始导出」按钮（进页后高亮的那个）。' },
+    { sel: '#e-result', page: 'export', fb: '#menu a[data-page="export"]',
+      title: '完成后拿文件',
+      text: '导出完成后，运行日志卡底部的结果区会出现「📂 打开目录」按钮，点它直接打开导出文件夹。' },
+    { sel: '#side-wx', fb: '#side-foot', title: '任务与状态',
+      text: '这里显示微信连接状态；导出、同步等任务运行时，上方会出现任务进度条和「查看」入口，点了直达对应页面。' },
+    { sel: '#side-tour', title: '随时重看',
+      text: '忘了怎么用？点侧栏的「使用导览」随时重看本轮导览。' },
+  ];
+
+  function tourDone() { return localStorage.getItem(TOUR_DONE_KEY) === '1'; }
+  function markTourDone() { localStorage.setItem(TOUR_DONE_KEY, '1'); }
+
+  function tourElVisible(el) {
+    return !!el && !!el.getBoundingClientRect && el.getBoundingClientRect().width > 0;
+  }
+
+  function tourWaitFor(sel, timeoutMs) {
+    return new Promise((resolve) => {
+      const t0 = Date.now();
+      const tick = () => {
+        const el = document.querySelector(sel);
+        if (tourElVisible(el)) { resolve(el); return; }
+        if (Date.now() - t0 >= timeoutMs) { resolve(null); return; }
+        setTimeout(tick, 120);
+      };
+      tick();
+    });
+  }
+
+  async function tourResolveTarget(step) {
+    if (step.page && currentPageName() !== step.page) {
+      location.hash = `#/${step.page}`;
+      const found = await tourWaitFor(step.sel, 3000);
+      if (tourElVisible(found)) return found;
+    }
+    const el = document.querySelector(step.sel);
+    if (tourElVisible(el)) return el;
+    const fb = step.fb ? document.querySelector(step.fb) : null;
+    return tourElVisible(fb) ? fb : null;
+  }
+
+  /* 挖孔矩形：目标 rect 外扩一点；过小/不可见的目标（如空结果区）给最小
+   * 可见尺寸，并整体夹在视口内，窄窗口也不出界。 */
+  function tourRectFor(el) {
+    const r = el.getBoundingClientRect();
+    const pad = 6;
+    const w = Math.min(Math.max(r.width, 72), innerWidth - 16);
+    const h = Math.min(Math.max(r.height, 44), innerHeight - 16);
+    const cx = Math.min(Math.max(r.left + r.width / 2, 0), innerWidth);
+    const cy = Math.min(Math.max(r.top + r.height / 2, 0), innerHeight);
+    return {
+      left: Math.min(Math.max(cx - w / 2 - pad, 8), Math.max(8, innerWidth - w - pad * 2)),
+      top: Math.min(Math.max(cy - h / 2 - pad, 8), Math.max(8, innerHeight - h - pad * 2)),
+      width: Math.min(w + pad * 2, innerWidth - 16),
+      height: Math.min(h + pad * 2, innerHeight - 16),
+    };
+  }
+
+  function tourPlace() {
+    if (!tour) return;
+    if (tour.el && tour.el.isConnected && tourElVisible(tour.el)) {
+      const rect = tourRectFor(tour.el);
+      Object.assign(tour.spot.style, {
+        display: 'block',
+        left: rect.left + 'px', top: rect.top + 'px',
+        width: rect.width + 'px', height: rect.height + 'px',
+      });
+      // 气泡：优先放目标下方，放不下放上方，再不行就近贴放；左右夹在视口内
+      const bw = tour.bubble.offsetWidth, bh = tour.bubble.offsetHeight;
+      let top;
+      if (rect.top + rect.height + bh + 14 < innerHeight) top = rect.top + rect.height + 12;
+      else if (rect.top - bh - 14 > 0) top = rect.top - bh - 12;
+      else top = Math.min(Math.max(12, rect.top + rect.height + 12), innerHeight - bh - 12);
+      tour.bubble.style.top = Math.max(12, top) + 'px';
+      tour.bubble.style.left =
+        Math.min(Math.max(12, rect.left + rect.width / 2 - bw / 2), innerWidth - bw - 12) + 'px';
+      tour.bubble.classList.remove('center');
+    } else {
+      tour.spot.style.display = 'none';       // 无可高亮目标：遮罩退化为居中说明
+      tour.bubble.classList.add('center');
+      tour.bubble.style.top = '';
+      tour.bubble.style.left = '';
+    }
+  }
+
+  async function tourShow(idx) {
+    if (!tour) return;
+    tour.idx = idx;
+    // 每步在此统一解析目标（可能跨页导航等待元素）；等待期间导览被关闭则放弃
+    tour.el = await tourResolveTarget(TOUR_STEPS[idx]);
+    if (!tour) return;
+    const step = TOUR_STEPS[idx];
+    const last = idx === TOUR_STEPS.length - 1;
+    tour.bubble.innerHTML =
+      `<div class="tour-step-tag">${idx + 1} / ${TOUR_STEPS.length}</div>` +
+      `<h3>${SX.esc(step.title)}</h3><p>${SX.esc(step.text)}</p>` +
+      '<div class="tour-actions">' +
+      '<button type="button" class="btn tour-skip">跳过导览</button>' +
+      '<span class="tour-grow"></span>' +
+      `<button type="button" class="btn btn-primary tour-next">${last ? '完成 ✓' : '下一步 →'}</button>` +
+      '</div>';
+    tour.bubble.querySelector('.tour-skip').addEventListener('click', tourClose);
+    tour.bubble.querySelector('.tour-next').addEventListener('click', () => {
+      if (last) { tourClose(); return; }
+      const nextBtn = tour && tour.bubble.querySelector('.tour-next');
+      if (nextBtn) nextBtn.disabled = true;   // 等待跨页定位期间防连点
+      tourShow(idx + 1);
+    });
+    tour.bubble.querySelector('.tour-next').focus();
+    tourPlace();
+  }
+
+  let tour = null;   // { idx, root, spot, bubble, el, onKey, onMove }
+
+  function tourStart() {
+    if (tour || overlayOpen) return;
+    const root = document.createElement('div');
+    root.className = 'tour-overlay';
+    const spot = document.createElement('div');
+    spot.className = 'tour-spot';
+    const bubble = document.createElement('div');
+    bubble.className = 'tour-bubble';
+    bubble.setAttribute('role', 'dialog');
+    bubble.setAttribute('aria-label', '使用导览');
+    root.append(spot, bubble);
+    document.body.appendChild(root);
+
+    tour = { idx: 0, root, spot, bubble, el: null, onKey: null, onMove: null };
+    tour.onKey = (ev) => { if (ev.key === 'Escape') { tourClose(); ev.preventDefault(); } };
+    tour.onMove = () => {
+      if (tour && tour.el && !tour.el.isConnected) tour.el = null;   // 目标被切页移除：收起挖孔
+      tourPlace();
+    };
+    document.addEventListener('keydown', tour.onKey, true);
+    window.addEventListener('resize', tour.onMove);
+    document.addEventListener('scroll', tour.onMove, true);
+    tourShow(0);
+  }
+
+  function tourClose() {
+    if (!tour) return;
+    markTourDone();                           // 看完/跳过都记一次，不再自动弹
+    document.removeEventListener('keydown', tour.onKey, true);
+    window.removeEventListener('resize', tour.onMove);
+    document.removeEventListener('scroll', tour.onMove, true);
+    tour.root.remove();
+    tour = null;
+  }
+
+  /* 自动播放门槛：配置完成 + 非跳过用户 + 从未看过。跳过过引导的用户可能
+   * 还没有可用数据，不自动放；老用户升级后首次进入主界面放一次。 */
+  function maybeStartTour(auto) {
+    if (overlayOpen || tour) return;
+    if (auto && (tourDone() || setupSkipped() || !SX.setupDone())) return;
+    tourStart();
+  }
+
+  /* 侧栏常驻「使用导览」入口：新用户、跳过过引导的用户与老用户都能重看 */
+  function ensureSideTour() {
+    let btn = document.getElementById('side-tour');
+    if (btn) return btn;
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'side-tour';
+    btn.className = 'side-tour';
+    btn.title = '使用导览：分步高亮认识各页面入口';
+    btn.innerHTML = `<span class="side-tour-ico" aria-hidden="true">${TOUR_ICON}</span>` +
+      '<span>使用导览</span>';
+    btn.addEventListener('click', () => { if (!overlayOpen) tourStart(); });
+    const side = document.querySelector('.side');
+    const foot = side && side.querySelector('.side-foot');
+    if (!side || !foot) return btn;
+    side.insertBefore(btn, foot);
+    return btn;
   }
 
   initTheme();
@@ -502,19 +847,31 @@
     else openAccPop();
   });
   window.addEventListener('hashchange', navigate);
+  ensureSideTour();
   sideStatus();
-  setInterval(sideStatus, 5000);
+  sideJob();
+  setInterval(() => { sideStatus(); sideJob(); }, 5000);
 
-  /* 启动顺序：账号 → 插件菜单 → 首启向导 / 条款更新确认 / 路由。
-   * 首启（未完成配置）由全屏向导接管；条款版本更新时对老用户补一次声明确认。 */
+  /* 启动顺序：账号 → 插件菜单 → 首启向导 / 跳过续跑 / 条款更新确认 / 路由。
+   * 首启（未完成配置）由全屏向导接管；跳过过引导的用户放行进主界面排障，
+   * 但条款门禁照常生效，且侧栏常驻「引导未完成」续跑入口；条款版本更新时
+   * 对老用户补一次声明确认；配置完成且未看过导览时，进入主界面放一轮
+   * 分步导览（看完/跳过写 siwx-tour-done，只出现一次）。 */
   loadAccounts().finally(() => {
     loadPluginMenu();
     if (!SX.setupDone()) {
-      openOnboarding('first');
+      if (setupSkipped()) {
+        updateSetupHint();
+        if (!disclaimerAcked()) openDisclaimer('gate');   // 跳过不豁免条款门禁
+        else navigate();
+      } else {
+        openOnboarding('first');
+      }
     } else if (!disclaimerAcked()) {
       openDisclaimer('gate');
     } else {
       navigate();
+      maybeStartTour(true);       // 老用户升级后首次进入：一次性分步导览
     }
   });
 })();

@@ -5,9 +5,13 @@
  *     保持既有的 hash 路由 + 模块化加载契约（init(view) / destroy()）不变；
  *   - 纯函数区保持导出（relTime/monthCells/sortFriends/…），便于脚本化验证；
  *   - 响应式状态集中在 store，子组件（sns-post / sns-ava）共享；
- *   - 好友列表到达后昵称/头像自动刷新（Vue 响应式，不再需要 rerenderList 补丁）。
+ *   - 好友列表到达后昵称/头像自动刷新（Vue 响应式，不再需要 rerenderList 补丁）；
+ *   - 下拉/菜单用 widgets.js 的自绘控件（sx-dd 包装组件桥接 Vue 状态，
+ *     「···」操作菜单走 openMenu），不再混用原生 select 与手写菜单。
  */
-const { fetchJSON, copyText } = window.SX;
+import { createDropdown, openMenu } from '/widgets.js?v=2026100601';
+
+const { fetchJSON, copyText, fmtTs, fmtDate } = window.SX;
 const pad = n => String(n).padStart(2, '0');
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -30,12 +34,9 @@ export function relTime(ts, now) {
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
-/** 完整时间（详情弹层 / title 提示用） */
+/** 完整时间（详情弹层 / title 提示用）：与全站 fmtTs 同一份 YYYY-MM-DD HH:MM */
 export function fullTime(ts) {
-  if (!ts) return '';
-  const d = new Date(ts * 1000);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} `
-    + `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return fmtTs(ts);
 }
 
 /** 日历网格（周日起始，固定 6 行 42 格）；ts 为**本地零点**的 unix 秒 */
@@ -161,6 +162,22 @@ const QUICK_RANGES = [
   { key: 'thisyear', label: '今年' },
 ];
 
+/* 发布者排序 / 导出格式下拉选项（与原 select 的 option 一一对应） */
+const SORT_OPTIONS = [
+  { value: 'count-desc', label: '发送量 多 → 少' },
+  { value: 'count-asc', label: '发送量 少 → 多' },
+  { value: 'name-asc', label: '名称拼音 A → Z' },
+  { value: 'name-desc', label: '名称拼音 Z → A' },
+  { value: 'recent-desc', label: '最近发布' },
+  { value: 'oldest-asc', label: '最早发布' },
+];
+const FMT_OPTIONS = [
+  { value: 'json', label: 'JSON' },
+  { value: 'markdown', label: 'Markdown' },
+  { value: 'html', label: 'HTML' },
+  { value: 'txt', label: 'TXT' },
+];
+
 /* ══ 响应式共享状态 ═══════════════════════════════════════════ */
 
 const store = Vue.reactive({
@@ -195,7 +212,6 @@ const store = Vue.reactive({
   lightbox: { visible: false, src: '', video: false, items: [], index: 0 },
   modal: { visible: false, post: null, error: '' },
   meAvaOk: false,
-  activeMenuTid: null,
 
   exportFmt: 'json',
   exportMedia: false,
@@ -296,6 +312,41 @@ const SnsAva = {
     </span>`,
 };
 
+/* ══ 自绘下拉的 Vue 桥（widgets.createDropdown）══════════════
+ * 页内不再用原生 select（弹出面板无法跟随主题）。组件只渲染一个挂载点，
+ * 命令式控件在 mounted 里创建；值经 v-model 双向同步，options 变化整体
+ * 下发。销毁时交还 widgets（收起弹层、摘除文档级监听）。 */
+const SxDd = {
+  name: 'sx-dd',
+  props: {
+    options: { type: Array, default: () => [] },
+    modelValue: { default: null },
+    label: { type: String, default: '' },
+    placeholder: { type: String, default: '' },
+  },
+  emits: ['update:modelValue'],
+  watch: {
+    modelValue(v) {
+      if (this._dd && String(this._dd.value) !== String(v ?? null)) this._dd.value = v;
+    },
+    options(list) { if (this._dd) this._dd.options = list; },
+  },
+  mounted() {
+    this._dd = createDropdown({
+      options: this.options,
+      value: this.modelValue,
+      label: this.label,
+      placeholder: this.placeholder || '请选择',
+      onChange: v => this.$emit('update:modelValue', v),
+    });
+    this.$refs.mount.appendChild(this._dd.el);
+  },
+  beforeUnmount() {
+    if (this._dd) { this._dd.destroy(); this._dd = null; }
+  },
+  template: '<span class="sx-dd-mount" ref="mount"></span>',
+};
+
 /* ══ 动态卡片组件（正文/媒体/卡片/互动/操作菜单）══════════════ */
 
 const SnsPost = {
@@ -309,7 +360,6 @@ const SnsPost = {
     uname() { return this.post.user_name || this.post.username || ''; },
     display() { return nameOf(this.uname); },
     tid() { return String(this.post.tid); },
-    menuOpen() { return store.activeMenuTid === this.tid; },
     items() { return (this.post.medias || []).filter(m => m.url && isCdnMedia(m.url)); },
     gridCls() { return mediaCols(this.items.length); },
     likes() { return this.post.likes || []; },
@@ -354,7 +404,6 @@ const SnsPost = {
       if (url) store.lightbox = { visible: true, src: url, video: false, items: [], index: 0 };
     },
     openDetail() {
-      store.activeMenuTid = null;
       const tid = this.tid;
       store.modal = { visible: true, post: null, error: '', tid };
       fetchJSON(`/api/sns/detail?account=${encodeURIComponent(store.account)}&tid=${encodeURIComponent(tid)}`)
@@ -367,17 +416,21 @@ const SnsPost = {
         });
     },
     copyText_() {
-      store.activeMenuTid = null;
       copyText(this.post.content_desc || '')
         .then(ok => toast(ok ? '已复制文字' : '复制失败'));
     },
     copyId() {
-      store.activeMenuTid = null;
       copyText(this.tid).then(ok => toast(ok ? '已复制动态 ID' : '复制失败'));
     },
-    toggleMenu(ev) {
-      ev.stopPropagation();
-      store.activeMenuTid = this.menuOpen ? null : this.tid;
+    /** 「···」操作菜单：走 widgets.openMenu（点外部/Esc/滚动自动收起，
+     *  与聊天页消息右键菜单同一套交互）；锚点右对齐贴住按钮。 */
+    openOpsMenu(ev) {
+      const r = ev.currentTarget.getBoundingClientRect();
+      openMenu([
+        { label: '查看详情', onClick: () => this.openDetail() },
+        { label: '复制文字', onClick: () => this.copyText_() },
+        { label: '复制动态 ID', onClick: () => this.copyId() },
+      ], r.right, r.bottom + 4, { align: 'right' });
     },
   },
   template: `
@@ -449,12 +502,7 @@ const SnsPost = {
           <span v-if="compact" class="sns-detail-link" @click="openDetail">详情</span>
           <span v-else class="sns-time">· 赞 {{ likes.length }} · 评论 {{ comments.length }}</span>
           <span class="sns-ops">
-            <button class="sns-ops-btn" title="更多操作" @click="toggleMenu">···</button>
-            <span class="sns-ops-menu" :hidden="!menuOpen">
-              <button @click="openDetail">查看详情</button>
-              <button @click="copyText_">复制文字</button>
-              <button @click="copyId">复制动态 ID</button>
-            </span>
+            <button class="sns-ops-btn" title="更多操作" @click="openOpsMenu">···</button>
           </span>
         </div>
 
@@ -485,7 +533,7 @@ let _kwTimer = null;
 let _io = null;
 
 const SnsPage = {
-  components: { 'sns-post': SnsPost, 'sns-ava': SnsAva },
+  components: { 'sns-post': SnsPost, 'sns-ava': SnsAva, 'sx-dd': SxDd },
   data() { return store; },
   computed: {
     meName() {
@@ -508,6 +556,8 @@ const SnsPage = {
       return s;
     },
     quickRanges() { return QUICK_RANGES; },
+    sortOptions() { return SORT_OPTIONS; },
+    fmtOptions() { return FMT_OPTIONS; },
     calTitle() {
       if (store.cal.jump === 'year') return '选择年份';
       if (store.cal.jump === 'month') return '选择月份';
@@ -581,10 +631,9 @@ const SnsPage = {
       if (show && id === 'range') this.openRange();
     },
     describeRange(start, end) {
-      const f = t => {
-        const d = new Date(t * 1000);
-        return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-      };
+      // 日期走 SX.fmtDate（YYYY-MM-DD）：原页内自拼不补零的 YYYY/M/D，
+      // 与导出页范围横幅等处相邻出现观感不齐（审计 §4.8）
+      const f = t => fmtDate(t);
       if (start && end) return start === end ? f(start) : `${f(start)} - ${f(end)}`;
       if (start) return `${f(start)} 起`;
       if (end) return `至 ${f(end)}`;
@@ -806,13 +855,13 @@ const SnsPage = {
 /* ══ 生命周期 ═════════════════════════════════════════════════ */
 
 export async function init(view) {
-  // 全局事件：点外面关弹层 / Esc 关弹层与灯箱 / 菜单互斥
+  // 全局事件：点外面关弹层 / Esc 关弹层与灯箱（「···」菜单由 widgets.openMenu
+  // 自带点外/Esc 收起，不再走 store 互斥）
   _docClick = ev => {
     // [data-pop] 是三个弹层触发器（时间范围 / 发布者 / 导出）——
     // 漏掉任何一个，点它会先开、再被这里立刻关掉，表现为「点了没反应」
     if (ev.target.closest('.sns-pop') || ev.target.closest('[data-pop]')) return;
     store.pops.range = store.pops.user = store.pops.export = false;
-    if (!ev.target.closest('.sns-ops')) store.activeMenuTid = null;
   };
   _keyDown = ev => {
     if (ev.key === 'Escape') {
@@ -891,7 +940,6 @@ export function destroy() {
   clearTimeout(_kwTimer);
   store.lightbox.visible = false;
   store.modal.visible = false;
-  store.activeMenuTid = null;
   if (_app) { try { _app.unmount(); } catch (e) { /* 忽略 */ } _app = null; }
   vm = null;
 }

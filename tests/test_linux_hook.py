@@ -110,7 +110,7 @@ class RegistrationTest(unittest.TestCase):
         logs = []
         ctx = {"page1_by_salt": {_SALT_A.hex(): b"x" * PAGE_SZ},
                "key_map": {}, "attrib": {}, "log": logs.append, "dbg": logs.append}
-        with mock.patch.object(sys, "platform", "linux"), \
+        with mock.patch.object(platform, "system", return_value="Linux"), \
              mock.patch.object(platform, "machine", return_value="aarch64"):
             self.assertEqual(linux_hook.extract(ctx), 0)
         self.assertTrue(any("仅支持 x86-64" in m for m in logs))
@@ -328,6 +328,7 @@ class ElfHookTest(unittest.TestCase):
 class ShimBuildTest(unittest.TestCase):
     """现场编译 shim：运行期真正依赖的一步。"""
 
+    @unittest.skipUnless(platform.system() == "Linux", "shim 为 Linux ELF 产物，仅在 Linux 现场编译")
     def test_builds_shared_object(self):
         import shutil
         from siwx.strategies.linux_hook import _build_shim

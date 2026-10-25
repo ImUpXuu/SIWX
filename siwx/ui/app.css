@@ -524,6 +524,72 @@ input[type="checkbox"] { accent-color: var(--accent); min-height: auto; }
 }
 .ob-warn-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .ob-manual-entry { margin-top: 12px; }
+/* 向导失败出口「暂时跳过」按钮与上方文案/徽标的间距 */
+#ob-skip { margin-top: 8px; }
+
+/* 「接下来做什么」屏（first 模式提取成功后、进入主界面的最后一屏） */
+.ob-next-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 8px; margin-bottom: 14px;
+}
+.ob-next-row {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--card);
+}
+.ob-next-ico { flex: none; font-size: 16px; line-height: 1.45; }
+.ob-next-txt { min-width: 0; }
+.ob-next-txt b { display: block; font-size: 13px; font-weight: 700; }
+.ob-next-txt span { font-size: 12px; color: var(--muted); }
+.ob-next-flow {
+  border: 1px solid var(--accent-line); border-radius: var(--radius);
+  background: var(--accent-soft); padding: 12px 14px;
+}
+.ob-next-flow-title { font-size: 13px; font-weight: 700; color: var(--accent-fg); margin-bottom: 6px; }
+.ob-next-steps { font-size: 14px; font-weight: 600; }
+.ob-next-steps i { font-style: normal; color: var(--faint); padding: 0 3px; }
+.ob-next-flow .dim { font-size: 12px; margin-top: 6px; }
+
+/* 侧栏「引导未完成」提示（跳过首启向导后常驻，点击续跑向导；见 app.js updateSetupHint） */
+.setup-hint {
+  display: flex; align-items: center; gap: 8px;
+  margin: 10px 12px 0; padding: 9px 11px;
+  border: 1px solid var(--warn-line); border-radius: var(--radius);
+  background: var(--warn-soft); color: var(--warn);
+  font-size: 12px; line-height: 1.45; cursor: pointer; text-align: left;
+}
+.setup-hint b { font-weight: 600; }
+
+/* 侧栏「使用导览」常驻入口（app.js ensureSideTour；新/老用户与跳过过引导
+ * 的用户都可重看分步导览） */
+.side-tour {
+  display: flex; align-items: center; gap: 7px;
+  margin: 8px 2px 0; padding: 7px 9px; width: calc(100% - 4px);
+  border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--muted);
+  font-size: 12px; cursor: pointer; text-align: left; min-width: 0;
+  transition: background .12s ease, color .12s ease;
+}
+.side-tour:hover { background: var(--card-alt); color: var(--text); }
+.side-tour-ico { display: inline-flex; flex: none; }
+.side-tour-ico svg { width: 13px; height: 13px; display: block; }
+
+/* 侧栏任务运行指示（app.js sideJob；只读展示，点「查看」跳对应页面） */
+.side-job {
+  display: flex; align-items: center; gap: 7px;
+  margin: 8px 2px 0; padding: 7px 9px; width: calc(100% - 4px);
+  border: 1px solid var(--accent-line); border-radius: var(--radius);
+  background: var(--accent-soft); color: var(--accent-fg);
+  font-size: 12px; cursor: pointer; text-align: left; min-width: 0;
+}
+.side-job.fail { border-color: var(--danger-line); background: var(--danger-soft); color: var(--danger); }
+.side-job.cancel { border-color: var(--warn-line); background: var(--warn-soft); color: var(--warn); }
+.side-job-label { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.side-job-go { flex: none; font-weight: 700; }
+/* 运行中呼吸点：全局唯一彩色锚点（accent），reduced-motion 时静止 */
+.dot.run { background: var(--accent); animation: dotPulse 1.1s ease-in-out infinite; }
+@keyframes dotPulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .dot.run { animation: none; } }
 
 /* 步骤 chips / 环境检测框 / 账号卡 / 手动路径 —— 向导与设置「数据源管理」共用
    （迁移自原 guide 页样式，guide 页已并入壳层组件与设置页） */
@@ -587,6 +653,38 @@ input[type="checkbox"] { accent-color: var(--accent); min-height: auto; }
   .accounts { grid-template-columns: 1fr; }
   .g-title { font-size: 20px; }
   .ob-actions .btn { width: 100%; }
+}
+
+/* ── 首进导览（壳层组件 app.js：遮罩挖孔高亮 + 说明气泡）──────────
+ * .tour-overlay 本体透明、全屏拦点击；暗色由 .tour-spot 的巨型 box-shadow
+ * 承担（挖孔外一圈半透明），不引入第三种遮罩色。 */
+.tour-overlay { position: fixed; inset: 0; z-index: 120; }
+.tour-spot {
+  position: fixed; z-index: 120; pointer-events: none;
+  border-radius: 12px; border: 2px solid var(--accent);
+  box-shadow: 0 0 0 9999px rgba(15, 16, 14, .52);
+  transition: top .22s ease, left .22s ease, width .22s ease, height .22s ease;
+}
+.tour-bubble {
+  position: fixed; z-index: 121;
+  width: min(340px, calc(100vw - 24px));
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 13px 16px 14px;
+}
+.tour-bubble.center { top: 50%; left: 50%; transform: translate(-50%, -50%); }
+.tour-step-tag { font-size: 11px; font-weight: 700; letter-spacing: .3px; color: var(--faint); }
+.tour-bubble h3 { font-size: 15px; font-weight: 700; margin: 2px 0 4px; }
+.tour-bubble p { font-size: 13px; color: var(--muted); line-height: 1.65; }
+.tour-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.tour-grow { flex: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .tour-spot { transition: none; }
+}
+/* 侧栏在 <900px 变横向条：新注入的两行跟随菜单之后，避免插队到账号卡前 */
+@media (max-width: 900px) {
+  .side-tour, .side-job { order: 4; margin: 0 0 0 4px; width: auto; }
+  .side-tour span:last-child { display: none; }   /* 窄屏只留图标 */
 }
 
 /* ── 切页过渡（app.js navigate 触发）────────────────────── */

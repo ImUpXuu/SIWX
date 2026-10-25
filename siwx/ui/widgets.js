@@ -304,9 +304,11 @@ export function createDatePicker({ value = null, onChange = null,
 }
 
 /* ── 轻量弹出菜单（右键 / 长按触发）──────────────────────────
- * openMenu(items, x, y) → 关闭函数。
- * items: [{ label, onClick?, disabled?, note? }]，note 仅作说明文字。 */
-export function openMenu(items, x, y) {
+ * openMenu(items, x, y, opts) → 关闭函数。
+ * items: [{ label, onClick?, disabled?, note? }]，note 仅作说明文字。
+ * opts.align === 'right'：x 作为菜单**右缘**定位（贴锚点右对齐，用于
+ * 「···」这类靠右的操作按钮；不传则 x 为左缘，行为与旧版一致）。 */
+export function openMenu(items, x, y, opts = {}) {
   closeMenu();
   const menu = h('div', 'sxw-menu');
   menu.setAttribute('role', 'menu');
@@ -324,7 +326,8 @@ export function openMenu(items, x, y) {
   const r = menu.getBoundingClientRect();
   const vw = document.documentElement.clientWidth;
   const vh = document.documentElement.clientHeight;
-  menu.style.left = `${Math.max(8, Math.min(x, vw - r.width - 8))}px`;
+  const left = opts.align === 'right' ? x - r.width : x;
+  menu.style.left = `${Math.max(8, Math.min(left, vw - r.width - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, vh - r.height - 8))}px`;
   const onDocDown = (ev) => { if (!menu.contains(ev.target)) closeMenu(); };
   const onDocKey = (ev) => { if (ev.key === 'Escape') { closeMenu(); ev.preventDefault(); } };

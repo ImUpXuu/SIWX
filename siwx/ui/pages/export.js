@@ -6,7 +6,7 @@
    手动勾选优先级最高，且只在与默认判定不同时才落盘。 */
 import { createDropdown, createDatePicker } from '/widgets.js?v=2026100601';
 
-const { esc, fetchJSON, fmtListTs, toast, getAccount, setAccount, go, copyText } = window.SX;
+const { esc, fetchJSON, fmtListTs, timeStr, toast, getAccount, setAccount, go, copyText } = window.SX;
 
 function el(id) { return document.getElementById(id); }
 
@@ -454,6 +454,42 @@ async function init() {
     toast(ok ? '已复制运行日志' : '复制失败', !ok);
   });
   el('e-run').addEventListener('click', run);
+  restoreJob();
+}
+
+/** 切页/刷新后的任务现场恢复：/api/job 在任务终局后仍持久保留 report 与
+ *  日志（_job 直到下一次 /api/run 才重置），init 拉一次把界面重新挂上——
+ *  导出期间切页再回来，结果与"打开目录"不再丢失。
+ *  只接管 export / convert 两种任务（同步、引导提取等由发起页负责）；
+ *  后端离线时维持页面现状，用户操作时自会看到报错。 */
+async function restoreJob() {
+  let job;
+  try { job = await (await fetch('/api/job')).json(); }
+  catch (e) { return; }
+  if (gone() || running) return;
+  const mode = job.mode;
+  if (mode !== 'export' && mode !== 'convert') return;
+  if (job.running) {
+    // 进行中：恢复进度卡与轮询（复用 poll，任务终局自动渲染结果面板）
+    running = true;
+    currentRunMode = mode;
+    lastTask = { mode };
+    updateCount();
+    el('e-progress-card').classList.remove('hidden');
+    resetCancelButton();
+    lastLogs = job.logs || [];
+    renderLogs(lastLogs);
+    renderProgress(job);
+    poll();
+    return;
+  }
+  if (!job.done || (!job.report && !job.error)) return;
+  // 已终局：直接走现有渲染（export/convert 两种 report 都认得）。
+  // 失败任务的输出目录由后端随 _job.export_dir 带回，顺手恢复——
+  // 补生成失败后的"重试"也依赖它才能落回正确目录。
+  if (job.export_dir) lastExportDir = job.export_dir;
+  lastTask = { mode };
+  renderResult(job);
 }
 
 async function loadSessions() {
@@ -651,7 +687,11 @@ async function runConvert(formats, overwrite = false) {
 }
 
 async function run() {
-  if (running || !selected.size) return;
+  if (running) return;
+  // 常规路径「开始导出」按钮在未勾选时本就置灰；走到这里的还有结果面板的
+  // 「↻ 重试」（restoreJob 恢复的失败结果，切页回来后 selected 已为空）——
+  // 静默 return 会让重试点了没反应，必须给出提示（审计任务4复核发现的缺陷）
+  if (!selected.size) { toast('请先勾选要导出的会话', true); return; }
   const fmts = Array.isArray(fmtDrop.value) ? fmtDrop.value : [fmtDrop.value];
   if (!fmts.length) { toast('请至少选择一种导出格式', true); return; }
   const picked = sessions.filter(s => selected.has(s.username));
@@ -810,8 +850,8 @@ function logLines(logs, cls) {
   return logs.map(entry => {
     const msg = String(entry.length >= 4 ? entry[3] : entry[1] || '');
     const d = entry[0] ? new Date(entry[0]) : null;
-    const t = d && !isNaN(d) ?
-      `<span class="t">${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}</span>` : '';
+    // 时间列与日志页共用 SX.timeStr（HH:MM:SS），不再页内自拼
+    const t = d && !isNaN(d) ? `<span class="t">${timeStr(entry[0])}</span>` : '';
     return `<div class="log-line ${cls || logClass(entry)}">${t}${esc(msg)}</div>`;
   }).join('');
 }
@@ -856,6 +896,24 @@ function retryMode() {
   return lastTask.mode === 'convert' ? 'convert' : 'export';
 }
 
+/** 结果面板共用的"目录 + 打开入口"：目录未知（空/None）就不渲染任何东西。
+ *  路径只放 data 属性，点击时再从 dataset 读取——内联 onclick 拼
+ *  Windows 路径会被 JS 转义吃掉反斜杠（D:\x → D:x），后端必然拒绝。 */
+function dirActionsHtml(dir) {
+  if (!dir) return '';
+  return `<div class="res-meta">目录：<span class="mono">${esc(dir)}</span></div>` +
+    `<div class="res-actions"><a class="btn" href="#" data-open-path="${esc(dir)}">📂 打开目录</a></div>`;
+}
+
+/** 任务级失败时的目录回退：优先后端随失败状态带回的本次输出目录
+ *  （_job.export_dir——打包失败时全部会话产物已完整落盘）；补生成任务的
+ *  目标目录前端本就握着（lastExportDir）。普通导出失败且目录尚未创建时
+ *  不回退到 lastExportDir——那是上一次导出的目录，标成本次的会误导。 */
+function failedJobDir(job) {
+  if (job && job.export_dir) return job.export_dir;
+  return retryMode() === 'convert' ? lastExportDir : null;
+}
+
 function renderResult(job) {
   if (gone()) return;
   const box = el('e-result');
@@ -868,6 +926,7 @@ function renderResult(job) {
     const mode = retryMode();
     lines.push(`<div class="res-row res-err">✗ ${mode === 'convert' ? '格式补生成' : '导出'}失败：${esc(job.error)}</div>`);
     if (echo) lines.push(echo);
+    lines.push(dirActionsHtml(failedJobDir(job)));
     lines.push(`<div class="res-actions"><a class="btn" href="#" data-retry data-retry-mode="${mode}">↻ 重试</a></div>`);
     lines.push(`<details class="res-logs-detail" open><summary>运行日志（${logs.length} 条）</summary>`);
     lines.push(logLines(logs, 'dim'));
@@ -890,6 +949,8 @@ function renderResult(job) {
     if (r.missing_media) {
       lines.push(`<div class="res-meta res-part">⚠ 媒体引用缺失 ${r.missing_media} 处（导出时未下载成功或目录被改动），对应位置会显示占位</div>`);
     }
+    // 目录已知（r.dir / lastExportDir）：补生成产物就落在导出目录里
+    lines.push(dirActionsHtml(lastExportDir));
     if (r.failed) {
       lines.push(`<div class="res-actions"><a class="btn" href="#" data-convert="md,html" data-convert-ow="1">↻ 覆盖重跑（含失败会话）</a></div>`);
     }
@@ -904,6 +965,7 @@ function renderResult(job) {
   if (!r.sessions) {
     // 任务完成了却没有 report：多半是后端异常或任务被别的操作打断，重试可直接再来一次
     lines.push(`<div class="res-row res-err">⚠️ 无导出结果</div>`);
+    lines.push(dirActionsHtml(job.export_dir || lastExportDir));
     lines.push(`<div class="res-actions"><a class="btn" href="#" data-retry data-retry-mode="${retryMode()}">↻ 重试</a></div>`);
     lines.push(`<details class="res-logs-detail" open><summary>运行日志（${logs.length} 条）</summary>`);
     lines.push(logLines(logs, 'dim'));
@@ -929,12 +991,7 @@ function renderResult(job) {
       truncEntries.map(([fmt, n]) => `${esc(fmt)} ${n} 条`).join(' · ') +
       '（长消息超出该格式上限，完整内容请改用 JSON/CSV/TXT）</div>');
   }
-  if (r.total_dir) {
-    lines.push(`<div class="res-meta">目录：<span class="mono">${esc(r.total_dir)}</span></div>`);
-    // 路径只放 data 属性，点击时再从 dataset 读取——内联 onclick 拼
-    // Windows 路径会被 JS 转义吃掉反斜杠（D:\x → D:x），后端必然拒绝
-    lines.push(`<div class="res-actions"><a class="btn" href="#" data-open-path="${esc(r.total_dir)}">📂 打开目录</a></div>`);
-  }
+  lines.push(dirActionsHtml(r.total_dir));
   // 方案 A：本次导出含 JSON 时，结果面板可就地补生成 Markdown/HTML
   // （转换器吃的是会话 JSON；不含 JSON 的导出没有可转换对象，不显示）
   const fmts = Array.isArray(r.format) ? r.format : [r.format];
@@ -966,8 +1023,6 @@ function renderResult(job) {
   bindResultActions(box);
 }
 
-/** 结果框里的按钮：重试（失败路径）、打开目录（只读 dataset，避免路径被
- *  JS 转义吃掉反斜杠）、失败信息一键复制 */
 /** 方案 A 入口按钮组：从当前导出目录补生成 Markdown / HTML */
 function convertActionsHtml(formats) {
   const btns = formats.map(f =>

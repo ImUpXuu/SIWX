@@ -1,10 +1,15 @@
 /* 首启全屏引导向导（壳层组件，由 app.js 调起）
  *
  * 两种模式：
- *   first —— 3 步：同意条款 → 选号 → 提取并解密；未完成配置前不可关闭，
- *            壳层导航由 app.js 的 overlayOpen 守卫冻结。
+ *   first —— 4 屏：同意条款 → 选号 → 提取并解密 → 「接下来做什么」总览；
+ *            未完成配置前不可关闭，
+ *            壳层导航由 app.js 的 overlayOpen 守卫冻结。提取无法成功时提供
+ *            「暂时跳过，稍后配置」出口：只写独立的 siwx-setup-skipped 标记
+ *            （绝不写 siwx-setup-done），由 app.js 据此放行进主界面排障，
+ *            侧栏常驻「引导未完成」入口可随时续跑。
  *   add   —— 2 步：选号 → 提取并解密；可随时关闭（右上角 × / Esc），
- *            已配置用户从账号下拉「＋ 添加账号」或各页空态入口进入。
+ *            已配置用户从账号下拉「＋ 添加账号」或各页空态入口进入；
+ *            completable 时（跳过后的续跑）完成提取即计为完成配置。
  *
  * 逻辑迁移自原 guide 页（状态检测 / 账号选择 / 手动路径 / 一键提取解密），
  * 样式（.ob-* 与共用账号卡）在 app.css，壳层组件不加载独立 CSS。
@@ -21,9 +26,12 @@ let state = null;
 let escHandler = null;
 
 function chipBar() {
-  const labels = state.mode === 'first' ? ['同意条款', '选号', '提取并解密'] : ['选号', '提取并解密'];
+  const labels = state.mode === 'first'
+    ? ['同意条款', '选号', '提取并解密', '接下来做什么']
+    : ['选号', '提取并解密'];
   const cur = state.screen === 'disclaimer' ? 1
             : state.screen === 'accounts' ? (state.mode === 'first' ? 2 : 1)
+            : state.screen === 'next' ? 4
             : (state.mode === 'first' ? 3 : 2);
   return labels.map((l, i) =>
     `<span class="g-chip${i + 1 === cur ? ' on' : (i + 1 < cur ? ' done' : '')}">${i + 1} ${esc(l)}</span>`).join('');
@@ -41,7 +49,7 @@ function showDisclaimer() {
   body.innerHTML = `
     <h2 class="g-title">欢迎使用 stories-in-wx</h2>
     <p class="dim g-desc">三步完成配置：同意条款 → 选择微信号 → 一键提取密钥并解密，然后进入主界面。<br>
-       全程只读扫描微信进程，无需管理员；密钥经 DPAPI 加密保存，结果全部缓存，只跑一次。</p>
+       全程只读扫描微信进程，无需管理员；密钥保存在本机（Windows 加密存储，其他平台为明文文件，详见声明第六条），结果全部缓存，只跑一次。</p>
     <div class="ob-disc disc-body">加载声明…</div>
     <div class="ob-actions">
       <button class="btn" id="ob-decline">不同意并退出</button>
@@ -49,6 +57,30 @@ function showDisclaimer() {
     </div>`;
   const agree = body.querySelector('#ob-agree');
   const disc = body.querySelector('.ob-disc');
+  loadDisclaimerText(disc, agree);
+  body.querySelector('#ob-decline').addEventListener('click', () => {
+    window.close();                          // 仅对脚本打开的窗口有效
+    body.querySelector('.ob-actions').remove();
+    body.insertAdjacentHTML('beforeend',
+      '<div class="card"><h2>你未同意免责声明</h2>' +
+      '<p class="dim">已停止提供服务，请关闭本页并删除本工具。若为误点，可返回重新阅读。</p></div>');
+    const back = document.createElement('button');
+    back.className = 'btn';
+    back.textContent = '← 返回重新阅读声明';
+    back.style.marginTop = '10px';
+    back.addEventListener('click', showDisclaimer);
+    body.querySelector('.card').appendChild(back);
+  });
+  agree.addEventListener('click', () => {
+    if (disclaimerVersion) localStorage.setItem('siwx-disclaimer-ack', disclaimerVersion);
+    localStorage.setItem('siwx-disclaimer-ack-ts', String(Date.now()));   // 前端留痕：确认时间戳
+    showAccounts();
+  });
+}
+
+/* 声明全文加载（初始 + 失败重试共用）。加载失败必须保持「同意」禁用：
+   条款一行未展示就允许确认属 fail-open，确认动作与「已阅读」完全脱钩。 */
+function loadDisclaimerText(disc, agree) {
   fetch(`/pages/disclaimer.html?v=${Date.now()}`)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.text(); })
     .then(html => {
@@ -59,21 +91,17 @@ function showDisclaimer() {
     })
     .catch(e => {
       if (!body.contains(disc)) return;
-      disc.innerHTML = `<div class="empty">免责声明加载失败：${esc(e.message)}<br>请刷新页面重试。</div>`;
-      agree.disabled = false;
-      agree.textContent = '我已阅读并同意 →';
+      disc.innerHTML = `<div class="empty">免责声明加载失败：${esc(e.message)}<br>请检查后端服务后重试。</div>`;
+      const retry = document.createElement('button');
+      retry.className = 'btn btn-sm';
+      retry.textContent = '重新加载声明';
+      retry.style.marginTop = '8px';
+      retry.addEventListener('click', () => {
+        disc.innerHTML = '加载声明…';
+        loadDisclaimerText(disc, agree);
+      });
+      disc.appendChild(retry);
     });
-  body.querySelector('#ob-decline').addEventListener('click', () => {
-    window.close();                          // 仅对脚本打开的窗口有效
-    body.querySelector('.ob-actions').remove();
-    body.insertAdjacentHTML('beforeend',
-      '<div class="card"><h2>你未同意免责声明</h2>' +
-      '<p class="dim">已停止提供服务，请关闭本页并删除本工具。若为误点，请刷新页面重新阅读。</p></div>');
-  });
-  agree.addEventListener('click', () => {
-    if (disclaimerVersion) localStorage.setItem('siwx-disclaimer-ack', disclaimerVersion);
-    showAccounts();
-  });
 }
 
 /* ── 账号列表（向导 / 设置页共用的徽标逻辑）──────────────────── */
@@ -166,6 +194,8 @@ function renderAccountList() {
   });
   if (!all.length) {
     el0.innerHTML = '<div class="empty">未找到账号 — 可用下方「手动指定数据目录」添加</div>';
+    // 环境无法满足（无数据目录）时同样不给失败出口留死角
+    if (state.mode === 'first') addSkipExit(el0);
     return;
   }
   el0.innerHTML = all.map((a, i) => {
@@ -274,7 +304,10 @@ function showExtract() {
     : '';
   body.querySelector('#ob-back2').addEventListener('click', showAccounts);
   body.querySelector('#ob-run').addEventListener('click', tryRun);
-  body.querySelector('#ob-finish').addEventListener('click', finish);
+  body.querySelector('#ob-finish').addEventListener('click', () => {
+    if (state.mode === 'first') showNextSteps();   // 先看「接下来做什么」总览，再进主界面
+    else finish();
+  });
   body.querySelector('#ob-wx-recheck').addEventListener('click', async () => {
     try {
       const s = await fetchJSON('/api/status');
@@ -322,6 +355,9 @@ function runExtract() {
       if (job.error) {
         resBox.innerHTML = `<span class="badge badge-none">提取失败：${esc(job.error)}</span>`;
         runBtn.disabled = false;              // 失败后允许直接重试
+        // 失败出口：环境不满足（微信未在线 / 目录不可用 / 解密失败）时不再
+        // 把用户永久锁在向导内，可跳过进主界面排障（日志/设置页均可达）
+        if (state.mode === 'first') addSkipExit(resBox);
         return;
       }
       const accs = (job.report && job.report.accounts) || [];
@@ -339,8 +375,66 @@ function runExtract() {
     });
 }
 
-function finish() {
+/* ── 屏 4（仅 first 模式）：接下来做什么 ────────────────────────
+ * 提取成功后、进入主界面前的一屏总览：各页职责一句话 + 导出核心动线。
+ * 提取成功即配置完成，所以进屏时就写 siwx-setup-done——用户哪怕在本屏
+ * 直接关掉标签页，下次启动也不会被重新拉回完整向导（finish 里会再写
+ * 一次，幂等）。首次进入主界面后壳层会接着放一轮分步导览（app.js），
+ * 侧栏也有常驻「使用导览」入口可重看。 */
+function showNextSteps() {
+  state.screen = 'next';
   if (state.mode === 'first') setSetupDone();
+  renderHead();
+  const pages = [
+    ['💬', '聊天查看', '浏览已解密的聊天记录，支持搜索与按时间跳转'],
+    ['📦', '导出', '把会话打包成 JSON / Markdown / HTML 等文件——最常用'],
+    ['🌅', '朋友圈', '浏览与导出朋友圈'],
+    ['📊', '聊天统计', '消息量、活跃时段、高频联系人的数据概览'],
+    ['📜', '日志', '每次任务的完整日志，出了问题先来这里看'],
+    ['⚙️', '设置', '自动同步、隐私声明、账号与数据管理'],
+  ];
+  body.innerHTML = `
+    <h2 class="g-title">配置完成，接下来做什么？</h2>
+    <p class="dim g-desc">每个页面各管一摊；日常使用集中在「聊天查看」和「导出」两页。</p>
+    <div class="ob-next-grid">
+      ${pages.map(([ico, name, desc]) =>
+        `<div class="ob-next-row"><span class="ob-next-ico" aria-hidden="true">${ico}</span>` +
+        `<div class="ob-next-txt"><b>${name}</b><span>${desc}</span></div></div>`).join('')}
+    </div>
+    <div class="ob-next-flow">
+      <div class="ob-next-flow-title">最重要的一条动线 —— 导出</div>
+      <div class="ob-next-steps">选会话 <i>→</i> 配置格式 <i>→</i> 开始导出 <i>→</i> 完成后点「📂 打开目录」</div>
+      <p class="dim">进入主界面后会有一轮高亮导览带你认一遍入口；忘了也可以随时点侧栏的「使用导览」重看。</p>
+    </div>
+    <div class="ob-actions">
+      <button class="btn btn-primary" id="ob-enter">进入主界面 →</button>
+    </div>`;
+  body.querySelector('#ob-enter').addEventListener('click', finish);
+}
+
+/* ── 失败出口：暂时跳过，稍后配置 ──────────────────────────────
+ * 跳过绝不伪装完成配置：只写独立的 siwx-setup-skipped，不写 siwx-setup-done；
+ * app.js 据此放行进主界面（条款门禁对未确认者照常生效），侧栏常驻
+ * 「引导未完成」入口可随时以 add 模式续跑，完成后再清除跳过标记。 */
+function skipSetup() {
+  if (state.mode !== 'first') return;
+  localStorage.setItem('siwx-setup-skipped', '1');
+  const cb = onCloseCb;
+  teardown();
+  cb && cb({ finished: false, skipped: true, account: null });
+}
+
+/** 在结果区追加跳过按钮（失败出口）；已存在则不重复加 */
+function addSkipExit(box) {
+  if (!box || box.querySelector('#ob-skip')) return;
+  box.insertAdjacentHTML('beforeend',
+    ' <button class="btn btn-sm" id="ob-skip">暂时跳过，稍后配置 →</button>');
+  box.querySelector('#ob-skip').addEventListener('click', skipSetup);
+}
+
+function finish() {
+  // first 模式完成配置；跳过后的续跑（completable 的 add 模式）完成即视为完成配置
+  if (state.mode === 'first' || state.completable) setSetupDone();
   const cb = onCloseCb;
   teardown();
   cb && cb({ finished: true, account: state ? state.account?.wxid : null });
@@ -359,6 +453,7 @@ function teardown() {
   escHandler = null;
   // 运行中被关闭：任务还在飞，running 必须复位，否则再次打开时 tryRun 会一直拦住
   if (state) state.running = false;
+  document.querySelector('.shell')?.removeAttribute('inert');
   if (ov) { ov.remove(); ov = null; card = null; body = null; }
 }
 
@@ -367,6 +462,8 @@ export function open(opts) {
   if (ov) return;
   state = {
     mode: opts.mode === 'add' ? 'add' : 'first',
+    // 跳过后的续跑：add 模式完成提取也计为完成配置（app.js 传 !setupDone()）
+    completable: !!opts.completable,
     screen: null, account: null, running: false, offlineConfirmed: false,
     accounts: [], manualAccounts: [], wechatRunning: null,
   };
@@ -385,6 +482,9 @@ export function open(opts) {
       <div class="ob-body"></div>
     </div>`;
   document.body.appendChild(ov);
+  // 向导打开期间冻结壳层可达性：inert 让被遮住的菜单/账号卡不可聚焦、
+  // 不可交互（键盘 Tab 也进不去），补齐导航冻结之外的焦点门禁
+  document.querySelector('.shell')?.setAttribute('inert', '');
   card = ov.firstElementChild;
   body = card.querySelector('.ob-body');
   card.querySelector('.ob-close').addEventListener('click', close);
