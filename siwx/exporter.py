@@ -1224,8 +1224,18 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
             progress(97, f"每会话 zip 共 {len(zips)} 个")
         elif pack == "single":
             progress(96, "打包整体 zip…")
-            zip_path = shutil.make_archive(str(root / total_dir.name), "zip",
-                                           root_dir=total_dir)
+            try:
+                zip_path = shutil.make_archive(str(root / total_dir.name), "zip",
+                                               root_dir=total_dir)
+            except Exception as e:
+                # 打包失败时全部会话产物已完整落在 total_dir：把目录随异常
+                # 带回（server 塞进 _job["export_dir"]，/api/job 透传），前端
+                # 失败分支据此渲染「打开目录」，而不是只给"失败 + 重试"。
+                try:
+                    e.export_dir = str(total_dir)
+                except Exception:
+                    pass
+                raise
             progress(98, f"zip 完成: {Path(zip_path).stat().st_size / 1048576:.1f} MB")
 
     progress(100, "已取消，已完成部分保留" if cancelled else "导出完成")

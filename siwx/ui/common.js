@@ -17,8 +17,19 @@
   function fmtTs(t) {
     if (!t) return '';
     const d = new Date(Number(t) * 1000);
+    if (Number.isNaN(d.getTime())) return '';   // 非法时间戳返回空，调用方自行兜底
     const p = (n) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  /* 展示用日期 'YYYY-MM-DD'（本地时区）：入参为 unix 秒或 Date 对象。
+     各页自拼日期（describeRange / 统计口径行 / 时间轴月份等）统一走这里；
+     提交给后端的参数（如 DatePicker 的 'YYYY-MM-DD' 值）格式不受影响。 */
+  function fmtDate(t) {
+    if (!t && !(t instanceof Date)) return '';
+    const d = t instanceof Date ? t : new Date(Number(t) * 1000);
+    if (Number.isNaN(d.getTime())) return '';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
   }
   /* 会话列表用的智能短时间（微信风格）：今天 → HH:MM，昨天 → 昨天，
      一周内 → 周X，今年 → MM-DD，更早 → YYYY/MM/DD。
@@ -41,7 +52,12 @@
   async function fetchJSON(url, opts) {
     const r = await fetch(url, opts);
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || r.statusText);
+    if (!r.ok) {
+      // 后端错误响应自带中文文案，优先透传；响应体不是 JSON（后端未起 /
+      // 代理 502 等）时不再透出英文 statusText（Not Found 等），换成可
+      // 行动的中文提示（审计 §4.10）。
+      throw new Error(j.error || `服务返回 HTTP ${r.status}，请重试或到日志页查看详情`);
+    }
     return j;
   }
 
@@ -57,7 +73,7 @@
           body: JSON.stringify(body),
         });
         const j = await r.json().catch(() => ({}));
-        if (r.status === 409) { onDone && onDone({ error: '已有任务在运行' }); return; }
+        if (r.status === 409) { onDone && onDone({ error: j.error || '已有任务在运行' }); return; }
         if (!r.ok) { onDone && onDone({ error: j.error || '启动失败' }); return; }
         const poll = async () => {
           if (stop) return;
@@ -280,7 +296,7 @@
   function listAccounts() { return window.__sxAccount ? window.__sxAccount.list() : []; }
   function setAccount(wxid, opts) { if (window.__sxAccount) window.__sxAccount.set(wxid, opts); }
 
-  window.SX = { esc, timeStr, fmtTs, fmtListTs, fetchJSON, startJob, renderLog, go,
+  window.SX = { esc, timeStr, fmtTs, fmtDate, fmtListTs, fetchJSON, startJob, renderLog, go,
                 setupDone, setSetupDone, imgFallback, openPath,
                 renderNodes, copyText, toast, getAccount, listAccounts, setAccount };
 })();

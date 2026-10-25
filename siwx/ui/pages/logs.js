@@ -1,11 +1,14 @@
 /* 日志页 —— 实时拉取服务端环形日志缓冲 */
-const { esc, fetchJSON, copyText, toast } = window.SX;
+import { createDropdown } from '/widgets.js?v=2026100601';
+
+const { esc, fetchJSON, copyText, toast, timeStr } = window.SX;
 
 let paused = false;
 let autoScroll = true;
 let lastSig = "";
 let pollTimer = null;
 let clearMark = 0;          // 「清空」水位：只显示该时刻之后的日志，避免 1s 后整屏刷回来
+let levelDrop = null;       // 级别筛选（自绘下拉，替代原生 select）
 
 function el(id) { return document.getElementById(id); }
 
@@ -40,7 +43,7 @@ function renderLogs(logs) {
   // 轮询可能在切页后仍在飞，视图已卸载时直接放弃本轮渲染
   const box = el("log-box");
   if (!box) return;
-  const filter = el("log-filter")?.value || "";
+  const filter = (levelDrop && levelDrop.value) || "";
   const kw = (el("log-text")?.value || "").trim().toLowerCase();
   const tsOn = el("log-ts")?.checked || false;
   let shown = logs.filter(l => l[0] > clearMark);
@@ -60,11 +63,11 @@ function renderLogs(logs) {
   if (autoScroll) box.scrollTop = box.scrollHeight;
 }
 
+/* 时间戳列：与全局 SX.timeStr 同一份 HH:MM:SS（原页内自拼已收敛） */
 function tsSpan(ms) {
   const d = new Date(ms);
   if (isNaN(d)) return "";
-  const p = (n) => String(n).padStart(2, "0");
-  return `<span class="t">${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}</span>`;
+  return `<span class="t">${timeStr(ms)}</span>`;
 }
 
 async function poll() {
@@ -76,10 +79,25 @@ async function poll() {
 }
 
 export async function init() {
-  el("log-filter")?.addEventListener("change", () => {
+  // 级别筛选下拉（替代原生 select）：选项与值口径与原 select 一致
+  //（空串 = 全部；空值时按钮文案用 placeholder 保持「全部级别」）
+  levelDrop = createDropdown({
+    options: [
+      { value: "", label: "全部级别" },
+      { value: "ERROR", label: "仅错误" },
+      { value: "WARN", label: "仅警告" },
+      { value: "INFO", label: "仅信息" },
+      { value: "DEBUG", label: "仅调试" },
+    ],
+    value: "",
+    placeholder: "全部级别",
+    label: "按级别筛选",
+  });
+  el("log-filter").appendChild(levelDrop.el);
+  levelDrop.onChange = () => {
     lastSig = "";           // 换筛选条件后强制重渲染
     poll();
-  });
+  };
   // 文本搜索 / 时间戳开关：只改渲染不改数据源，重渲染即可
   el("log-text")?.addEventListener("input", () => { lastSig = ""; poll(); });
   el("log-ts")?.addEventListener("change", () => { lastSig = ""; poll(); });
@@ -143,4 +161,5 @@ export async function init() {
 export function destroy() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = null;
+  if (levelDrop) { levelDrop.destroy(); levelDrop = null; }
 }

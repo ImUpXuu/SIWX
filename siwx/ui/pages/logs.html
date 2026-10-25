@@ -5,13 +5,8 @@
         title="切换日志展示口径：粗略隐藏 DEBUG 行，精细全部显示（落盘内容不受影响）">粗略模式</button>
         · <span id="log-count">0 条</span></span></div>
     <div class="log-actions">
-      <select id="log-filter" class="log-filter" aria-label="按级别筛选">
-        <option value="">全部级别</option>
-        <option value="ERROR">仅错误</option>
-        <option value="WARN">仅警告</option>
-        <option value="INFO">仅信息</option>
-        <option value="DEBUG">仅调试</option>
-      </select>
+      <!-- 级别筛选：自绘下拉（widgets.js），与全站下拉同一套交互与主题 -->
+      <div id="log-filter"></div>
       <input id="log-text" class="log-filter" placeholder="文本搜索…" aria-label="文本搜索">
       <button id="log-pause" class="btn" aria-pressed="false">暂停</button>
       <button id="log-clear" class="btn">清空</button>

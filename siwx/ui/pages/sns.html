@@ -103,14 +103,7 @@
           </span>
           <input v-model="userQuery" placeholder="搜索昵称 / 微信号">
         </div>
-        <select v-model="userSort" class="sns-user-sort" title="排序方式">
-          <option value="count-desc">发送量 多 → 少</option>
-          <option value="count-asc">发送量 少 → 多</option>
-          <option value="name-asc">名称拼音 A → Z</option>
-          <option value="name-desc">名称拼音 Z → A</option>
-          <option value="recent-desc">最近发布</option>
-          <option value="oldest-asc">最早发布</option>
-        </select>
+        <sx-dd v-model="userSort" :options="sortOptions" label="排序方式"></sx-dd>
       </div>
       <div class="sns-user-list">
         <button class="sns-user-row" :class="{ on: !username }" @click="applyUser('')">
@@ -141,12 +134,7 @@
       <div class="sns-pop-head"><b>导出朋友圈</b>
         <button class="sns-pop-close" title="关闭" @click="pops.export = false">✕</button></div>
       <div class="sns-export">
-        <select v-model="exportFmt">
-          <option value="json">JSON</option>
-          <option value="markdown">Markdown</option>
-          <option value="html">HTML</option>
-          <option value="txt">TXT</option>
-        </select>
+        <sx-dd v-model="exportFmt" :options="fmtOptions" label="导出格式"></sx-dd>
         <label class="f-chk"><input type="checkbox" v-model="exportMedia"> 同时下载媒体（较慢）</label>
         <label class="sns-conc">并发
           <input type="number" v-model.number="exportConc" min="1" max="16"

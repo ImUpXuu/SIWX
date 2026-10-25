@@ -1,11 +1,12 @@
 /* MCP 配置页 —— 单栏卡片布局。
    左侧曾挂过一个不可点击的会话列表（纯摆设），已移除。 */
+@import url('./shared.css');
 .mcp-wrap {
   max-width: 980px; margin: 0 auto;
   display: flex; flex-direction: column; gap: 16px;
 }
 .mcp-logcard { flex: 1; min-height: 170px; display: flex; flex-direction: column; }
-.mcp-logcard .console { flex: 1; min-height: 130px; max-height: 360px; }
+/* console 尺寸与导出页同一套，收在 shared.css */
 .m-block { margin-top: 16px; }
 .m-block:first-of-type { margin-top: 0; }
 .m-label { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }

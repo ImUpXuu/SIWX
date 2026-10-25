@@ -1,7 +1,7 @@
 /* 设置页 —— 版本与更新 / 数据源管理 / 缓存总览 / 清除 / 隐私与免责声明 */
 import { createDropdown } from '/widgets.js?v=2026100601';
 
-const { esc, fetchJSON, copyText, toast, startJob, renderLog } = window.SX;
+const { esc, fetchJSON, copyText, toast, startJob, renderLog, fmtTs } = window.SX;
 
 function el(id) { return id ? document.getElementById(id) : null; }
 
@@ -21,7 +21,7 @@ async function loadOverview() {
       : '<div class="empty">还没有解密输出</div>';
     box.innerHTML = `
       <div class="ov-row">
-        <span>密钥库（DPAPI 加密）</span>
+        <span>密钥库（${/^Win/i.test(navigator.platform || '') ? 'DPAPI 加密' : '明文 JSON 文件'}）</span>
         <span class="dim">${esc(o.keystore.path)}</span>
         <span class="pill pill-green">${o.keystore.count} 条密钥</span>
       </div>
@@ -32,9 +32,10 @@ async function loadOverview() {
 }
 
 function fmtLastRun(ts) {
+  // 展示格式与全站统一（YYYY-MM-DD HH:MM）；原 toLocaleString() 随浏览器
+  // 语言变化，与其它页面的时间列不一致
   if (!ts) return '未运行';
-  const d = new Date(Number(ts) * 1000);
-  return Number.isNaN(d.getTime()) ? '未运行' : d.toLocaleString();
+  return fmtTs(ts) || '未运行';
 }
 
 async function loadAutoSync() {
@@ -577,6 +578,7 @@ export async function init() {
 
 /* 全量媒体备份卡片：账号下拉 → 启动 → 轮询状态 → 结果统计。 */
 let mbPoll = null;
+let mbDrop = null;                 // 备份账号自绘下拉（原为原生 select）
 
 function renderBackupResult(st) {
   if (st.report && st.report.cancelled) {
@@ -617,21 +619,31 @@ function pollBackup() {
 }
 
 async function initBackupCard() {
-  const sel = el('s-mb-account');
+  const mount = el('s-mb-account');
   const startBtn = el('s-mb-start');
   try {
     const s = await fetchJSON('/api/status');
     const accs = s.accounts || [];
-    sel.innerHTML = accs.length
-      ? accs.map(a => `<option value="${esc(a.wxid)}">${esc(a.wxid)}</option>`).join('')
-      : '<option value="">（无已解密账号）</option>';
+    mbDrop = createDropdown({
+      options: accs.map(a => ({ value: a.wxid, label: a.wxid })),
+      value: accs.length ? accs[0].wxid : null,
+      placeholder: '（无已解密账号）',
+      label: '备份目标账号',
+    });
+    mount.appendChild(mbDrop.el);
     startBtn.disabled = !accs.length;
   } catch (e) {
-    sel.innerHTML = '<option value="">账号列表加载失败</option>';
+    mbDrop = createDropdown({
+      options: [],
+      value: null,
+      placeholder: '账号列表加载失败',
+      label: '备份目标账号',
+    });
+    mount.appendChild(mbDrop.el);
     startBtn.disabled = true;
   }
   startBtn.addEventListener('click', async () => {
-    const account = sel.value;
+    const account = mbDrop ? mbDrop.value : null;
     if (!account) return;
     startBtn.disabled = true;
     el('s-mb-cancel').classList.remove('hidden');
@@ -689,6 +701,7 @@ export function destroy() {
   if (dsStop) dsStop();                    // 切页后停止在飞的提取轮询
   dsStop = null;
   if (mbPoll) { clearInterval(mbPoll); mbPoll = null; }
+  if (mbDrop) { mbDrop.destroy(); mbDrop = null; }
   plgChoiceDrop.clear();                   // 释放已脱离 DOM 的下拉挂载引用
   if (logLevelDrop) { logLevelDrop.destroy(); logLevelDrop = null; }
 }

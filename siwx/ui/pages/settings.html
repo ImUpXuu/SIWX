@@ -111,7 +111,8 @@
         <b>备份目标账号</b>
         <span class="dim">图片逐个解密（wxgf 转码失败时保留原始文件，不算失败）；视频与文件附件未加密，直接复制。产物写入该账号输出目录的 media_backup/ 下。</span>
         <div class="s-inline" style="margin-top:8px">
-          <select id="s-mb-account" class="g-input" style="flex:1;min-width:0"></select>
+          <!-- 备份账号：自绘下拉（widgets.js），选项由 settings.js 按 /api/status 填充 -->
+          <div id="s-mb-account" style="flex:1;min-width:0"></div>
           <button class="btn btn-primary" id="s-mb-start">开始备份</button>
           <button class="btn btn-sm hidden" id="s-mb-cancel">取消备份</button>
         </div>

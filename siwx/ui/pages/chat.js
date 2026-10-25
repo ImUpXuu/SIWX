@@ -47,6 +47,26 @@ function bindGuideCta() {
   el('c-go-guide')?.addEventListener('click', () => window.__sxOnboarding?.open('add'));
 }
 
+/* 增量同步期间把会话列表换成一行状态。cancellable=true 时附取消入口：
+ * 服务端 sync 分支在各账号间响应 /api/job/cancel（已完成账号的产物保留）。 */
+function showSyncStatus(msg, cancellable) {
+  if (gone()) return;
+  el('c-sessions').innerHTML =
+    `<div class="c-loading">${esc(msg)}${cancellable ? ' <button class="btn" id="c-sync-cancel" type="button">取消</button>' : ''}</div>`;
+  el('c-sync-cancel')?.addEventListener('click', async () => {
+    try {
+      const r = await fetch('/api/job/cancel', {
+        method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({ mode: 'sync' }),
+      });
+      const j = await r.json().catch(() => ({}));
+      toast(r.ok ? '已请求取消，等当前账号收尾后停止' : (j.error || '取消失败'), !r.ok);
+    } catch (e) {
+      toast('取消失败：' + (e.message || e), true);
+    }
+  });
+}
+
 async function init() {
   account = getAccount();
   if (!account) {
@@ -60,28 +80,48 @@ async function init() {
   el('c-refresh').addEventListener('click', async () => {
     const btn = el('c-refresh');
     btn.disabled = true;
-    el('c-sessions').innerHTML = '<div class="c-loading">增量同步中…</div>';
+    // 语境是当前账号，但服务端 sync 分支忽略账号、遍历全部微信数据目录
+    // （审计 §4.2）——明示出来，多账号机器上不再显得"卡住"或"怎么这么久"。
+    showSyncStatus('增量同步中（将同步全部账号）…');
     try {
       const r = await fetch('/api/run', {
         method: 'POST', headers: {'content-type': 'application/json'},
         body: JSON.stringify({ mode: 'sync', export_opts: { account } }),
       });
       if (r.status === 409) {
-        toast('已有任务在运行，稍后再试', true);
+        const j = await r.json().catch(() => ({}));
+        toast(j.error || '已有任务在运行，稍后再试', true);
         await loadSessions();              // 恢复列表，不再停留在一行字
         return;
       }
       if (!r.ok) throw new Error('启动失败');
-      for (let i = 0; i < 300; i++) {
+      // 轮询到任务终态为止。旧实现数满 300 秒就当完成去渲染列表，多账号
+      // 长任务会被静默截断（审计 §4.2）；瞬时网络失败按 SX.startJob 同款
+      // 连续失败阈值放弃，避免一次抖动就永久卡死。
+      let failStreak = 0;
+      let job = null;
+      while (true) {
         await new Promise(res => setTimeout(res, 1000));
         if (gone()) return;
-        const j = await (await fetch('/api/job')).json();
-        if (!j.running) break;
-        if (j.logs.length) {
-          const entry = j.logs[j.logs.length - 1];
-          const msg = String(entry.length >= 4 ? entry[3] : entry[1]);
-          el('c-sessions').innerHTML = `<div class="c-loading">${esc(msg.substring(0, 60))}${msg.length > 60 ? '…' : ''}</div>`;
+        try {
+          job = await (await fetch('/api/job')).json();
+        } catch (e) {
+          if (++failStreak >= 5) throw new Error('与后端失去联系，请刷新页面后重试');
+          continue;
         }
+        failStreak = 0;
+        if (!job.running) break;
+        if (job.logs && job.logs.length) {
+          const entry = job.logs[job.logs.length - 1];
+          const msg = String(entry.length >= 4 ? entry[3] : entry[1]);
+          showSyncStatus(msg.substring(0, 60) + (msg.length > 60 ? '…' : ''), true);
+        } else {
+          showSyncStatus('增量同步中（将同步全部账号）…', true);
+        }
+      }
+      if (job && job.error) toast(`增量同步失败：${job.error}`, true);
+      else if (job && job.report && job.report.cancelled) {
+        toast('增量同步已取消（已完成部分保留）');
       }
       await loadSessions();
       if (currentChat) {
@@ -1050,8 +1090,10 @@ function renderTimelineDays(inner, days) {
 }
 
 function monthLabel(month) {
+  // 展示格式与全站统一为 YYYY-MM（时间轴月份标题；原「YYYY年M月」是页内
+  // 自拼的另一套写法）。仍做一次补零规整，防上游改口径时出现 2026-1
   const [year, mon] = String(month || '').split('-');
-  return `${year}年${Number(mon)}月`;
+  return year ? `${year}-${String(Number(mon) || 1).padStart(2, '0')}` : '';
 }
 
 async function jumpToTime(day) {

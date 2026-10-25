@@ -1,7 +1,7 @@
 /* 聊天统计页 —— 账号来自全局账号卡（SX.getAccount），本页不再自选 */
 import { createDropdown, createDatePicker } from '/widgets.js?v=2026100601';
 
-const { esc, fmtTs, fetchJSON, getAccount, go, toast } = window.SX;
+const { esc, fmtDate, fetchJSON, getAccount, go, toast } = window.SX;
 
 function el(id) { return document.getElementById(id); }
 function nf(n) { return (Number(n) || 0).toLocaleString('zh-CN'); }
@@ -224,7 +224,7 @@ function render(d) {
     ['消息总数', nf(d.total), d.shards ? `来自 ${d.shards} 个分片` : ''],
     ['会话数', nf(d.chat_count), '有消息的会话'],
     ['时间跨度', durDays ? `${durDays} 天` : '—',
-      span.min ? `${fmtTs(span.min).slice(0, 10)} 起` : ''],
+      span.min ? `${fmtDate(span.min)} 起` : ''],
     ['日均消息', nf(d.per_day), '按跨度估算'],
     ['最活跃时段', `${String(d.peak_hour).padStart(2, '0')}:00`,
       '当天消息最多的小时'],
@@ -342,8 +342,10 @@ function countUp(node, target, delay, keepDecimal, unit) {
 }
 
 /* ── 数据加载 ─────────────────────────────────────────────── */
+/* Date → 'YYYY-MM-DD'（本地时区）：与 SX.fmtDate 同一份实现；
+   结果作为 DatePicker 值/后端参数，格式保持 YYYY-MM-DD 不变 */
 function dateStr(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return fmtDate(d);
 }
 
 function rangeStart(months) {

@@ -189,10 +189,9 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 /* 发布者面板 */
 .sns-user-tools { display: flex; gap: 8px; margin-bottom: 8px; }
 .sns-user-tools .sns-search { flex: 1; }
-.sns-user-sort {
-  height: 32px; max-width: 150px; border: 1px solid var(--wx-line); border-radius: 8px;
-  background: var(--wx-card); font-size: 12.5px; color: var(--wx-text); padding: 0 6px;
-}
+/* 排序方式已改自绘下拉（widgets.js，sx-dd 挂载点）：给个与旧 select 相当的宽度 */
+.sx-dd-mount { display: block; min-width: 0; }
+.sns-user-tools .sx-dd-mount { width: 150px; flex: none; }
 .sns-user-list { max-height: 320px; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
 .sns-user-row {
   display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 6px;
@@ -215,10 +214,7 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 
 /* 导出面板 */
 .sns-export { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.sns-export select {
-  height: 32px; border: 1px solid var(--wx-line); border-radius: 6px;
-  background: var(--wx-card); font-size: 13px; padding: 0 6px;
-}
+.sns-export .sx-dd-mount { width: 132px; flex: none; }
 .sns-export .f-chk { font-size: 12.5px; color: var(--wx-sub); display: inline-flex; align-items: center; gap: 5px; }
 .sns-export .sns-conc { font-size: 12.5px; color: var(--wx-sub); display: inline-flex; align-items: center; gap: 5px; }
 .sns-export .sns-conc input {
@@ -347,22 +343,12 @@ a.sns-card:hover { background: var(--wx-hover); }
 .sns-time { font-size: 12px; color: var(--wx-sub); }
 .sns-detail-link { font-size: 12px; color: var(--wx-link); cursor: pointer; }
 .sns-ops { margin-left: auto; position: relative; }
+/* 「···」菜单改走 widgets.openMenu（.sxw-menu 固定定位、跟随全局主题） */
 .sns-ops-btn {
   width: 32px; height: 22px; border-radius: 4px; border: 0; cursor: pointer;
   background: var(--wx-ops); color: var(--wx-link); font-size: 12px; line-height: 1; letter-spacing: 1px;
 }
 .sns-ops-btn:hover { background: var(--wx-ops-hover); }
-.sns-ops-menu {
-  position: absolute; right: 0; top: 22px; z-index: 20; min-width: 132px; padding: 4px 0;
-  background: var(--wx-card); border: 1px solid var(--wx-line); border-radius: 6px;
-  box-shadow: 0 6px 20px rgba(0,0,0,.14);
-}
-.sns-ops-menu[hidden] { display: none; }
-.sns-ops-menu button {
-  display: block; width: 100%; padding: 7px 12px; border: 0; background: transparent;
-  text-align: left; font-size: 13px; color: var(--wx-text); cursor: pointer; white-space: nowrap;
-}
-.sns-ops-menu button:hover { background: var(--wx-hover); }
 
 .sns-loading, .sns-empty { padding: 40px 0; text-align: center; color: var(--wx-muted); font-size: 13px; }
 .sns-more {

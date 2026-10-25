@@ -1,6 +1,7 @@
 /* 导出页 —— 左侧多选会话列表 + 右侧配置/日志，全部走全局设计 token。
-   选中态用 accent-soft（不再黑白反色）；本页自带 .e-empty/.e-loading，
-   不依赖 chat.css 的 .c-empty（页面 CSS 按需加载，不能跨页引用）。 */
+   选中态用 accent-soft（不再黑白反色）；本页自带 .e-empty/.e-loading
+   （公共底座在 shared.css，行高差异留本页；页面 CSS 按需加载不能跨页引用）。 */
+@import url('./shared.css');
 .export-wrap {
   display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 18px;
   height: calc(100vh - 56px); min-height: 520px;
@@ -14,11 +15,10 @@
 }
 .e-top { padding: 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
 #e-search { width: 100%; }
-/* 快捷筛选 chips（本页自带，页面 CSS 按需加载不能跨页引用） */
+/* 快捷筛选 chips（本页自带，页面 CSS 按需加载不能跨页引用；.chip 的
+   字号/配色/形状底座在 shared.css，这里只留自己的留白、底色与弱强调态） */
 .e-filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip {
-  font-size: 12px; color: var(--muted); cursor: pointer; user-select: none;
-  border: 1px solid var(--line); border-radius: 999px;
   background: var(--card); padding: 3px 10px; line-height: 18px;
 }
 .chip:hover { color: var(--text); border-color: var(--accent-line); }
@@ -30,11 +30,8 @@
 }
 .e-selall input { accent-color: var(--accent); }
 #e-sessions { flex: 1; overflow-y: auto; }
-.e-empty, .e-loading {
-  padding: 22px 14px; text-align: center; color: var(--muted);
-  font-size: 13px; line-height: 1.8;
-}
-.e-empty .btn { margin-top: 10px; }
+/* 空态/加载提示的公共底座在 shared.css，本页只留行高差异 */
+.e-empty, .e-loading { line-height: 1.8; }
 .e-sess {
   position: relative;
   display: flex; align-items: center; gap: 10px;
@@ -45,23 +42,12 @@
   background: var(--card);
   transition: background .12s ease;
 }
-.e-sess:hover { background: var(--card-alt); }
-.e-sess.sel { background: var(--accent-soft); }
 .e-sess input[type=checkbox] {
   position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
   width: 15px; height: 15px; accent-color: var(--accent);
 }
-/* 会话头像：与聊天页 .sess .ava 完全同一套 */
-.e-sess .ava {
-  position: absolute; left: 42px; top: 13px;
-  width: 38px; height: 38px; border-radius: var(--radius-sm);
-  background: var(--card-alt); color: var(--text); border: 1px solid var(--line);
-  font-size: 13px; font-weight: 700;
-  text-align: center; line-height: 36px;
-  overflow: hidden;
-}
-.e-sess.sel .ava { background: var(--card); border-color: var(--accent-line); }
-.e-sess .ava img { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; }
+/* 会话头像：尺寸/配色与聊天页 .sess .ava 同收在 shared.css，这里只留锚定坐标 */
+.e-sess .ava { position: absolute; left: 42px; top: 13px; }
 .e-body { min-width: 0; flex: 1; }
 /* 聊天页多选范围提示条 */
 .e-range-banner {
@@ -78,13 +64,11 @@
   line-height: 18px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   padding-right: 86px;
 }
-.e-sess.sel .name { color: var(--accent-fg); }
 .e-sess .prev {
   display: block; font-size: 12px; color: var(--muted);
   line-height: 16px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   padding-right: 60px;
 }
-.e-sess .tm { position: absolute; right: 12px; top: 12px; font-size: 11px; color: var(--muted); }
 /* 会话行类型标签 + 排除标记 */
 .e-sess .kind-tag {
   position: absolute; right: 12px; bottom: 10px;
@@ -112,9 +96,11 @@
 .g-nav { margin-top: 16px; }
 /* 日志卡溢出修复：flex:1 + 固定 min-height 在 overflow-y 容器内会把卡片
    撑破圆角边框——收缩下限交给 .console 的 min-height 承担，卡片本身允许
-   收缩并裁剪溢出（台账 §二-1，2026-10-17 实机截图复现） */
-.e-logcard { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
-.e-logcard .console { flex: 1; min-height: 130px; max-height: 360px; }
+   收缩（台账 §二-1，2026-10-17 实机截图复现）。溢出从 hidden 改为纵向
+   可滚：#e-result 跟在 console 之后，长结果/矮窗口曾被无滚动条地裁掉，
+   「打开目录」等底部操作够不着（审计 §3.4）。 */
+.e-logcard { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; display: flex; flex-direction: column; }
+/* console 尺寸与 MCP 页同一套，收在 shared.css */
 .e-log-actions { display: flex; gap: 8px; }
 /* 进度条文字行 */
 .e-prog-text {
@@ -139,23 +125,14 @@
 .res-logs-detail summary { cursor: pointer; color: var(--text); font-weight: 700; }
 .res-logs-detail.res-failed summary { color: var(--danger); }
 .res-logs-detail .log-line { padding: 2px 0; }
-/* 导出名单模态框：结构与聊天页统计弹窗同一套，但本页自带样式（页面 CSS 按需加载） */
-.e-modal {
-  position: fixed; inset: 0; background: rgba(0, 0, 0, .32);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 50; padding: 20px;
-}
+/* 导出名单模态框：遮罩/标题栏骨架与聊天页统计弹窗同一套，收在 shared.css
+   （页面 CSS 按需加载，本页只留卡片与内容区差异） */
 .e-modal-card {
   width: min(560px, 96vw); max-height: min(680px, 88vh);
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--card); border: 1px solid var(--line);
   border-radius: var(--radius-lg); box-shadow: var(--shadow-md);
 }
-.e-modal-head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 16px; border-bottom: 1px solid var(--line);
-}
-.e-modal-head b { font-size: 16px; color: var(--text); }
 .e-modal-toolbar {
   display: flex; flex-direction: column; gap: 6px;
   padding: 12px 16px; border-bottom: 1px solid var(--line-soft);
