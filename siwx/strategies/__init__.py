@@ -30,6 +30,13 @@ else:
         from siwx.strategies import macos_lldb
         STRATEGY_REGISTRY.append(macos_lldb)
         _PROCESS_DEPENDENT.add(macos_lldb)
+    if platform.system() == "Linux":
+        # Linux 没有 LLDB 路线：外部 ptrace tracer 会被微信内置 crashpad 撞死
+        # （一个进程只能有一个 tracer → abort）。改用进程内 INT3 钩子，
+        # 经 systemctl --user set-environment 注入，不需要 root。
+        from siwx.strategies import linux_hook
+        STRATEGY_REGISTRY.append(linux_hook)
+        _PROCESS_DEPENDENT.add(linux_hook)
 
 
 def _tagged_ctx(ctx, module: str) -> dict:
