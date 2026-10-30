@@ -519,7 +519,7 @@ def apply(stage: dict, out_root: Path = None, log=print,
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             n += 1
-        log(f"[restore] ✓ 全新安装：{n} 个文件 → {acc_dir.name[:3]}***")
+        log(f"[restore] √ 全新安装：{n} 个文件 → {acc_dir.name[:3]}***")
         return {"mode": "install", "files": n, "inserted": 0, "dup": 0,
                 "sessions": 0, "contacts": 0, "chats": {}}
 
@@ -648,7 +648,7 @@ def apply(stage: dict, out_root: Path = None, log=print,
     prog(70, "合并 session / contact…")
     sess = _merge_session(payload, acc_dir, backup_dir / "session", rev, log)
     cont = _merge_contact(payload, acc_dir, backup_dir / "contact", log)
-    log(f"[restore] ✓ 完成：消息 +{inserted}（重复 {dup}），"
+    log(f"[restore] √ 完成：消息 +{inserted}（重复 {dup}），"
         f"session {sess['merged']}，contact +{cont['added']}")
     return {"mode": "merge", "inserted": inserted, "dup": dup,
             "sessions": sess["merged"], "contacts": cont["added"],
@@ -703,7 +703,7 @@ def _wechat_account_dir(account: str, store: dict, log=print) -> Path:
     hits.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
     best = hits[0]
     if len(hits) > 1:
-        log(f"[restore-wechat] ⚠ 该账号有 {len(hits)} 个数据目录，"
+        log(f"[restore-wechat] ▲ 该账号有 {len(hits)} 个数据目录，"
             f"已选密钥覆盖最高的（{best[0]}/{best[1]} 库）")
     if not best[1] or best[0] < best[1]:
         # 覆盖不满：apply 前必须补齐（extract 由 api 层负责引导/执行）
@@ -939,7 +939,7 @@ def _rewrite_wechat_db(db_path: Path, key: bytes, mutate, log=print) -> dict:
         p.unlink(missing_ok=True)
         cleanup_sidecars(p)
     shutil.rmtree(work, ignore_errors=True)
-    log(f"[restore-wechat] {db_path.name} 重写完成 → 原子替换 ✓")
+    log(f"[restore-wechat] {db_path.name} 重写完成 → 原子替换 √")
     return stats
 
 
@@ -1021,7 +1021,7 @@ def _wechat_account_dir(account: str, store: dict, log=print) -> Path:
     hits.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
     best = hits[0]
     if len(hits) > 1:
-        log(f"[restore-wechat] ⚠ 该账号有 {len(hits)} 个数据目录，"
+        log(f"[restore-wechat] ▲ 该账号有 {len(hits)} 个数据目录，"
             f"已选密钥覆盖最高的（{best[0]}/{best[1]} 库）")
     if not best[1] or best[0] < best[1]:
         raise RestoreError(
@@ -1109,7 +1109,7 @@ def apply_wechat(stage: dict, chats=None, log=print, progress=None) -> dict:
         pack_tbls = _pack_tables(pack_shards)
         missing = [c for c in chats if msg_table_of(c) not in pack_tbls]
         if missing:
-            log(f"[restore-wechat] ⚠ {len(missing)} 个勾选会话在包内没有消息，跳过")
+            log(f"[restore-wechat] ▲ {len(missing)} 个勾选会话在包内没有消息，跳过")
 
     # 包内行按表聚合（跨包内分片合并 + server_id 去重）
     pack_rows, pack_senders = {}, {}
@@ -1181,7 +1181,7 @@ def apply_wechat(stage: dict, chats=None, log=print, progress=None) -> dict:
         stats["session_fixed"] = _fix_wechat_session(
             db_dir, store, payload, rev, created, log)
     prog(100, "恢复到微信完成")
-    log(f"[restore-wechat] ✓ 消息 +{stats['inserted']}（重复 {stats['dup']}），"
+    log(f"[restore-wechat] √ 消息 +{stats['inserted']}（重复 {stats['dup']}），"
         f"重写分片 {len(stats['rewrote'])}，重建表 {len(created)}，"
         f"会话修复 {stats['session_fixed']}")
     return stats

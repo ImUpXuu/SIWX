@@ -39,7 +39,7 @@ def _discover(log_fn):
     """发现微信数据目录。"""
     dirs = find_wechat_data_dirs()
     if not dirs:
-        log_fn("✗ 未找到微信数据目录 (xwechat_files/*/db_storage)")
+        log_fn("× 未找到微信数据目录 (xwechat_files/*/db_storage)")
         _slog.detailed("discover", "搜索路径: USERPROFILE/Documents/xwechat_files, USERPROFILE/xwechat_files, A-Z:/xwechat_files")
     else:
         log_fn(f"自动扫描到 {len(dirs)} 个微信账号")
@@ -242,7 +242,7 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
 
     # 提取失败时给出明确提示
     if report["verified"] == 0 and report["total_salts"] > 0:
-        log("[extract] ✗ 未能提取到任何密钥！可能原因:")
+        log("[extract] × 未能提取到任何密钥！可能原因:")
         log("  1. 微信未登录 — 请先启动并登录微信")
         log("  2. 微信版本不支持 — 需要 WeChat 4.1.x (Windows) 或 4.1.8+ (macOS)")
         log("  3. 密钥已过期 — 尝试在微信中重新打开聊天后重跑")
@@ -256,7 +256,7 @@ def extract_keys_for_dir(db_dir: str, log=print, preset=None,
             log("     （详见 MACOS_SUPPORT.md 注意事项）")
         from siwx.discover import find_wechat_pids
         if not find_wechat_pids():
-            log("[extract] ⚠ 未检测到微信进程！请先启动微信")
+            log("[extract] ▲ 未检测到微信进程！请先启动微信")
 
     return report
 
@@ -290,7 +290,7 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
     # S6 迁移：旧版缓存清单把每个库的 SQLCipher 明文密钥落盘了——加载时已
     # 就地剥离，这里立即重写，把磁盘上的存量明文也清掉。
     if manifest and manifest_has_keys(manifest):
-        log("[decrypt] ⚠ 检测到旧版缓存清单含明文密钥，已剥离并重写"
+        log("[decrypt] ▲ 检测到旧版缓存清单含明文密钥，已剥离并重写"
             "（密钥改为每次会话从加密密钥库重取，见审计 S6）")
         save_manifest(out_root, manifest)
     # 本次来源标签 + 历史来源标签（用于覆盖保护）
@@ -301,7 +301,7 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
         _slog.detailed("decrypt", f"resolve 失败，来源标签用原始路径: {db_dir}")
     source_guard = (manifest.get(SOURCE_FIELD) or "").strip() or None
     if source_guard and src_tag and source_guard != src_tag:
-        log(f"[decrypt] ⚠ 该输出目录上次由其他副本目录产出：")
+        log(f"[decrypt] ▲ 该输出目录上次由其他副本目录产出：")
         log(f"[decrypt]     历史来源 {source_guard}")
         log(f"[decrypt]     本次来源 {src_tag}")
         log(f"[decrypt]     已存在的产物将跳过，不覆盖（如需切换请清空该账号输出目录）")
@@ -378,7 +378,7 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
             conflicts.append(e.rel)
             files.append({"rel": e.rel, "size_mb": _round_mb(e.size), "pages": 0,
                           "status": "conflict", "key_masked": ""})
-            log(f"  [decrypt] ⚠ 跳过 {e.rel}：已有产物来自其他副本目录")
+            log(f"  [decrypt] ▲ 跳过 {e.rel}：已有产物来自其他副本目录")
             continue
         tasks.append((e.rel, str(e.path), str(dst), key_hex))
         pre_stat[e.rel] = (mtime, mtime_ns, size_now)
@@ -478,7 +478,7 @@ def decrypt_dir(db_dir: str, out_dir: str, log=print, entries=None,
             manifest[SOURCE_FIELD] = src_tag
         save_manifest(out_root, manifest)
     if conflicts:
-        log(f"[decrypt] ⚠ {len(conflicts)} 个库因来源不同被跳过（已有产物来自其他副本目录）")
+        log(f"[decrypt] ▲ {len(conflicts)} 个库因来源不同被跳过（已有产物来自其他副本目录）")
 
     cancel_flag = False
     if should_cancel is not None:

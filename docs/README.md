@@ -77,7 +77,8 @@ python run.py doctor
 | [module-html-template.md](./module-html-template.md) | `html_template.py` | HTML 导出模板（交互式查看器） |
 
 > `voice.py`（SILK→WAV 转码）、`export_stream.py`（流式消息解析）、`stats.py`（聊天统计）、
-> `logger.py`（双模式日志 + 脱敏导出）、`env_info.py`（环境信息）、`auto_update.py`（自动更新）
+> `logger.py`（双模式日志 + 脱敏导出）、`console_glyphs.py`（控制台装饰字符编码兜底）、
+> `env_info.py`（环境信息）、`auto_update.py`（自动更新）
 > 的接口说明见 [api-reference.md](./api-reference.md) 与 [cli-commands.md](./cli-commands.md)。
 
 ### 接口与运维

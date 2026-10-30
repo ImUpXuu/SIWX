@@ -119,12 +119,18 @@ _CONSOLE = None
 
 def _cprint(line: str) -> None:
     """控制台输出。打包成无控制台（--noconsole）运行时 stdout 可能为 None，
-    print 会抛 AttributeError——控制台输出只是附加通道，失败必须静默。"""
+    print 会抛 AttributeError——控制台输出只是附加通道，失败必须静默。
+
+    输出前交给 console_glyphs 按目标流编码做装饰字符降级：GBK/cp1252 控制台
+    编不了 √ × 这类符号（`run.py` 已把流重配成 errors="replace"），否则会
+    整片显示成 `?`，成功行看着像报错。UTF-8 下不会触发替换。"""
     try:
+        from siwx import console_glyphs
         if _CONSOLE is not None:
-            print(line, file=_CONSOLE)
+            console_glyphs.print_line(line, _CONSOLE)
         else:
-            print(line)
+            # 内置 print 跟随 sys.stdout，走同一套探测+降级
+            console_glyphs.print_line(line)
     except Exception:
         pass
 

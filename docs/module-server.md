@@ -353,7 +353,7 @@ def _status_getter() -> dict:
         "wechat": "运行中(2)",
         "wxid": "wxid_xxx",
         "keys": "32",
-        "job": "空闲",  // "auto…" / "✓完成" / "✗失败"
+        "job": "空闲",  // "auto…" / "√完成" / "×失败"
     }
 ```
 

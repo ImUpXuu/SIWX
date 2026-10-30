@@ -1205,7 +1205,7 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
                             "files": res.get("files", []),
                             "size_bytes": size_bytes,
                             "duration_ms": res.get("duration_ms", 0)})
-            progress(endp, f"[{i + 1}/{n}] ✔ {display or chat} ({res.get('message_count', 0)} 条)")
+            progress(endp, f"[{i + 1}/{n}] √ {display or chat} ({res.get('message_count', 0)} 条)")
         except ExportCancelled:
             cancelled = True
             progress(endp, f"[{i + 1}/{n}] 已取消（会话 {display or chat} 未完成）")
@@ -1215,7 +1215,7 @@ def run_export_multi(acc_out_dir: Path, account: str, chats: list,
                          f"{logger.job_prefix()}会话导出失败 chat={chat}: "
                          f"{type(e).__name__}: {e}")
             results.append({"chat": chat, "display": display or chat, "error": str(e)})
-            progress(endp, f"[{i + 1}/{n}] ✗ {display or chat}: {e}")
+            progress(endp, f"[{i + 1}/{n}] × {display or chat}: {e}")
 
     zip_path, zips = None, []
     if not cancelled:

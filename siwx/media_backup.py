@@ -390,7 +390,7 @@ def backup_all(wxid_full: str, out_dir: Path, log=print,
                 "cancelled": False}
     if not all(media_dirs.values()) and log:
         missing = "、".join(f"msg/{k}" for k, v in media_dirs.items() if not v)
-        log(f"[media_backup] ⚠ 部分媒体目录缺失: {missing}（对应类别备份为空）")
+        log(f"[media_backup] ▲ 部分媒体目录缺失: {missing}（对应类别备份为空）")
 
     img_stats = backup_images(wxid_full, out_dir / "images", log=log,
                               should_cancel=should_cancel)

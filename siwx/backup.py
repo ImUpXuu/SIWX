@@ -203,7 +203,7 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
     if chats:
         missing = [c for c in chats if c not in table_loc]
         if missing:
-            log(f"[backup] ⚠ {len(missing)} 个会话在本机没有消息表，已跳过")
+            log(f"[backup] ▲ {len(missing)} 个会话在本机没有消息表，已跳过")
     if not table_loc:
         raise BackupAborted("没有任何可备份的会话（检查联系人勾选/时间窗）")
 
@@ -429,7 +429,7 @@ def _resolve_account(account, store, log=print) -> tuple:
             # 与正身（当前微信在写、密钥齐全）并存时三者都指向正身
             ranked.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
             wxid, db_dir = account, ranked[0][3]
-            log(f"[backup] ⚠ 账号有 {len(hits)} 个数据目录（同名多副本），"
+            log(f"[backup] ▲ 账号有 {len(hits)} 个数据目录（同名多副本），"
                 f"已选密钥覆盖最高的: {db_dir}")
     else:
         best = None
@@ -508,13 +508,13 @@ def run_backup(password: str, mode: str = "full",
             raise BackupAborted(
                 f"提取后仍缺 {len(missing)}/{len(entries)} 个库——缺少的库可能"
                 "是新建/未落库，稍后重试；详情见上方提取日志。")
-        log(f"[backup] ✓ 密钥已补齐（+{rep['verified']}）")
+        log(f"[backup] √ 密钥已补齐（+{rep['verified']}）")
 
     prog(4, "检查微信进程…")
     stop = stop_wechat(confirm_kill, log)
     wals = wal_residuals(db_dir)
     if wals:
-        log(f"[backup] ⚠ 残留 {len(wals)} 个非空 -wal（强制退出未 checkpoint），"
+        log(f"[backup] ▲ 残留 {len(wals)} 个非空 -wal（强制退出未 checkpoint），"
             "最新消息可能未包含：" + ", ".join(wals[:3]) +
             ("…" if len(wals) > 3 else ""))
 
@@ -597,7 +597,7 @@ def run_backup(password: str, mode: str = "full",
             _paths.exports_root() / f"siwx_backup_{mode}_{stamp}.siwxpack")
         prog(70, "写入加密包…")
         rep = write_pack(out_path, password, payload, meta, progress=prog)
-        log(f"[backup] ✓ 完成: {rep['path']} "
+        log(f"[backup] √ 完成: {rep['path']} "
             f"({rep['size'] / 1048576:.1f} MB, {rep['files']} 个文件)")
         return {**rep, "mode": mode, "account": wxid, "stats": stats,
                 "stop": stop, "wal": wals}

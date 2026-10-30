@@ -379,7 +379,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         # 同名账号告警：多个 db_dir 映射到同一 output/<wxid>/ 时，后跑的会覆盖
         # 先跑的产物。这里只提示，不阻断（用户可能确实想重新解密某一副本）。
         for c in find_account_conflicts(dirs):
-            _log(f"[job] ⚠ 账号 {c['wxid']} 发现 {len(c['dirs'])} 个副本目录，"
+            _log(f"[job] ▲ 账号 {c['wxid']} 发现 {len(c['dirs'])} 个副本目录，"
                  f"它们共用同一输出目录，解密会互相覆盖：")
             for i, d in enumerate(c["dirs"], 1):
                 _log(f"[job]      {i}. {d}")
@@ -1416,7 +1416,7 @@ def run_server(host="127.0.0.1", port=8787, open_browser=True,
                 if _job["running"]:
                     d["job"] = f"{_job['mode']}…"
                 elif _job["done"]:
-                    d["job"] = "✓完成" if _job["ok"] else "✗失败"
+                    d["job"] = "√完成" if _job["ok"] else "×失败"
                 else:
                     d["job"] = "空闲"
             status_fail["n"] = 0

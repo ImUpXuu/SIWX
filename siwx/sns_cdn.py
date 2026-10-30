@@ -19,7 +19,7 @@
 
        http:// → https://
        图片：/150|/200|/480 → /0        （取原图）
-       追加 ?token=<token属性>&idx=1    （⚠️ 缺这个参数会 400）
+       追加 ?token=<token属性>&idx=1    （▲️ 缺这个参数会 400）
 
    注意 ``url`` 元素有两个 token：**路径里的**和**``token`` 属性**，两者不同，
    必须用属性值做查询参数。
@@ -111,7 +111,7 @@ def is_video_url(url: str) -> bool:
 # 朋友圈 XML 里的媒体一定是这些域名；`b23.tv` / 网易云 / B 站直播这种外链卡片
 # 不是媒体，既下不下来，也不该让 `/api/sns/media` 变成任意 URL 的代理（SSRF）。
 #
-# ⚠️ `tc.qq.com` 不能漏：视频号封面走 `wxapp.tc.qq.com`（本机实测 1606 个），
+# ▲️ `tc.qq.com` 不能漏：视频号封面走 `wxapp.tc.qq.com`（本机实测 1606 个），
 # 漏了会让所有视频号卡片变破图；`wechat.com` 用于 `snsvideo.c2c.wechat.com`。
 _CDN_SUFFIXES = ("qpic.cn", "qlogo.cn", "video.qq.com", "tc.qq.com",
                  "weixin.qq.com", "weixin.com", "wechat.com", "gtimg.com")
@@ -391,7 +391,7 @@ _QPIC_HOSTS = ("mmsns.qpic.cn", "shmmsns.qpic.cn", "szmmsns.qpic.cn")
 def _host_candidates(url: str):
     """域名候选：原样优先，qpic 图片再加备用域名。
 
-    ⚠️ 只对 ``*.qpic.cn`` 做回退。视频走 ``*.video.qq.com``，把它塞给
+    ▲️ 只对 ``*.qpic.cn`` 做回退。视频走 ``*.video.qq.com``，把它塞给
     ``mmsns.qpic.cn`` 只会拿到 400 —— 旧实现对所有域名都回退，于是「视频
     下载成功但认不出来」的真实原因被后面这几个 400 **覆盖**，报出去的错误
     完全指错方向（实测血案）。

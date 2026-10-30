@@ -37,7 +37,7 @@ SNS_ID_EPOCH_LIMIT_MS = 1 << 41   # 41 位毫秒上限 → 2039-09-07
 
 # 内容类型（ContentObject/type 实测枚举）
 #
-# ⚠️ 这些名字是**早期按外部资料推断**的，实测（5684 条真实库）与部分编号不符：
+# ▲️ 这些名字是**早期按外部资料推断**的，实测（5684 条真实库）与部分编号不符：
 #   type 42（3 条）/ 47（4 条）实际是**音乐分享**（含 musicShareItem + 网易云/QQ音乐链接）
 #   type 34（3 条）实际是**视频号直播**（含 finderLive）
 #   type 26（3 条）实际是**笔记**（含 noteinfo）
@@ -57,7 +57,7 @@ def sns_id_to_ms(sns_id: int) -> int:
 
     ``snsId = (createTime_ms << 23) | random(23 bits)``
 
-    ⚠️ SQLite 把 snsId 存成**有符号 int64**，读出来常是负数，
+    ▲️ SQLite 把 snsId 存成**有符号 int64**，读出来常是负数，
     必须先 ``& 0xFFFFFFFFFFFFFFFF`` 还原成无符号，否则位运算结果全错。
 
     实测 5684/5684 与 XML 内 ``<createTime>`` 吻合（最大偏差 938ms）。
@@ -131,7 +131,7 @@ def _int(v, default=0) -> int:
 
 
 # 微信会把「没有这个值」写成 "0"（而不是省略属性）。
-# ⚠️ 只能按**字符串语义**判断：`"0"` 在 Python 里是真值，用 `or` 串起来会把它当成有效值。
+# ▲️ 只能按**字符串语义**判断：`"0"` 在 Python 里是真值，用 `or` 串起来会把它当成有效值。
 _NULL_ATTRS = frozenset({"", "0", "none", "null"})
 
 
@@ -159,8 +159,8 @@ def _parse_media_el(el, url_tag: str = "url") -> dict:
     区别在标签名、尺寸来源（``<size>`` 属性 / 扁平字段 / ``<videoSize>``）
     以及解密密钥的位置。
 
-    ⚠️ ``token`` 属性是 CDN 下载的必需参数（缺了会 400），务必保留。
-    ⚠️ **``liveMedia`` 的密钥在 ``<enc key="...">``**，不是 ``url@key``。
+    ▲️ ``token`` 属性是 CDN 下载的必需参数（缺了会 400），务必保留。
+    ▲️ **``liveMedia`` 的密钥在 ``<enc key="...">``**，不是 ``url@key``。
     """
     url_el = el.find(url_tag)
     sz = el.find("size")
@@ -194,7 +194,7 @@ def _parse_media_el(el, url_tag: str = "url") -> dict:
         # media 用 <thumb>，imageinfo 用 <thumb_url>，两者都要认
         "thumb_url": (el.findtext("thumb_url") or el.findtext("thumb") or "").strip(),
         "md5": (url_el.get("md5") if url_el is not None else None) or el.findtext("md5") or None,
-        # ⚠️ 必须是 _meta_attr：url@key="0" 是占位值，真密钥在 <enc key>
+        # ▲️ 必须是 _meta_attr：url@key="0" 是占位值，真密钥在 <enc key>
         # （实测视频 100% 因此解不出来；见 _meta_attr 注释）
         "key": _meta_attr(url_el.get("key") if url_el is not None else None,
                           el.findtext("key"), enc_key),
@@ -231,7 +231,7 @@ def _txt(el, tag: str) -> str:
 def _parse_finder_media(m) -> dict:
     """解析 ``<finderFeed><mediaList><media>``。
 
-    ⚠️ 结构与主图 ``mediaList/media`` **完全不同**：没有 ``url``/``key``/``enc_idx``，
+    ▲️ 结构与主图 ``mediaList/media`` **完全不同**：没有 ``url``/``key``/``enc_idx``，
     封面字段是 ``coverUrl`` / ``thumbUrl``，尺寸是扁平的 ``width``/``height``。
     """
     return {
@@ -505,7 +505,7 @@ def parse_timeline(content: str | bytes) -> dict | None:
                     "width": _int(ei.findtext("width")),
                     "height": _int(ei.findtext("height")),
                     "size": _int(ei.findtext("size")),
-                    # ⚠️ url 是**明文**直链；encrypt_url 才需要 aes_key 解密
+                    # ▲️ url 是**明文**直链；encrypt_url 才需要 aes_key 解密
                     "url": (sd.findtext("url") if sd is not None else "") or "",
                     "thumb_url": (sd.findtext("thumb_url") if sd is not None else "") or "",
                     "encrypt_url": (sd.findtext("encrypt_url") if sd is not None else "") or "",
