@@ -5,7 +5,10 @@ import platform
 import string
 from pathlib import Path
 
-import psutil
+try:
+    import psutil
+except ImportError:  # 进程发现降级（见 find_wechat_pids）
+    psutil = None
 
 from siwx import logger as _slog
 from siwx import paths as _paths
@@ -13,6 +16,10 @@ from siwx import paths as _paths
 WECHAT_PROCESSES_WIN = ("weixin.exe", "wechat.exe")
 WECHAT_PROCESSES_MAC = ("WeChat",)
 WECHAT_PROCESSES_LINUX = ("wechat", "weixin", "wechat-bin")
+
+# 缺 psutil 的告警只打一次：find_wechat_pids 会被策略链/轮询高频调用，
+# 每次打会刷满日志（同 `_MIGRATION_WARNED` 的套路）。
+_PSUTIL_WARNED = False
 
 
 def manual_paths_file() -> Path:
@@ -185,7 +192,21 @@ def find_account_conflicts(dirs=None) -> list:
 
 
 def find_wechat_pids():
-    """运行中的微信进程（按内存占用降序，主进程优先）。"""
+    """运行中的微信进程（按内存占用降序，主进程优先）。
+
+    psutil 缺失时返回空列表并告警一次——语义等同于「微信未运行」，下游
+    （strategies/memscan、config_cipher）本就有「未检测到微信进程，跳过」
+    分支，不会崩；但密钥提取会因此静默失效，必须把真实原因留在日志里，
+    否则用户只会看到「请先启动并登录微信」的误导提示。
+    """
+    global _PSUTIL_WARNED
+    if psutil is None:
+        if not _PSUTIL_WARNED:
+            _PSUTIL_WARNED = True
+            _slog.warn("discover", "未安装 psutil，无法检测微信进程（密钥提取/"
+                                   "自动退出会失效）；请执行 "
+                                   "python -m pip install -r requirements.txt")
+        return []
     system = platform.system()
     if system == "Windows":
         target_names = WECHAT_PROCESSES_WIN

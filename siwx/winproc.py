@@ -5,8 +5,6 @@
 import ctypes
 from ctypes import wintypes
 
-import psutil
-
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 MEM_COMMIT = 0x1000

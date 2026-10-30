@@ -9,12 +9,51 @@
     python run.py decrypt [--db-dir X] [--out DIR]
     python run.py serve [--port 8787]
 """
+import importlib.util
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 _WXGF_WORKER_FLAG = "--wxgf-worker"
+
+# requirements.txt 的「导入名 → pip 包名」映射。第三方模块在 siwx 里基本是
+# 模块级裸导入（`discover.py` 的 psutil 是有意例外：它能降级），缺依赖时直接
+# `python run.py ...` 会抛一条埋在多行 import 链尾部的 ModuleNotFoundError
+# （用户看到 `No module named 'psutil'` 无从下手）。更糟的是本机 PATH 上往往
+# 有多个解释器（Python 官方 / WindowsApps 存根 / msys64 等），报错的那个未必是
+# 装齐依赖的那个——提示里必须带上解释器路径。这里在导入 siwx.cli 之前做一次
+# 预检，换成可执行的指引。`tests/test_console_glyphs.py::TestRunPreflight`
+# 会把它与 requirements.txt 对账，防两边漂移。
+_REQUIRED_DEPS = {
+    "Crypto": "pycryptodome",
+    "flask": "flask",
+    "psutil": "psutil",
+    "openpyxl": "openpyxl",
+    "rich": "rich",
+    "zstandard": "zstandard",
+    "pilk": "pilk",
+}
+
+
+def _missing_deps() -> list:
+    """返回未安装的第三方模块导入名（不导入模块，只查 finder）。"""
+    return [name for name in _REQUIRED_DEPS if importlib.util.find_spec(name) is None]
+
+
+def _deps_failure(missing: list) -> int:
+    """打印缺依赖指引，返回退出码 2。"""
+    pip_names = " ".join(_REQUIRED_DEPS[m] for m in missing)
+    print("缺少依赖模块: " + ", ".join(missing), file=sys.stderr)
+    print(f"当前解释器: {sys.executable}", file=sys.stderr)
+    print("请用同一个解释器安装依赖后重试：", file=sys.stderr)
+    print(f'  "{sys.executable}" -m pip install -r requirements.txt',
+          file=sys.stderr)
+    print(f'  (或 "{sys.executable}" -m pip install {pip_names})',
+          file=sys.stderr)
+    print("若 PATH 上有多个 Python，注意确认调用的是哪一个（py -0p）。",
+          file=sys.stderr)
+    return 2
 
 
 def _run_wxgf_worker(dll: str) -> int:
@@ -60,6 +99,10 @@ if __name__ == "__main__":
         if len(_argv) < 2:
             print("wxgf worker: 缺少 DLL 路径参数", file=sys.stderr)
             sys.exit(2)
+        # worker 只需 stdlib（sys/os/ctypes），不碰 siwx 包，免预检
         sys.exit(_run_wxgf_worker(_argv[1]))
+    _missing = _missing_deps()
+    if _missing:
+        sys.exit(_deps_failure(_missing))
     from siwx.cli import main
     sys.exit(main())
