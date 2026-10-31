@@ -1601,7 +1601,7 @@ class TestVersionSource(unittest.TestCase):
         from siwx import __version__
         from siwx.auto_update import current_version
         self.assertEqual(current_version(), __version__)
-        self.assertEqual(__version__, "5.2.0")
+        self.assertEqual(__version__, "5.3.0")
 
     def test_release_metadata_matches_package_version(self):
         """version.json 与 README 徽章的版本号必须跟 __version__ 一致。

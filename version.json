@@ -1,12 +1,12 @@
 {
-  "version": "5.2.0",
-  "date": "2026-10-31 01:28:45",
-  "notes": "## 合并转发完整提取与语音串音修复\n\n> 无破坏性变更，无需迁移。全量测试 740 通过 / 9 跳过。\n\n### 合并转发子消息完整提取（issue #31）\n\n- 子消息不再只有占位文案：保留发言者/时间/文本之外，新增类型分类（文本/图片/视频/链接/文件/表情/嵌套记录）、文件与链接标题、原始消息指针\n- `datatype=17` 嵌套记录递归解析（最多 3 层），并修复嵌套 dataitem 被非贪婪正则截断导致的字段串位\n- **媒体归属回查**：按原始消息 server_id 跨会话定位（真实库实测 1000/1392 跨会话，全账号索引按目录签名缓存）；子项图片随导出解密回填，HTML/JSON 随记录结构输出\n- Web 界面与导出 HTML 渲染子项图片/文件标题/嵌套记录；筛选新增「聊天记录」分类\n- 已知边界：原媒体从未在本机下载过的子项（记录内只有加密 CDN 块）无法还原，保留占位文案\n\n### 语音串音修复（issue #40）\n\n- 特定好友聊天里出现别人语音的根因：该会话在部分 media 分片的 Name2Id 缺席，旧的降级路径用裸 `local_id` 查询首中即返回，撞上别的会话同号语音\n- 修复后会话未知时只信全局唯一的 `svr_id`，宁可诚实未命中也不串音；真实库抽样 30/30 正常命中\n\n### 工程与隐私\n\n- 新增隐私红线扫描与版本号一致性检查脚本（`scripts/`），供发版与 PR 检测使用",
+  "version": "5.3.0",
+  "date": "2026-10-31 22:45:44",
+  "notes": "## 发版前审计修复与导出增强\n\n> 无破坏性变更，无需迁移。全量测试 859 通过 / 9 跳过。\n\n### 安全\n\n- 更新链加固：哈希与产物仅从 GitHub 权威源拉取并强制 https，第三方反代仅用于版本号检查（代理投毒不再可达代码执行）\n- 恢复链加固：stage_id 白名单校验、manifest account 落点断言，杜绝越目录写入\n- 朋友圈卡片链接 scheme 白名单（Web 界面与 HTML/Markdown 导出三处同口径）\n- /api/job 等任务日志出口统一脱敏；Linux 钩子临时日志收紧为 0600 随机路径、读毕即删\n\n### 功能\n\n- 导出包纳入视频与文件附件，合并转发语音子项可导出（manifest 计数留痕）\n- 修复备份页「杀微信」两段式确认死循环：微信运行时备份/恢复可正常走完\n- 修复 server_id=0/NULL 消息在备份与恢复去重时被静默丢失\n- 缩略图角标：本机无高清原图的图片明示提示（issue #34）\n\n### 性能与工程\n\n- 聊天图片缓存加 128MB 字节预算 LRU；大会话搜索超预算分片降级为文本列缓存，不再每次全量重解码\n- CI 接线隐私红线扫描与版本一致性校验；发版脚本兼容 Windows GBK 控制台\n- 命令行新增 backup 子命令文档；手动更新脚本补官方 raw 兜底",
   "assets": {
-    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.2.0/stories-in-wx-v5.2.0-windows-x64.exe",
-    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.2.0/stories-in-wx-v5.2.0-macos.dmg"
+    "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.3.0/stories-in-wx-v5.3.0-windows-x64.exe",
+    "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.3.0/stories-in-wx-v5.3.0-macos.dmg"
   },
-  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.2.0/SHA256SUMS.txt",
+  "sha256": "https://github.com/ImUpXuu/SIWX/releases/download/v5.3.0/SHA256SUMS.txt",
   "update_scripts": {
     "windows": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_win.bat",
     "macos": "https://raw.gh.1s.fan/ImUpXuu/SIWX/main/scripts/update_mac.sh"
