@@ -149,7 +149,8 @@ try {
     $result = $temporary + '.result'
     $root = $temporary + '.root'
     foreach ($arguments in @('doctor', 'auto', 'keys extract', 'keys list', 'decrypt',
-        'serve --host 127.0.0.1 --port 8787 --no-open')) {
+        'serve --host 127.0.0.1 --port 8787 --no-open',
+        'serve --host 127.0.0.1 --port 8787 --no-open --trust-lan')) {
         $cmd = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root
         if (-not $cmd.Contains('"' + $exe + '" ' + $arguments + ' <nul') -or
             -not $cmd.Contains('set "SIWX_ROOT=' + $root + '"') -or
@@ -157,7 +158,7 @@ try {
             throw 'CMD quoting, argument forwarding, runtime root, or single-pass substitution failed.'
         }
     }
-    foreach ($arguments in @('auto & whoami', 'serve --host 0.0.0.0', 'backup --yes',
+    foreach ($arguments in @('auto & whoami', 'serve --host 0.0.0.0', 'serve --host 0.0.0.0 --trust-lan', 'backup --yes',
         'serve --host 127.0.0.1 --port 8787 --no-open & echo bad')) {
         $rejected = $false
         try { $null = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root }

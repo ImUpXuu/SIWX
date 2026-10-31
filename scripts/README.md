@@ -84,3 +84,13 @@ SIWX 的脚本与 EXE 为 `siwx.ps1` / `siwx.exe`；脚本直接从该 Dufs 下�
 新脚本更新到原 Dufs `siwx.ps1` 与 `Siwx-Console.ps1`，重新获取以 `?v=cn308` 避免旧缓存。原后台服务可保留，退出旧菜单后运行新版用 8 查看；若重新启动网页，先用 9 停止旧后台，避免端口冲突。前台/后台/截图中的乱码并不代表解密数据库损坏；业务成功仍以实际数据验收为准。
 
 新增验证：合成中文复现原 GBK→UTF-8 乱码、混合编码、真实字节游标、重复读取无重放、拆分 GBK 字符、后台尾部及64KiB边界、末行、强制编码；保留全部旧测试。用户真实账号和粘贴日志未复制到源码、测试、提交或公开记录。Windows 真机修复效果等待用户重新运行确认。回退点为任务307发布的脚本原字节，EXE摘要保持不变。
+
+## 已加密码的反代模式（2026-10-31，任务309，脚本v1.3）
+
+菜单10：反代模式启动并显示日志；11：反代模式后台启动。仅在公网反代已配置独立认证时使用。普通6/7仍使用本机Host保护。两种模式均只绑定127.0.0.1:8787；反代模式显式追加现有`--trust-lan`兼容外部Host，保留SIWX Origin和Sec-Fetch-Site写请求校验，不改EXE。
+
+wx.sxnn.de:5443链路：OpenResty认证→神仙面板18181按完整Host命中NAT7→server140本机8787。不能在OpenResty改Host为localhost，否则面板无法选中原隧道。所有IP可到登录入口，无IP白名单；只允许认证后进入应用，公网请求的Authorization在反代认证后清除，不转交Windows。凭据仅保存在Trilium私密凭据下wx.sxnn.de专用条目，不写脚本、Git或普通项目笔记。
+
+运行：`irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn309' | iex`，先停止旧8787网页，再选11。现有后台服务可用8查看、9停止。反代配置更新只需nginx -t/reload；Windows启动参数变更只重启本工具任务，不能重启微信或其他用户程序。Dufs分发仅两个脚本，EXE固定官方5.2.0不变。
+
+NAS可编辑配置：/vol1/@appdata/1Panel/1panel/www/conf.d/wx.sxnn.de.conf 与 sites/wx.sxnn.de/proxy/root.conf；认证哈希在sites/wx.sxnn.de/.auth/htpasswd。恢复点为vol2/docker-projects-backups/wx-proxy309-日期，含旧两配置/.keep；ops/proxy309-20261031保存脱敏工具及验证。先撤销Windows反代模式，再恢复旧NAS配置并-t/reload，避免产生未认证的Host放行窗口。验证匿名/错误口令401、认证后首页和静态文件200、同源不存在POST404及跨源POST403；不查询聊天数据。完整真机聊天浏览/解密导出仍由用户使用验收。

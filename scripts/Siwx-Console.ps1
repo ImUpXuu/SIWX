@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.2\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.3\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -174,7 +174,7 @@
                 }
             }
             if ($Sid -notmatch '^S-1-[0-9-]+$') { throw (ConvertFrom-ConsoleText '\u7528\u6237 SID \u65e0\u6548\u3002') }
-            if ($ArgumentLine -notmatch '^(doctor|auto|keys extract|keys list|decrypt|serve --host 127\.0\.0\.1 --port 8787 --no-open|probe)$') {
+            if ($ArgumentLine -notmatch '^(doctor|auto|keys extract|keys list|decrypt|serve --host 127\.0\.0\.1 --port 8787 --no-open( --trust-lan)?|probe)$') {
                 throw (ConvertFrom-ConsoleText '\u4e0d\u652f\u6301\u6b64\u547d\u4ee4\u53c2\u6570\u3002')
             }
             if (-not $RootPath -or $RootPath -match '[%"\r\n]') { throw (ConvertFrom-ConsoleText '\u8fd0\u884c\u6839\u76ee\u5f55\u5305\u542b\u4e0d\u5b89\u5168\u5b57\u7b26\u3002') }
@@ -389,6 +389,7 @@ try {
                 Write-Host (ConvertFrom-ConsoleText '4 = \u67e5\u770b\u6253\u7801\u5bc6\u94a5   5 = \u4f7f\u7528\u7f13\u5b58\u5bc6\u94a5\u89e3\u5bc6')
                 Write-Host (ConvertFrom-ConsoleText '6 = \u542f\u52a8\u7f51\u9875\u5e76\u663e\u793a\u65e5\u5fd7   7 = \u540e\u53f0\u542f\u52a8\u7f51\u9875')
                 Write-Host (ConvertFrom-ConsoleText '8 = \u540e\u53f0\u72b6\u6001 / \u7f51\u5740 / \u65e5\u5fd7   9 = \u505c\u6b62\u540e\u53f0\u7f51\u9875   0 = \u9000\u51fa')
+                Write-Host (ConvertFrom-ConsoleText '10 = \u5df2\u52a0\u5bc6\u7801\u53cd\u4ee3\uff1a\u542f\u52a8\u7f51\u9875\u5e76\u663e\u793a\u65e5\u5fd7   11 = \u5df2\u52a0\u5bc6\u7801\u53cd\u4ee3\uff1a\u540e\u53f0\u542f\u52a8')
                 $nextCommand = Read-Host (ConvertFrom-ConsoleText '\u8bf7\u9009\u62e9')
             }
             if ($nextCommand -eq '0') { break }
@@ -424,8 +425,8 @@ try {
                 continue
             }
             $isProbe = $nextCommand -eq 'p'
-            $backgroundMode = $nextCommand -eq '7'
-            $isServe = $nextCommand -in @('6', '7')
+            $backgroundMode = $nextCommand -in @('7', '11')
+            $isServe = $nextCommand -in @('6', '7', '10', '11')
             # All SIWX operations share the same cache/output root. Avoid concurrent writers.
             if (-not $isProbe -and @(Get-SiwxBackgroundTasks $sid | Where-Object {
                 $_.Task.State -in @('Running', 'Queued') }).Count -gt 0) {
@@ -441,6 +442,7 @@ try {
                 '4' { 'keys list' }
                 '5' { 'decrypt' }
                 { $_ -in @('6', '7') } { 'serve --host 127.0.0.1 --port 8787 --no-open' }
+                { $_ -in @('10', '11') } { 'serve --host 127.0.0.1 --port 8787 --no-open --trust-lan' }
             }
             if (-not $siwxArguments) { $nextCommand = $null; continue }
             if ($isServe -and (Test-SiwxPort)) {
