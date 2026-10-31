@@ -45,6 +45,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
+          GIT_REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           ZERO=0000000000000000000000000000000000000000
@@ -57,12 +59,17 @@ jobs:
               python scripts/privacy_scan.py --range "$BASE_SHA..HEAD"
               ;;
             push)
-              if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$ZERO" ] \
+              if [[ "$GIT_REF" == refs/tags/* ]]; then
+                # tag push：commit 内容与 main 推送时同一 SHA（已扫过），
+                # tag 新引入的文本面只有标签注释；浅克隆下 --rev 会把整棵树当新增行，不可用
+                echo "tag 推送：扫描标签注释"
+                git tag -l --format='%(contents)' "$REF_NAME" | python scripts/privacy_scan.py --stdin
+              elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$ZERO" ] \
                  && git fetch --no-tags --depth=1 origin "$BEFORE_SHA" 2>/dev/null; then
                 python scripts/privacy_scan.py --range "$BEFORE_SHA..HEAD"
               else
-                # 首次推送 / 强推后 before 不可达 / tag 推送：回退扫描最新一个提交
-                python scripts/privacy_scan.py --rev HEAD
+                # 首次推送 / 强推后 before 不可达：浅克隆下无可靠 diff 范围，显式跳过
+                echo "before=$BEFORE_SHA 不可达（首次推送/强推），跳过增量扫描（提交前本地扫描为准）"
               fi
               ;;
             *)

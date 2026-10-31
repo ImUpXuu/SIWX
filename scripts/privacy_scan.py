@@ -141,11 +141,19 @@ def main() -> int:
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--range", help="git diff 范围，如 origin/main...HEAD")
     g.add_argument("--rev", help="单次提交（对比其父提交）")
+    g.add_argument("--stdin", action="store_true",
+                   help="扫描标准输入文本（如 tag 注释），不读 git")
     g.add_argument("--staged", action="store_true", help="扫描暂存区")
     args = ap.parse_args()
 
     if args.staged:
         diff = _git("diff", "--cached", "--unified=0", "--no-color")
+    elif args.stdin:
+        # 注意：浅克隆下 --rev 不可用（父提交缺失时 git show 会把整棵树当新增行），
+        # tag push 等无 diff 范围的事件改用本模式扫描新增的文本面（如标签注释）。
+        # scan() 只认 diff 新增行，这里把每行包成 "+" 行，逐行全扫。
+        body = "".join("+" + line + "\n" for line in sys.stdin.read().splitlines())
+        diff = "+++ b/<stdin>\n@@ -0,0 +1 @@\n" + body
     elif args.rev:
         diff = _git("show", "--unified=0", "--no-color", "--format=", args.rev)
     else:
