@@ -387,7 +387,9 @@ class TestExportStartViaRun(IsolatedRootCase):
 
         def fake_run_export_multi(acc_dir, account, chats, **kw):
             self.assertEqual(account, "wxid_example_01")
-            self.assertEqual(acc_dir, acc)
+            # CI 环境下 8.3 短路径（RUNNER~1）与 /var 符号链接会改变字面形式，
+            # 一律 resolve() 后再比，只验证指向同一真实目录
+            self.assertEqual(Path(acc_dir).resolve(), Path(acc).resolve())
             self.assertEqual(len(chats), 1)
             export_root = Path(kw["export_root"])
             art_dir = export_root / "demo_20260101"
