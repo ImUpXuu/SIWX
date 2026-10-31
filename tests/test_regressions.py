@@ -757,6 +757,76 @@ class TestVoiceMedia(TempRootCase):
         self.assertEqual(r.headers.get("X-SIWX-Voice-Format"), "wav")
         self.assertEqual(r.headers.get("X-SIWX-Voice-Transcoder"), "fake")
 
+    def test_voice_never_crosses_chat_when_name2id_missing_in_shard(self):
+        """回归 #40：会话在某分片的 Name2Id 里缺席时，不得用裸 local_id
+        把别的会话的语音串进来。
+
+        场景：好友的语音都在 media_1（她的名字只在 media_1 的 Name2Id 里），
+        media_0 里只有别人的语音、且 local_id 撞号（VoiceInfo 的 local_id 是
+        每会话独立编号，跨会话撞号是常态）。修复前 media_0 的裸
+        ``local_id=?`` 降级查询首中即返回，别人的语音被当成好友的。"""
+        from siwx import voice
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        other = "wxid_demo_b"
+
+        def _voice_db(path, name2id, rows):
+            conn = sqlite3.connect(path)
+            conn.execute("DROP TABLE IF EXISTS unrelated")
+            conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+            for rid, name in name2id:
+                conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (?,?)", (rid, name))
+            conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
+                         "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
+            for r in rows:
+                conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)", r)
+            conn.commit()
+            conn.close()
+
+        silk_other = b"\x02#!SILK_V3other-chat-voice"
+        silk_mine = b"\x02#!SILK_V3my-voice"
+        # media_0：只有 wxid_demo_b 的语音，local_id=9 与好友撞号，同秒
+        _voice_db(acc / "message" / "media_0.db", [(1, other)],
+                  [(1, 1700000000, 9, 777, silk_other, "0")])
+        # media_1：好友的语音（Name2Id rowid 恰好也是 1——分片间本就各自编号）
+        _voice_db(acc / "message" / "media_1.db", [(1, chat)],
+                  [(1, 1700000000, 9, 888, silk_mine, "0")])
+
+        body, info = voice.get_voice(acc, chat=chat, local_id=9,
+                                     svr_id=888, ts=1700000000)
+        self.assertEqual(body, b"#!SILK_V3my-voice", info)
+
+        # 无 svr_id：同样不允许串音，应正确命中好友自己的那条
+        body, info = voice.get_voice(acc, chat=chat, local_id=9,
+                                     svr_id=0, ts=1700000000)
+        self.assertEqual(body, b"#!SILK_V3my-voice", info)
+
+        # 请求方拿不出 svr_id 且本会话没有这条语音时，宁可未命中也不串音
+        body, info = voice.get_voice(acc, chat=chat, local_id=99,
+                                     svr_id=0, ts=1700000000)
+        self.assertIsNone(body)
+
+    def test_voice_unscoped_query_trusts_svr_id_only(self):
+        """会话未知（chat 为空）时只允许 svr_id 精确命中；裸 local_id 一律禁用。"""
+        from siwx import voice
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        db = acc / "message" / "media_0.db"
+        conn = sqlite3.connect(db)
+        conn.execute("DROP TABLE unrelated")
+        conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+        conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, 'wxid_demo_b')")
+        conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
+                     "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
+        conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
+                     (1, 1700000000, 9, 777, b"\x02#!SILK_V3other", "0"))
+        conn.commit()
+        conn.close()
+        # svr_id 精确命中（会话未知也允许）
+        body, _ = voice.get_voice(acc, chat="", local_id=0, svr_id=777, ts=1700000000)
+        self.assertEqual(body, b"#!SILK_V3other")
+        # 同 local_id 同 ts 但 svr_id 不符：宁可未命中，不返回别人的语音
+        body, _ = voice.get_voice(acc, chat="", local_id=9, svr_id=0, ts=1700000000)
+        self.assertIsNone(body)
+
 
 class TestMediaExport(TempRootCase):
 
@@ -4187,12 +4257,15 @@ class TestAuditFixes20261006(TempRootCase):
         self.assertEqual(only_2020["chat_count"], 1)
 
     def test_voice_does_not_leak_across_sessions(self):
-        """不同会话共享同一 local_id 时，裸 local_id=? 会捞到别的会话的语音。
+        """不同会话共享同一 local_id 时，跨分片查找不得捞到别的会话的语音。
 
         构造：目标语音在 media_0.db，media_1.db 里有一条 chat_name_id 属于别的
-        会话、但 local_id 相同的记录。旧实现先在 media_1.db 用裸 local_id 命中
-        并直接返回 → 跨会话音频泄漏；修复后必须继续走到 media_0.db。
-        """
+        会话、但 local_id 相同的记录。media_1 先被遍历（倒序 glob），带会话
+        约束的查询不会命中诱饵（chat_name_id 不符），必须继续走到 media_0。
+
+        注：两个分片的 Name2Id 都在——真实 media_*.db 一律携带 Name2Id；
+        会话在某分片查不到映射时，宁可不命中也不能裸 local_id 串音
+        （issue #40 的根因，见 TestVoiceMedia 的回归）。"""
         from siwx import voice
         acc, account, chat = make_account(self.tmp, n_texts=1)
         msg_dir = acc / "message"
@@ -4208,6 +4281,8 @@ class TestAuditFixes20261006(TempRootCase):
         conn.commit(); conn.close()
 
         conn = sqlite3.connect(msg_dir / "media_0.db")
+        conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+        conn.execute("INSERT INTO Name2Id(rowid, user_name) VALUES (1, ?)", (chat,))
         conn.execute("CREATE TABLE VoiceInfo (chat_name_id INTEGER, create_time INTEGER, "
                      "local_id INTEGER, svr_id INTEGER, voice_data BLOB, data_index TEXT)")
         conn.execute("INSERT INTO VoiceInfo VALUES (?,?,?,?,?,?)",
