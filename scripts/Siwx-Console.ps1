@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.1\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.2\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -300,23 +300,85 @@ try {
             }
         }
 
+        function ConvertFrom-SiwxLogBytes([byte[]]$Bytes, [string]$EncodingName = $env:SIWX_CONSOLE_LOG_ENCODING) {
+            if (-not $Bytes -or $Bytes.Length -eq 0) { return '' }
+            if (-not $EncodingName) { $EncodingName = 'Auto' }
+            if ($EncodingName -notin @('Auto', 'UTF8', 'GB18030')) {
+                throw (ConvertFrom-ConsoleText '\u65e5\u5fd7\u7f16\u7801 SIWX_CONSOLE_LOG_ENCODING \u53ea\u80fd\u8bbe\u4e3a Auto\u3001UTF8 \u6216 GB18030\u3002')
+            }
+            $utf8 = New-Object Text.UTF8Encoding($false, $true)
+            $legacy = [Text.Encoding]::GetEncoding(54936)
+            $builder = New-Object Text.StringBuilder
+            $start = 0
+            # Decode complete lines independently: CMD can emit UTF-8 while the frozen EXE emits GBK.
+            for ($index = 0; $index -le $Bytes.Length; $index++) {
+                if ($index -eq $Bytes.Length -or $Bytes[$index] -eq 10) {
+                    $count = $index - $start
+                    if ($index -lt $Bytes.Length) { $count++ }
+                    if ($count -gt 0) {
+                        if ($EncodingName -eq 'GB18030') {
+                            $line = $legacy.GetString($Bytes, $start, $count)
+                        } elseif ($EncodingName -eq 'UTF8') {
+                            $line = [Text.Encoding]::UTF8.GetString($Bytes, $start, $count)
+                        } else {
+                            try { $line = $utf8.GetString($Bytes, $start, $count) }
+                            catch [Text.DecoderFallbackException] {
+                                $line = $legacy.GetString($Bytes, $start, $count)
+                            }
+                        }
+                        if ($start -eq 0) { $line = $line.TrimStart([char]0xFEFF) }
+                        $null = $builder.Append($line)
+                    }
+                    $start = $index + 1
+                }
+            }
+            return $builder.ToString()
+        }
+
         function Show-SiwxOutput([string]$Path, [ref]$Position, [bool]$Final = $false) {
             if (-not (Test-Path -LiteralPath $Path)) { return }
             $stream = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
             try {
+                if ($Position.Value -gt $stream.Length) { $Position.Value = [long]0 }
                 $null = $stream.Seek($Position.Value, 'Begin')
-                $reader = New-Object IO.StreamReader($stream, [Text.Encoding]::UTF8)
-                try {
-                    $text = $reader.ReadToEnd()
-                    # Leave an incomplete UTF-8 line for the next read.
-                    $end = $text.LastIndexOf("`n")
-                    if ($Final -and $text.Length -gt 0) { $end = $text.Length - 1 }
-                    if ($end -ge 0) {
-                        $complete = $text.Substring(0, $end + 1)
-                        Write-Host -NoNewline $complete
-                        $Position.Value += [Text.Encoding]::UTF8.GetByteCount($complete)
+                $memory = New-Object IO.MemoryStream
+                try { $stream.CopyTo($memory); $bytes = $memory.ToArray() }
+                finally { $memory.Dispose() }
+                $take = 0
+                if ($Final) { $take = $bytes.Length }
+                else {
+                    for ($index = $bytes.Length - 1; $index -ge 0; $index--) {
+                        if ($bytes[$index] -eq 10) { $take = $index + 1; break }
                     }
-                } finally { $reader.Dispose() }
+                }
+                if ($take -gt 0) {
+                    $complete = New-Object byte[] $take
+                    [Array]::Copy($bytes, $complete, $take)
+                    Write-Host -NoNewline (ConvertFrom-SiwxLogBytes $complete)
+                    # Positions are raw file bytes, never the length of re-encoded/replaced text.
+                    $Position.Value += $take
+                }
+            } finally { $stream.Dispose() }
+        }
+
+        function Show-SiwxLogTail([string]$Path, [int]$Lines = 20) {
+            if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+            $stream = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+            try {
+                $offset = [Math]::Max([long]0, $stream.Length - 65536)
+                $null = $stream.Seek($offset, 'Begin')
+                $memory = New-Object IO.MemoryStream
+                try { $stream.CopyTo($memory); $bytes = $memory.ToArray() }
+                finally { $memory.Dispose() }
+                if ($offset -gt 0) {
+                    $firstNewline = [Array]::IndexOf($bytes, [byte]10)
+                    if ($firstNewline -lt 0 -or $firstNewline -ge $bytes.Length - 1) { return }
+                    $bytes = $bytes[($firstNewline + 1)..($bytes.Length - 1)]
+                }
+                $text = ConvertFrom-SiwxLogBytes $bytes
+                if ($text) {
+                    $text.TrimEnd([char[]]"`r`n") -split "`n" | Select-Object -Last $Lines | ForEach-Object { Write-Host $_ }
+                }
             } finally { $stream.Dispose() }
         }
 
@@ -339,7 +401,7 @@ try {
                     Write-Host (ConvertFrom-ConsoleText "\u7f51\u5740\uff1ahttp://127.0.0.1:8787/\uff08\u4ec5\u5728\u5bf9\u5e94\u670d\u52a1\u8fd0\u884c\u65f6\u6709\u6548\uff09")
                     Write-Host (ConvertFrom-ConsoleText "\u65e5\u5fd7\uff1a$($record.LogPath)")
                     if ($nextCommand -eq '8' -and (Test-Path -LiteralPath $record.LogPath)) {
-                        Get-Content -LiteralPath $record.LogPath -Encoding UTF8 -Tail 20 | ForEach-Object { Write-Host $_ }
+                        Show-SiwxLogTail $record.LogPath 20
                     }
                 }
                 if ($nextCommand -eq '9' -and $backgroundTasks.Count -gt 0) {

@@ -41,6 +41,12 @@ foreach ($literal in $menuLiterals) {
 }
 Write-Output 'PASS: Chinese prompt/menu decoding, ASCII local/irm source encoding'
 
+foreach ($name in @('ConvertFrom-SiwxLogBytes', 'Show-SiwxLogTail')) {
+    $definition = $consoleAst.Find({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+    }, $true)
+    . ([ScriptBlock]::Create($definition.Extent.Text))
+}
 $functionAst = $consoleAst.Find({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -90,6 +96,54 @@ try {
         if (-not $definition) { throw "Missing function: $functionName" }
         . ([ScriptBlock]::Create($definition.Extent.Text))
     }
+    # Synthetic Chinese text only; no real user identifiers or source logs.
+    $chinese = [string][char]0x4E2D + [char]0x6587 + [char]0x6D4B + [char]0x8BD5
+    $gbk = [Text.Encoding]::GetEncoding(936)
+    $legacyLine = $chinese + "`n"
+    $utf8Line = 'CMD: ' + $chinese + "`n"
+    $legacyBytes = $gbk.GetBytes($legacyLine)
+    $mixedBytes = $utf8.GetBytes($utf8Line) + $legacyBytes
+    if ([Text.Encoding]::UTF8.GetString($legacyBytes) -eq $legacyLine) { throw 'Fixture does not reproduce the encoding mismatch.' }
+    if ((ConvertFrom-SiwxLogBytes $mixedBytes) -ne ($utf8Line + $legacyLine)) { throw 'Mixed UTF8/GBK output corrupted.' }
+    [IO.File]::WriteAllBytes($temporary, $mixedBytes)
+    $position = [long]0
+    $mixedOutput = @(Show-SiwxOutput $temporary ([ref]$position) 6>&1)
+    if ($mixedOutput[0].ToString() -ne ($utf8Line + $legacyLine) -or $position -ne $mixedBytes.Length) {
+        throw 'Mixed output text or raw byte cursor incorrect.'
+    }
+    if (@(Show-SiwxOutput $temporary ([ref]$position) 6>&1).Count) { throw 'Repeated log read duplicated output.' }
+    # Native GBK character split across polling reads must remain unread until a full line.
+    $append = [IO.File]::Open($temporary, 'Append', 'Write', 'ReadWrite')
+    try { $append.Write($legacyBytes, 0, 1) } finally { $append.Dispose() }
+    $originalPosition = $position
+    if (@(Show-SiwxOutput $temporary ([ref]$position) 6>&1).Count -or $position -ne $originalPosition) {
+        throw 'Partial GBK character was decoded or advanced the cursor.'
+    }
+    $append = [IO.File]::Open($temporary, 'Append', 'Write', 'ReadWrite')
+    try { $append.Write($legacyBytes, 1, ($legacyBytes.Length - 1)) } finally { $append.Dispose() }
+    $continued = @(Show-SiwxOutput $temporary ([ref]$position) 6>&1)
+    if ($continued[0].ToString() -ne $legacyLine -or $position -ne (Get-Item $temporary).Length) {
+        throw 'Split GBK character or cursor corrupted.'
+    }
+    $tail = @(Show-SiwxLogTail $temporary 1 6>&1)
+    if ($tail.Count -ne 1 -or $tail[0].ToString() -ne $chinese) { throw 'Background GBK tail still corrupt.' }
+    # A bounded tail starts mid-character/line; discard that prefix before decoding.
+    $longPrefix = 'a' * 70000
+    [IO.File]::WriteAllBytes($temporary, ($utf8.GetBytes($longPrefix + "`n") + $legacyBytes))
+    $bounded = @(Show-SiwxLogTail $temporary 1 6>&1)
+    if ($bounded.Count -ne 1 -or $bounded[0].ToString() -ne $chinese) { throw 'Bounded background tail corrupted.' }
+    [IO.File]::WriteAllBytes($temporary, $utf8.GetBytes($longPrefix + "`n"))
+    if (@(Show-SiwxLogTail $temporary 1 6>&1).Count) { throw 'Tail boundary created a phantom line.' }
+    # Valid-UTF8 byte sequences can also represent GBK; allow a deterministic override.
+    $ambiguous = [byte[]]@(0xC2, 0xA9)
+    if ((ConvertFrom-SiwxLogBytes $ambiguous 'GB18030') -ne $gbk.GetString($ambiguous) -or
+        (ConvertFrom-SiwxLogBytes $ambiguous 'UTF8') -ne $utf8.GetString($ambiguous)) { throw 'Explicit log encoding override failed.' }
+    [IO.File]::WriteAllBytes($temporary, $gbk.GetBytes($chinese))
+    $position = [long]0
+    $finalLegacy = @(Show-SiwxOutput $temporary ([ref]$position) $true 6>&1)
+    if ($finalLegacy[0].ToString() -ne $chinese -or $position -ne $gbk.GetByteCount($chinese)) { throw 'Final GBK line failed.' }
+    # Restore the pre-existing final-line test fixture to a complete EOF position.
+    Write-Output 'PASS: reproduced UTF8/GBK mismatch, mixed lines, raw byte cursor, repeated reads, split GBK, background tail, forced encodings'
     $exe = Join-Path ([IO.Path]::GetTempPath()) 'space & !literal{LOG}/siwx.exe'
     $log = $temporary + '.log'
     $result = $temporary + '.result'
