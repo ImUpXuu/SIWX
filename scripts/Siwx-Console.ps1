@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.3\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.4\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -119,6 +119,94 @@
                 return $true
             } catch { return $false } finally { $client.Dispose() }
         }
+        function Get-SiwxProcessRecord([int]$ProcessId) {
+            $process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $ProcessId) -ErrorAction Stop
+            if (-not $process) { return $null }
+            $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid -ErrorAction Stop
+            if ($owner.ReturnValue -ne 0) { throw (ConvertFrom-ConsoleText '\u65e0\u6cd5\u786e\u8ba4\u8fdb\u7a0b\u6240\u5c5e\u7528\u6237\u3002') }
+            [pscustomobject]@{
+                Id = [int]$process.ProcessId; ParentId = [int]$process.ParentProcessId
+                Name = $process.Name; Path = $process.ExecutablePath; Command = $process.CommandLine
+                Sid = $owner.Sid; Session = [int]$process.SessionId; Created = $process.CreationDate
+            }
+        }
+
+        function Test-SiwxProcessRecord($Record, [string]$ExePath, [string]$UserSid, [int]$SessionId) {
+            if (-not $Record -or -not $Record.Created -or $Record.Name -ine 'siwx-v5.2.0.exe' -or
+                -not [StringComparer]::OrdinalIgnoreCase.Equals($Record.Path, $ExePath) -or
+                $Record.Sid -ne $UserSid -or $Record.Session -ne $SessionId) { return $false }
+            $pathPattern = [regex]::Escape($ExePath)
+            $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+serve\s+--host\s+127\.0\.0\.1\s+--port\s+8787\s+--no-open(?:\s+--trust-lan)?\s*$'
+            return $Record.Command -imatch $pattern
+        }
+
+        function Open-SiwxProcessHandle($Record, [string]$ExePath, [string]$UserSid, [int]$SessionId) {
+            $fresh = Get-SiwxProcessRecord $Record.Id
+            if (-not (Test-SiwxProcessRecord $fresh $ExePath $UserSid $SessionId) -or
+                $fresh.Created -ne $Record.Created) { throw (ConvertFrom-ConsoleText '\u8fdb\u7a0b\u8eab\u4efd\u5df2\u53d8\u5316\uff0c\u672a\u7ed3\u675f\u4efb\u4f55\u8fdb\u7a0b\u3002') }
+            $handle = [Diagnostics.Process]::GetProcessById($Record.Id)
+            try {
+                $null = $handle.Handle
+                if ([Math]::Abs(($handle.StartTime.ToUniversalTime() - $Record.Created.ToUniversalTime()).TotalSeconds) -ge 1) {
+                    throw (ConvertFrom-ConsoleText '\u8fdb\u7a0b\u542f\u52a8\u65f6\u95f4\u53d8\u5316\uff0c\u62d2\u7edd\u64cd\u4f5c\u5df2\u590d\u7528\u7684PID\u3002')
+                }
+                return $handle
+            } catch { $handle.Dispose(); throw }
+        }
+
+        function Stop-SiwxProcessHandle($Handle) {
+            if (-not $Handle.HasExited) { $Handle.Kill() }
+            if (-not $Handle.WaitForExit(5000)) { throw (ConvertFrom-ConsoleText 'SIWX\u8fdb\u7a0b\u672a\u80fd\u9000\u51fa\u3002') }
+        }
+
+        function Stop-SiwxPortOwner([string]$ExePath, [string]$UserSid, [int]$SessionId) {
+            $handles = @()
+            try {
+                $connections = @(Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction Stop)
+                if ($connections.Count -eq 0) { return $true }
+                $ids = @($connections | Select-Object -ExpandProperty OwningProcess -Unique)
+                $records = @{}
+                foreach ($processId in $ids) {
+                    $record = Get-SiwxProcessRecord $processId
+                    if (-not (Test-SiwxProcessRecord $record $ExePath $UserSid $SessionId)) {
+                        Write-Host ((ConvertFrom-ConsoleText "8787\u7aef\u53e3\u5360\u7528PID={0}\uff1a\u65e0\u6cd5\u786e\u8ba4\u662f\u5f53\u524d\u7528\u6237\u7684SIWX\uff0c\u5df2\u4fdd\u7559\u3002") -f $processId)
+                        return $false
+                    }
+                    $records[$record.Id] = $record
+                    # PyInstaller one-file has an identical parent supervising the listening child.
+                    $parent = Get-SiwxProcessRecord $record.ParentId
+                    if ($parent -and $parent.Name -ieq 'siwx-v5.2.0.exe') {
+                        if (-not (Test-SiwxProcessRecord $parent $ExePath $UserSid $SessionId) -or
+                            $parent.Created -gt $record.Created) {
+                            throw (ConvertFrom-ConsoleText '\u65e0\u6cd5\u786e\u8ba4SIWX\u7236\u8fdb\u7a0b\u8eab\u4efd\uff0c\u672a\u7ed3\u675f\u4efb\u4f55\u8fdb\u7a0b\u3002')
+                        }
+                        $records[$parent.Id] = $parent
+                    }
+                }
+                # Acquire and validate every original process handle before stopping any process.
+                foreach ($record in @($records.Values | Sort-Object Created)) {
+                    $handles += Open-SiwxProcessHandle $record $ExePath $UserSid $SessionId
+                }
+                foreach ($task in @(Get-SiwxBackgroundTasks $UserSid | Where-Object { $_.Task.State -in @('Running', 'Queued') })) {
+                    Stop-ScheduledTask -TaskName $task.Task.TaskName -TaskPath $task.Task.TaskPath -ErrorAction Stop
+                }
+                foreach ($handle in $handles) { Stop-SiwxProcessHandle $handle }
+                for ($attempt = 0; $attempt -lt 20; $attempt++) {
+                    if (-not (Test-SiwxPort)) {
+                        Write-Host (ConvertFrom-ConsoleText '\u5df2\u7ed3\u675f\u786e\u8ba4\u5f52\u5c5e\u7684SIWX\u6b8b\u7559\u670d\u52a1\uff0c8787\u7aef\u53e3\u5df2\u91ca\u653e\u3002')
+                        return $true
+                    }
+                    Start-Sleep -Milliseconds 200
+                }
+                throw (ConvertFrom-ConsoleText '8787\u7aef\u53e3\u4ecd\u88ab\u5360\u7528\uff0c\u672a\u542f\u52a8\u65b0\u670d\u52a1\u3002')
+            } catch {
+                Write-Host ((ConvertFrom-ConsoleText "\u672a\u80fd\u91ca\u653e8787\u7aef\u53e3\uff1a") + $_.Exception.Message)
+                return $false
+            } finally {
+                foreach ($handle in $handles) { $handle.Dispose() }
+            }
+        }
+
         function Test-SiwxHttp {
             try {
                 $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8787/' -TimeoutSec 2
@@ -147,7 +235,7 @@
                     $launcherPath = [IO.Path]::ChangeExtension($log, 'js')
                     if (@($task.Actions).Count -ne 1 -or $task.Actions[0].Execute -ne $scriptHost -or
                         $task.Actions[0].Arguments -ne ('//B //Nologo //E:JScript "' + $launcherPath + '"')) { continue }
-                            $directory = Get-Item -LiteralPath (Split-Path -Parent $log) -ErrorAction Stop
+                    $directory = Get-Item -LiteralPath (Split-Path -Parent $log) -ErrorAction Stop
                     if ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
                     $unsafe = $false
                     foreach ($path in @($log, $launcherPath, [IO.Path]::ChangeExtension($log, 'cmd'))) {
@@ -405,6 +493,9 @@ try {
                         Show-SiwxLogTail $record.LogPath 20
                     }
                 }
+                if ($nextCommand -eq '9' -and $backgroundTasks.Count -eq 0 -and (Test-SiwxPort)) {
+                    $null = Stop-SiwxPortOwner $exePath $sid ([int]$sessions[0])
+                }
                 if ($nextCommand -eq '9' -and $backgroundTasks.Count -gt 0) {
                     $selection = 0
                     $answer = Read-Host (ConvertFrom-ConsoleText '\u8bf7\u8f93\u5165\u8981\u505c\u6b62\u7684\u4efb\u52a1\u7f16\u53f7\uff08\u76f4\u63a5\u56de\u8f66\u53d6\u6d88\uff09')
@@ -419,6 +510,7 @@ try {
                         if ($state -in @('Running', 'Queued')) { throw (ConvertFrom-ConsoleText '\u4efb\u52a1\u5c1a\u672a\u505c\u6b62\uff0c\u5df2\u4fdd\u7559\u4f9b\u6392\u67e5\u3002') }
                         Unregister-ScheduledTask -TaskName $selected.TaskName -TaskPath $selected.TaskPath -Confirm:$false
                         Write-Host (ConvertFrom-ConsoleText '\u5df2\u505c\u6b62\u5e76\u6ce8\u9500\u4efb\u52a1\uff0c\u8bca\u65ad\u6587\u4ef6\u5df2\u4fdd\u7559\u3002')
+                        if (Test-SiwxPort) { $null = Stop-SiwxPortOwner $exePath $sid ([int]$sessions[0]) }
                     }
                 }
                 $nextCommand = $null
@@ -428,7 +520,7 @@ try {
             $backgroundMode = $nextCommand -in @('7', '11')
             $isServe = $nextCommand -in @('6', '7', '10', '11')
             # All SIWX operations share the same cache/output root. Avoid concurrent writers.
-            if (-not $isProbe -and @(Get-SiwxBackgroundTasks $sid | Where-Object {
+            if (-not $isProbe -and -not $isServe -and @(Get-SiwxBackgroundTasks $sid | Where-Object {
                 $_.Task.State -in @('Running', 'Queued') }).Count -gt 0) {
                 Write-Host (ConvertFrom-ConsoleText '\u5df2\u6709\u540e\u53f0\u7f51\u9875\u6b63\u5728\u8fd0\u884c\uff0c\u8bf7\u4f7f\u7528\u8be5\u7f51\u9875\uff0c\u6216\u7528 8 \u67e5\u770b\u30019 \u505c\u6b62\u3002')
                 $nextCommand = $null
@@ -446,9 +538,10 @@ try {
             }
             if (-not $siwxArguments) { $nextCommand = $null; continue }
             if ($isServe -and (Test-SiwxPort)) {
-                Write-Host (ConvertFrom-ConsoleText '8787 \u7aef\u53e3\u5df2\u88ab\u5360\u7528\uff0c\u8bf7\u5148\u505c\u6b62\u539f\u670d\u52a1\uff1b\u672c\u811a\u672c\u4e0d\u4f1a\u66ff\u6362\u5b83\u3002')
-                $nextCommand = $null
-                continue
+                if (-not (Stop-SiwxPortOwner $exePath $sid ([int]$sessions[0]))) {
+                    $nextCommand = $null
+                    continue
+                }
             }
             $nextCommand = $null
             Assert-SiwxLocalPath $rootPath

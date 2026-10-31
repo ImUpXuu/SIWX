@@ -96,3 +96,13 @@ wx.sxnn.de:5443链路：OpenResty认证→神仙面板18181按完整Host命中NA
 NAS可编辑配置：/vol1/@appdata/1Panel/1panel/www/conf.d/wx.sxnn.de.conf 与 sites/wx.sxnn.de/proxy/root.conf；认证哈希在sites/wx.sxnn.de/.auth/htpasswd。恢复点为vol2/docker-projects-backups/wx-proxy309-日期，含旧两配置/.keep；ops/proxy309-20261031保存脱敏工具及验证。先撤销Windows反代模式，再恢复旧NAS配置并-t/reload，避免产生未认证的Host放行窗口。验证匿名/错误口令401、认证后首页和静态文件200、同源不存在POST404及跨源POST403；不查询聊天数据。完整真机聊天浏览/解密导出仍由用户使用验收。
 
 309线上补充：隧道向Flask转发普通HTTP时，沿用面板的`Connection: upgrade`曾导致读取响应头前断开、502；精确原始HTTP对照中`Connection: close`返回200。现wx根反代清空Upgrade并显式Connection close，保持其他站点不变。NAS本地SNI严格TLS经完整Windows隧道验收：匿名首页/API401、错密码401、正确密码首页200/6139字节、同源不存在POST404、跨源POST403。Windows原生本机Host请求200，监听仍127.0.0.1。没有查询聊天API或读取实际内容。
+
+## 残留端口清理（2026-10-31，任务313，脚本v1.4）
+
+用户明确要求旧软件删除/旧任务消失后结束本工具残留8787并重新启动。菜单6/7/10/11遇到占用时不再直接返回：按监听PID、准确EXE路径、进程名、serve固定参数、选定Windows用户SID/会话与创建时间确认身份，先持有全部原生进程句柄再结束PyInstaller同身份父进程及监听子进程，等端口释放再继续启动。选9没有可管理后台任务时也尝试这一有界清理；有后台任务时停止后若残留8787同样处理。原日志、密钥缓存、数据库和导出均不删除。
+
+仅监听端口不足以判定身份。其他程序/其他用户/其他路径/无法读取命令或用户SID的进程一律保留，显示PID并拒绝启动新服务；父进程不符合身份也拒绝。复核创建时间及原生句柄防PID复用，不使用按端口直接taskkill或通配符进程清理。软件已删但CIM仍返回原执行路径和命令时可以确认；系统无法提供这些字段时仍须人工确认，脚本不会猜。
+
+验证：`pwsh -NoProfile -File scripts/tests/Verify-PortOwner.ps1`，合成CIM/句柄测试覆盖准确身份六条件、复用PID、父进程先停、混合监听拒绝、其他用户父进程拒绝、取得第二句柄失败时不杀任何进程、孤儿单进程与空端口。另复验完整`Verify-SiwxConsole.ps1`。Windows目标机真实停止/重启仍待用户重跑，不把隔离测试说成真机成功。当前EXE加载9020等原生加载错误是独立问题，本修复不关闭Defender/AppLocker或系统策略。
+
+入口使用Dufs `siwx.ps1?v=cn313` 获取v1.4。先退出旧菜单，再重新运行入口；启动反代选11（后台），10为当前窗口持续日志。源只改脚本/测试/文档，无EXE重编译；Dufs仅两个脚本覆盖，官方5.2.0 EXE不变。恢复点在`ops/port313-20261031/before`，按记录SHA精确回退两个脚本；恢复源码提交可撤销本次变更。进程停止本身不可撤回，但可用原参数重新启动本工具，数据不变。

