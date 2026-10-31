@@ -94,3 +94,5 @@ wx.sxnn.de:5443链路：OpenResty认证→神仙面板18181按完整Host命中NA
 运行：`irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn309' | iex`，先停止旧8787网页，再选11。现有后台服务可用8查看、9停止。反代配置更新只需nginx -t/reload；Windows启动参数变更只重启本工具任务，不能重启微信或其他用户程序。Dufs分发仅两个脚本，EXE固定官方5.2.0不变。
 
 NAS可编辑配置：/vol1/@appdata/1Panel/1panel/www/conf.d/wx.sxnn.de.conf 与 sites/wx.sxnn.de/proxy/root.conf；认证哈希在sites/wx.sxnn.de/.auth/htpasswd。恢复点为vol2/docker-projects-backups/wx-proxy309-日期，含旧两配置/.keep；ops/proxy309-20261031保存脱敏工具及验证。先撤销Windows反代模式，再恢复旧NAS配置并-t/reload，避免产生未认证的Host放行窗口。验证匿名/错误口令401、认证后首页和静态文件200、同源不存在POST404及跨源POST403；不查询聊天数据。完整真机聊天浏览/解密导出仍由用户使用验收。
+
+309线上补充：隧道向Flask转发普通HTTP时，沿用面板的`Connection: upgrade`曾导致读取响应头前断开、502；精确原始HTTP对照中`Connection: close`返回200。现wx根反代清空Upgrade并显式Connection close，保持其他站点不变。NAS本地SNI严格TLS经完整Windows隧道验收：匿名首页/API401、错密码401、正确密码首页200/6139字节、同源不存在POST404、跨源POST403。Windows原生本机Host请求200，监听仍127.0.0.1。没有查询聊天API或读取实际内容。
