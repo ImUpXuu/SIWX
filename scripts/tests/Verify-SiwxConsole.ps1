@@ -12,6 +12,35 @@ foreach ($file in Get-ChildItem -LiteralPath $scriptsDirectory -Filter '*.ps1') 
     Write-Output "PARSE OK: $($file.Name)"
 }
 if (-not $consoleAst) { throw 'Console AST missing.' }
+# Load only the localization helper; do not execute Windows/session/download operations.
+$localizationAst = $consoleAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'ConvertFrom-ConsoleText'
+}, $true)
+if (-not $localizationAst) { throw 'Localization helper missing.' }
+. ([ScriptBlock]::Create($localizationAst.Extent.Text))
+$choose = ConvertFrom-ConsoleText '\u8bf7\u9009\u62e9'
+$expectedChoose = [string][char]0x8BF7 + [char]0x9009 + [char]0x62E9
+if ($choose -ne $expectedChoose) { throw 'Chinese prompt decoding failed.' }
+if (@([IO.File]::ReadAllBytes($consolePath) | Where-Object { $_ -gt 127 }).Count) {
+    throw 'Entry script must stay ASCII for legacy PowerShell HTTP/local decoding.'
+}
+# Decode every actual menu literal, preserving interpolation in the live script.
+$menuLiterals = @($consoleAst.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.StringConstantExpressionAst] -or
+        $node -is [Management.Automation.Language.ExpandableStringExpressionAst]
+}, $true) | Where-Object { $_.Value -match '(?:`n|\n)?1 = |^4 = |^6 = |^8 = ' })
+if ($menuLiterals.Count -lt 3) { throw 'Expected main menu literals were not found.' }
+foreach ($literal in $menuLiterals) {
+    $decoded = ConvertFrom-ConsoleText $literal.Value
+    if ($decoded -notmatch '[\u4e00-\u9fff]' -or $decoded -match '\\u[0-9a-f]{4}') {
+        throw 'A menu failed to render Chinese.'
+    }
+}
+Write-Output 'PASS: Chinese prompt/menu decoding, ASCII local/irm source encoding'
+
 $functionAst = $consoleAst.Find({
     param($node)
     $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
