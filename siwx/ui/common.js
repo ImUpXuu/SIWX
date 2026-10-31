@@ -298,5 +298,7 @@
 
   window.SX = { esc, timeStr, fmtTs, fmtDate, fmtListTs, fetchJSON, startJob, renderLog, go,
                 setupDone, setSetupDone, imgFallback, openPath,
-                renderNodes, copyText, toast, getAccount, listAccounts, setAccount };
+                renderNodes, copyText, toast, getAccount, listAccounts, setAccount,
+                /* 朋友圈卡片等页面级链接也要过同一份 scheme 白名单（P2-1） */
+                safeUrl };
 })();

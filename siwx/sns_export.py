@@ -14,6 +14,7 @@ from __future__ import annotations
 import html as _html
 import json
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -224,16 +225,31 @@ def _card_lines(card: dict | None) -> list[str]:
     return [head, card.get("description") or "", card.get("url") or ""]
 
 
+# 卡片链接 scheme 白名单：与 api_chat._safe_link_url / ui/common.js safeUrl 同一条
+# 规则（http/https、相对 / 与 ./ ../、锚点 #）。card.url 源自朋友圈 XML 里联系人
+# 可控的 content_url，javascript: / data: / vbscript: 等伪协议必须在这里拦下，
+# 不得直通导出 HTML 的 href 或 Markdown 链接（存储型 XSS，P2-1）。
+_LINK_URL_RE = re.compile(r"^(?:https?:|/|\./|\.\./|#)", re.I)
+
+
+def _safe_link_url(url):
+    """白名单外的链接返回 None（含空串），放行时原样返回 strip 后的地址。"""
+    u = (url or "").strip()
+    return u if u and _LINK_URL_RE.match(u) else None
+
+
 def _html_card(card: dict | None) -> str:
-    """卡片 → HTML 片段。找不到 url 时降级为纯文本，绝不生成死链。"""
+    """卡片 → HTML 片段。url 不在 scheme 白名单内时降级为纯文本，绝不生成可点链接。"""
     if not card:
         return ""
 
     def _a(url, text):
-        url = str(url or "")
-        if not url:
-            return _html.escape(str(text or ""))
-        return f'<a href="{_html.escape(url, quote=True)}" target="_blank" rel="noreferrer">{_html.escape(str(text or ""))}</a>'
+        safe = _safe_link_url(url)
+        text = str(text or "")
+        if not safe:
+            # 白名单外（javascript:/data:/vbscript: 等伪协议或空地址）降级为纯文本
+            return f'<span class="card-title-text">{_html.escape(text)}</span>'
+        return f'<a href="{_html.escape(safe, quote=True)}" target="_blank" rel="noreferrer">{_html.escape(text)}</a>'
 
     kind = card.get("kind")
     cover = str(card.get("cover") or "")
@@ -276,10 +292,12 @@ def _html_card(card: dict | None) -> str:
                 f'<div class="card-desc">{_html.escape(nt.get("text") or card.get("title") or "")}</div>'
                 '</div></div>')
     # link（封面已在媒体网格里出现过，这里不重复放图）
+    # 标题兜底也用过滤后的地址：白名单外的原始 url 不得出现在输出里（哪怕是文本）
+    url = _safe_link_url(card.get("url"))
     sub = card.get("source") or ""
     return ('<div class="card card--link"><div class="card-body">'
             '<div class="card-tag">🔗 链接</div>'
-            f'<div class="card-title">{_a(card.get("url"), card.get("title") or card.get("url"))}</div>'
+            f'<div class="card-title">{_a(url, card.get("title") or url)}</div>'
             f'<div class="card-sub">{_html.escape(sub)}</div>'
             f'<div class="card-desc">{_html.escape(card.get("description") or "")}</div>'
             '</div></div>')
@@ -439,14 +457,18 @@ def _write_markdown(path: Path, feeds, media_map, meta=None) -> int:
             card = d.get("card") or {}
             lines = [ln for ln in _card_lines(card) if ln]
             if lines:
-                # 卡片用引用块呈现；有链接时写成 Markdown 链接（可点）
-                kind, url = card.get("kind"), card.get("url") or ""
+                # 卡片用引用块呈现；有链接时写成 Markdown 链接（可点）。
+                # url 须先过 scheme 白名单（联系人可控）：不合规（javascript: 等）
+                # 时去掉链接只留标题文本，原始 url 行也从正文里剔除。
+                kind = card.get("kind")
+                raw_url = card.get("url") or ""
+                url = _safe_link_url(raw_url)
                 head, rest = lines[0], lines[1:]
+                if raw_url:
+                    rest = [x for x in rest if x != raw_url]
                 if kind == "link" and url:
                     head = f"🔗 [{card.get('title') or url}]({url})"
-                    rest = [x for x in rest if x != url]
                 elif url:
-                    rest = [x for x in rest if x != url]
                     head += f"（[打开]({url})）" if kind == "music" else ""
                 f.write(f"> {head}\n")
                 for ln in rest:

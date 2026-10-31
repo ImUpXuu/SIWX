@@ -38,7 +38,7 @@ ALLOW_WXID = {
     "wxid_clean", "wxid_contact", "wxid_contact_1234", "wxid_demo",
     "wxid_demo_1234", "wxid_demo_a", "wxid_demo_b", "wxid_demo_b_1234",
     "wxid_demo_c", "wxid_demo_d", "wxid_empty", "wxid_example_01",
-    "wxid_example_01_d29b", "wxid_friend", "wxid_friends",
+    "wxid_example_01_d29b", "wxid_friend", "wxid_friend_01", "wxid_friends",
     "wxid_from_cache_path", "wxid_full", "wxid_manual", "wxid_mcp_detail",
     "wxid_mcp_test", "wxid_me_123456", "wxid_missing",
     "wxid_never_backed_up", "wxid_no_msg", "wxid_nobody",
@@ -121,11 +121,22 @@ def scan(diff_text: str) -> list[tuple[str, int, str, str]]:
 
 
 def _git(*args: str) -> str:
-    return subprocess.run(["git", *args], text=True, stdout=subprocess.PIPE,
+    # git 输出按 UTF-8 解码：Windows 下 text=True 默认用 cp936，
+    # diff 内容含非 GBK 字节时会在解码处崩掉（与 print 的编码问题同源）。
+    return subprocess.run(["git", *args], text=True, encoding="utf-8",
+                          errors="replace", stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, check=True).stdout
 
 
 def main() -> int:
+    # Windows cp936 控制台/管道下 print("✓") 会抛 UnicodeEncodeError，
+    # 导致扫描通过也以非 0 退出，且失败路径的 ✗ 同样打不出、吞掉关键诊断。
+    # 统一切到 UTF-8；errors="replace" 兜底任何残余不可编码字符。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser(description="扫描 diff 新增行中的真实个人标识")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--range", help="git diff 范围，如 origin/main...HEAD")

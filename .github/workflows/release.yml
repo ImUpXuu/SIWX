@@ -35,6 +35,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # 隐私红线扫描（AGENTS.md 第三条的 CI 落地）：PR/push 的新增行命中即红灯。
+      # 脚本只依赖 stdlib + git，放在装依赖之前，命中时尽快失败。
+      # 浅克隆（fetch-depth=1）下三点 diff 需要合并基，故按事件显式取另一端
+      # 提交（GitHub 支持按 SHA fetch），再用两点 diff（纯树比较，无需合并基）。
+      - name: 隐私红线扫描（PR/push 新增行）
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          ZERO=0000000000000000000000000000000000000000
+          case "$EVENT" in
+            pull_request)
+              if [ -z "$BASE_SHA" ] || ! git fetch --no-tags --depth=1 origin "$BASE_SHA"; then
+                echo "无法获取 PR base 提交（$BASE_SHA），隐私扫描无法确定范围" >&2
+                exit 1
+              fi
+              python scripts/privacy_scan.py --range "$BASE_SHA..HEAD"
+              ;;
+            push)
+              if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$ZERO" ] \
+                 && git fetch --no-tags --depth=1 origin "$BEFORE_SHA" 2>/dev/null; then
+                python scripts/privacy_scan.py --range "$BEFORE_SHA..HEAD"
+              else
+                # 首次推送 / 强推后 before 不可达 / tag 推送：回退扫描最新一个提交
+                python scripts/privacy_scan.py --rev HEAD
+              fi
+              ;;
+            *)
+              echo "event=$EVENT 无固定 diff 范围，跳过隐私红线扫描"
+              ;;
+          esac
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
@@ -98,6 +132,20 @@ jobs:
             exit 1
           fi
           echo "tag $TAG 与 siwx.__version__=$VERSION 一致"
+      # 五处版本号一致性（发版清单第 1 条的 --expect 口径）：tag 触发时把 tag 名
+      # 交给 check_version_consistency.py 校验五处实际值；非 tag 事件跳过。
+      # 本 job 在 build-*/release 之前（needs 链保证），校验不过打不出产物。
+      - name: 校验五处版本号一致（--expect tag）
+        env:
+          REF: ${{ github.ref }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF" != refs/tags/v* ]]; then
+            echo "非 tag 事件（event=${{ github.event_name }}, ref=$REF），跳过 --expect 校验"
+            exit 0
+          fi
+          # 脚本只依赖 stdlib，按自身位置定位仓库根，无需安装项目依赖
+          python scripts/check_version_consistency.py --expect "$TAG"
 
   build-windows:
     needs: [test, version-guard]

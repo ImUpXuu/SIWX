@@ -11,7 +11,7 @@
  */
 import { createDropdown, openMenu } from '/widgets.js?v=2026100601';
 
-const { fetchJSON, copyText, fmtTs, fmtDate } = window.SX;
+const { fetchJSON, copyText, fmtTs, fmtDate, safeUrl } = window.SX;
 const pad = n => String(n).padStart(2, '0');
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -381,6 +381,10 @@ const SnsPost = {
   },
   methods: {
     relTime, fullTime, mediaUrl, emojiUrl, displayOf, fmtDur,
+    /* P2-1：card.url 来自联系人可控的 content_url，必须过 common.js safeUrl
+     * 的 scheme 白名单（https?:|/|./|../|#），javascript:/data: 等一律拒绝；
+     * 拒绝时返回 null，Vue 会把 href 属性整个去掉，卡片降级为不可点的文本。 */
+    safeUrl: u => safeUrl(u) || null,
     mediaFail(ev, isVideo) { onMediaErrorEl(ev.target, isVideo); },
     /** 灯箱以整条动态的媒体列表为画廊：点开任意一张即可 ←/→ 翻页 */
     openMedia(ev, m) {
@@ -442,7 +446,7 @@ const SnsPost = {
 
         <template v-if="card">
           <a v-if="card.kind === 'music'" class="sns-card sns-card--music"
-             :href="card.url" target="_blank" rel="noreferrer">
+             :href="safeUrl(card.url)" target="_blank" rel="noreferrer">
             <div class="sns-card-body"><div class="sns-card-tag">音乐</div>
               <div class="sns-card-title">{{ (card.music && card.music.album) || card.title || '音乐' }}</div>
               <div class="sns-card-sub">{{ ((card.music && card.music.singer) || card.description || '') + (card.music && card.music.duration_ms ? ' · ' + fmtDur(card.music.duration_ms / 1000) : '') }}</div></div>
@@ -473,7 +477,7 @@ const SnsPost = {
               <div class="sns-card-desc">{{ (card.note && card.note.text) || card.title || '' }}</div></div>
           </div>
           <a v-else class="sns-card sns-card--link"
-             :href="card.url" target="_blank" rel="noreferrer">
+             :href="safeUrl(card.url)" target="_blank" rel="noreferrer">
             <div class="sns-card-body"><div class="sns-card-tag">链接</div>
               <div class="sns-card-title">{{ card.title || card.url || '' }}</div>
               <div class="sns-card-sub">{{ card.source || '' }}</div>

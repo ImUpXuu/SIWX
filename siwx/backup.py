@@ -45,6 +45,15 @@ MSG_COLUMNS = [
 ]
 
 
+def _dedup_sid(row, sid_i):
+    """消息行 server_id 去重键（与 siwx/restore.py 同一口径）：
+    仅 server_id>0 参与去重；0/NULL（系统类/未同步消息）返回 None，
+    调用方必须放行——0 值在库中大量并存，按裸值去重会把同会话
+    除首条外的 0 值消息全部静默塌缩。"""
+    sid = row[sid_i]
+    return sid if sid is not None and sid > 0 else None
+
+
 class BackupAborted(Exception):
     """用户未授权/前置条件不满足，备份主动中止。"""
 
@@ -266,7 +275,7 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
         sid = MSG_COLUMNS.index("server_id")
         for chat, locs in table_loc.items():
             total_rows = 0
-            seen_sids = set()   # 跨分片 server_id 去重兜底
+            seen_sids = set()   # 跨分片 server_id 去重兜底（仅 >0 参与）
             for sp, tbl in locs:
                 sc = sqlite3.connect(str(sp))
                 try:
@@ -279,11 +288,15 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
                     for row in sc.execute(
                             f"SELECT {', '.join(MSG_COLUMNS)} "
                             f"FROM [{tbl}]{where}", params):
-                        row_sid = row[sid]
-                        if row_sid in seen_sids:
-                            stats["dup_skipped"] = stats.get("dup_skipped", 0) + 1
-                            continue
-                        seen_sids.add(row_sid)
+                        row_sid = _dedup_sid(row, sid)
+                        if row_sid is not None:
+                            if row_sid in seen_sids:
+                                stats["dup_skipped"] = \
+                                    stats.get("dup_skipped", 0) + 1
+                                continue
+                            seen_sids.add(row_sid)
+                        # server_id 0/NULL（系统/未同步消息）不去重：
+                        # 同会话多条 0 值全量保留，防止塌缩成一条
                         vals = [v for k, v in zip(MSG_COLUMNS, row)
                                 if k != "local_id"]
                         new_id, _u = _sender_id(sc, shard_cache, row[src_si])

@@ -128,9 +128,12 @@ python run.py decrypt [--db-dir X]    # 仅解密数据库
 python run.py serve [--port 8787]     # 启动 Web 控制台
 python run.py mcp                     # 启动 MCP Server（stdio）
 python run.py doctor                  # 打印环境信息（提 issue 时粘贴）
+python run.py backup [--mode full|selective]  # 加密备份导出 .siwxpack（⚠️ 须先完全退出微信）
 ```
 
-> 聊天记录、朋友圈的浏览与导出都在 Web 控制台里操作；命令行只负责密钥、解密与 MCP。
+> 聊天记录、朋友圈的浏览与导出都在 Web 控制台里操作；命令行负责密钥、解密、加密备份（`backup`，见 [docs/cli-commands.md](./docs/cli-commands.md#backup--加密备份导出-siwxpack)）与 MCP。
+
+> ⚠️ `backup` 是危险操作：备份要求先**完全退出微信**（保证快照一致），运行中会提示允许 SIWX 终止微信进程（或用 `--yes` 免交互确认）。详见 [docs/cli-commands.md](./docs/cli-commands.md#backup--加密备份导出-siwxpack)。
 
 ---
 

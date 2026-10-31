@@ -52,10 +52,40 @@ _IMAGE_SIGS = (
 
 # ── 内存缓存（程序关闭即释放，不落盘） ──────────────────────────────
 _IMG_CACHE: "OrderedDict[str, tuple[bytes, str]]" = OrderedDict()
-_IMG_CACHE_MAX = 200            # 最多 200 张（约几十 MB）
+_IMG_CACHE_MAX = 200            # 条数上限（第二道闸；字节预算才是主闸）
+# P1-7：字节预算。条数上限挡不住大图——聊天页每张都带 hq=1 高清原图
+# （中位几百 KB、可达数 MB），200 张 × 数 MB 就是数百 MB 到 GB 级常驻。
+# 缓存条目存转码后的编码字节串，len(body) 即真实主体占用；hq 高清与
+# 缩略图走同一缓存、同一口径。与 api_chat._decoded_cache_put（256MB）
+# 同一套"字节预算 + LRU"先例。
+_IMG_CACHE_MAX_BYTES = 128 * 1024 * 1024
+_IMG_CACHE_BYTES = 0            # 当前缓存字节总量（受 _IMG_CACHE_LOCK 保护）
 # LRU OrderedDict 的 move_to_end / popitem 并发调用会损坏内部链表
 # （最坏返回错误图片字节），Web API 多线程访问必须持锁
 _IMG_CACHE_LOCK = threading.Lock()
+
+
+def _img_cache_put(cache_key: str, body: bytes, ctype: str) -> None:
+    """写入图片缓存并维持条数 + 字节双预算（P1-7）。
+
+    同键替换先扣旧占用再计新占用；超预算按 LRU 淘汰。单条就超预算时
+    会被自身淘汰（缓存为空）——与 _decoded_cache_put 同策略：预算是硬闸，
+    不因单条超限放水，GB 级单图本就不该常驻。
+    """
+    global _IMG_CACHE_BYTES
+    with _IMG_CACHE_LOCK:
+        old = _IMG_CACHE.pop(cache_key, None)
+        if old is not None:
+            _IMG_CACHE_BYTES -= len(old[0])
+        _IMG_CACHE[cache_key] = (body, ctype)
+        _IMG_CACHE_BYTES += len(body)
+        while _IMG_CACHE and (
+                len(_IMG_CACHE) > _IMG_CACHE_MAX
+                or _IMG_CACHE_BYTES > _IMG_CACHE_MAX_BYTES):
+            _k, (_b, _ct) = _IMG_CACHE.popitem(last=False)
+            _IMG_CACHE_BYTES -= len(_b)
+        if _IMG_CACHE_BYTES < 0:      # 防御：计数永不为负
+            _IMG_CACHE_BYTES = 0
 
 # media_key.json 的"读-改-写"线程锁（跨进程由 _save_key_cache 的唯一临时名兜）
 _KEY_CACHE_LOCK = threading.Lock()
@@ -786,10 +816,7 @@ def get_image(account: str, md5: str, acc_out_dir: Path,
             return None, None
         body, _ext, ctype = fin
         try:
-            with _IMG_CACHE_LOCK:
-                _IMG_CACHE[cache_key] = (body, ctype)
-                if len(_IMG_CACHE) > _IMG_CACHE_MAX:
-                    _IMG_CACHE.popitem(last=False)
+            _img_cache_put(cache_key, body, ctype)
         except Exception:
             # 缓存写失败不影响本次返回（缓存是优化，不是结果）
             pass

@@ -44,7 +44,7 @@ _HOLDER_SESSIONS = {"brandsessionholder", "brandservicesessionholder", "@placeho
 # message_content 可能是 zstd 压缩 BLOB，SQL LIKE 会漏掉全部压缩行——
 # 关键词匹配必须在 Python 层解码后做。解码按 (库, 签名, 表名) 缓存，
 # 逐行 zstd 解码的成本摊到第一次查询，之后同分片的搜索/翻页纯内存扫描。
-_DECODED_CACHE: "OrderedDict[tuple, list]" = OrderedDict()
+_DECODED_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
 _DECODED_CACHE_LOCK = threading.Lock()
 _DECODED_CACHE_MAX_SHARDS = 12   # 有界 LRU：大库全文缓存最多留 12 个分片
 # 字节预算（P3-13）：12 个分片的条数上限挡不住「单分片几十万行」，估算
@@ -53,6 +53,27 @@ _DECODED_CACHE_MAX_BYTES = 256 * 1024 * 1024
 _DECODED_CACHE_SIZES: dict = {}   # sig -> 估算字节数（与 _DECODED_CACHE 同步维护）
 _DECODED_CACHE_BYTES = 0          # 当前估算总字节（受 _DECODED_CACHE_LOCK 保护）
 _ROW_OVERHEAD_BYTES = 200         # 每行元组/整数/None 的固定开销估算
+# P1-8：缓存条目结构版本号，拼进缓存签名。条目结构变化（本次新增
+# _TextOnlyShard 降级条目）必须 bump：旧版本的 4 元组签名与新 5 元组
+# 签名天然不同键，升级后旧条目不会被新代码误读。
+_DECODED_CACHE_VERSION = 2
+
+
+class _TextOnlyShard:
+    """超预算分片的降级缓存条目（P1-8）。
+
+    packed 字节通常占解码结果的大头，整分片塞不进预算时改为只缓存
+    文本列（packed 置 None）＋预算内多存一列预折叠小写文本（lower 在
+    解码时做一次，而不是每次搜索每行分配一个新串）。搜索/筛选在缓存
+    条目上跑，命中行翻页时再按页从库里补取 packed（见 _refetch_packed），
+    富化结果与全文缓存路径逐字段一致。
+    """
+
+    __slots__ = ("rows", "lows")
+
+    def __init__(self, rows, lows):
+        self.rows = rows        # 行形状同全文缓存，但 packed 恒为 None
+        self.lows = lows        # 与 rows 平行的小写文本列
 
 # 前端筛选 kind → SQL 层可判定的 local_type 集合（& 0xFFFF 后的值）。
 # 引用/合并转发等富文本卡片归入 link 组——它们的判定要解析 XML，
@@ -1430,15 +1451,17 @@ def _estimate_rows_bytes(rows) -> int:
     return total
 
 
-def _decoded_cache_put(sig, rows) -> None:
-    """插入解码缓存并维持分片数 + 字节预算（P3-13；调用方不持锁）。"""
+def _cache_put(sig, entry, size: int) -> None:
+    """插入解码缓存条目并维持分片数 + 字节预算（P3-13/P1-8；调用方不持锁）。
+
+    entry 是全文行列表或 _TextOnlyShard，size 由调用方按各自口径估算。
+    """
     global _DECODED_CACHE_BYTES
-    size = _estimate_rows_bytes(rows)
     with _DECODED_CACHE_LOCK:
         if _DECODED_CACHE.pop(sig, None) is not None:
             # 同签名替换：先扣掉旧占用再加新占用
             _DECODED_CACHE_BYTES -= _DECODED_CACHE_SIZES.pop(sig, 0)
-        _DECODED_CACHE[sig] = rows
+        _DECODED_CACHE[sig] = entry
         _DECODED_CACHE_SIZES[sig] = size
         _DECODED_CACHE_BYTES += size
         while _DECODED_CACHE and (
@@ -1451,8 +1474,40 @@ def _decoded_cache_put(sig, rows) -> None:
             _DECODED_CACHE_BYTES = 0
 
 
-def _decoded_rows(db: Path, table: str) -> list:
-    """分片解码缓存：文本行按 (库, 文件签名, 表名) 缓存，搜索零重复解码。
+def _decoded_cache_put(sig, rows) -> None:
+    """插入全文解码缓存并维持分片数 + 字节预算（P3-13；调用方不持锁）。"""
+    _cache_put(sig, rows, _estimate_rows_bytes(rows))
+
+
+def _estimate_textonly_bytes(rows, lows) -> int:
+    """降级条目（_TextOnlyShard）的估算口径：文本列 + 小写列 + 行开销。
+
+    小写列是纯增量内存（约等于文本列再翻一倍）；换来的收益是每次搜索
+    不再对每行分配一个新 lower() 串。降级路径本身省掉了 packed 大头，
+    加上小写列后仍远小于整分片全文缓存。
+    """
+    total = _ROW_OVERHEAD_BYTES * len(rows) + 64      # +64: lows 列表对象本身
+    for r, low in zip(rows, lows):
+        text = r[6] if len(r) > 6 else None
+        if isinstance(text, str) and text:
+            total += len(text) * 2 + 64
+        if isinstance(low, str) and low:
+            total += len(low) * 2 + 64
+    return total
+
+
+def _decoded_cache_put_textonly(sig, rows, lows) -> None:
+    """插入降级缓存条目（P1-8；调用方不持锁）。
+
+    若连文本列 + 小写列都超预算，_cache_put 会把它自身淘汰（缓存为空），
+    搜索退化为每次全量解码——这与旧版行为一致，是预算硬闸的既定代价。
+    """
+    _cache_put(sig, _TextOnlyShard(rows, lows),
+               _estimate_textonly_bytes(rows, lows))
+
+
+def _decoded_shard(db: Path, table: str):
+    """分片解码缓存：文本行按 (库, 文件签名+版本, 表名) 缓存，搜索零重复解码。
 
     message_content 可能是 zstd 压缩 BLOB，SQL LIKE 对压缩行完全失明，
     关键词匹配必须在 Python 层解码后做；把逐行解码的成本摊到第一次
@@ -1460,17 +1515,27 @@ def _decoded_rows(db: Path, table: str) -> list:
     行形状: (ts, local_id, server_id, local_type, origin, rsid, text, packed, smap)。
     local_type 保留原始完整值（复合 49 的高 16 位 subtype 不能丢），
     类型判定时再由 _enrich_chat_row / 筛选路径取低 16 位基本类型。
+
+    返回 ("full", rows, None) 或 ("textonly", rows, lows)：
+    - full：整分片在字节预算内，rows 即缓存行（packed 在列）；
+    - textonly（P1-8）：估算超过预算的分片整片塞不进缓存（旧版会在
+      写入后被自身淘汰 → 每次搜索全量重解码），降级为只缓存文本列
+      （packed 置 None），并预存一列小写文本供大小写不敏感匹配复用；
+      命中行翻页时由 _filtered_messages_response 按页补取 packed。
     """
     try:
         st = db.stat()
-        sig = (str(db), st.st_mtime_ns, st.st_size, table)
+        sig = (str(db), st.st_mtime_ns, st.st_size, table,
+               _DECODED_CACHE_VERSION)
     except OSError:
-        sig = (str(db), 0, 0, table)
+        sig = (str(db), 0, 0, table, _DECODED_CACHE_VERSION)
     with _DECODED_CACHE_LOCK:
         hit = _DECODED_CACHE.get(sig)
         if hit is not None:
             _DECODED_CACHE.move_to_end(sig)
-            return hit
+            if isinstance(hit, _TextOnlyShard):
+                return "textonly", hit.rows, hit.lows
+            return "full", hit, None
     rows = []
     conn = sqlite3.connect(db)
     try:
@@ -1487,8 +1552,15 @@ def _decoded_rows(db: Path, table: str) -> list:
         rows = []
     finally:
         conn.close()
-    _decoded_cache_put(sig, rows)
-    return rows
+    if _estimate_rows_bytes(rows) <= _DECODED_CACHE_MAX_BYTES:
+        _decoded_cache_put(sig, rows)
+        return "full", rows, None
+    # P1-8 降级：去掉 packed 大头，小写列在解码时只算一次
+    low_rows = [(ts, lid, sid, t, origin, rsid, text, None, smap)
+                for (ts, lid, sid, t, origin, rsid, text, _pk, smap) in rows]
+    lows = [(r[6] or "").lower() for r in low_rows]
+    _decoded_cache_put_textonly(sig, low_rows, lows)
+    return "textonly", low_rows, lows
 
 
 def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
@@ -1550,38 +1622,91 @@ def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
 _INF = float("inf")
 
 
+def _refetch_packed(db: Path, table: str, local_ids) -> dict:
+    """降级缓存路径（P1-8）：按页补取命中行的 packed_info_data。
+
+    只对当页（≤limit 行）做一次按 local_id 的点查，packed 大头依旧不进
+    常驻缓存；行取不到（库已变化/被删）或查询失败时该行按无 packed
+    处理，与库里本来就没有 packed 的行同形，不影响其余命中行。
+    """
+    out = {}
+    if not local_ids:
+        return out
+    conn = sqlite3.connect(db)
+    try:
+        q = (f"SELECT local_id, packed_info_data FROM [{table}] "
+             f"WHERE local_id IN ({','.join('?' * len(local_ids))})")
+        for lid, packed in conn.execute(q, list(local_ids)):
+            out[(str(db), lid)] = packed
+    except sqlite3.Error as e:
+        _logger.detailed("api", f"[msg] packed 补取失败 db={db.name}: {e}")
+    finally:
+        conn.close()
+    return out
+
+
 def _filtered_messages_response(acc, account, chat, table, names, my_base,
                                 self_ids, is_group, q, kind, start_ts, end_ts,
                                 before, before_id, after, after_id, limit):
     """筛选/搜索模式：Python 层匹配 + 内存游标分页。
 
     类型与日期在缓存行上过滤，关键词大小写不敏感；总数精确返回，
-    游标语义与普通分页一致（before=更早窗口、after=更晚窗口）。"""
+    游标语义与普通分页一致（before=更早窗口、after=更晚窗口）。
+    P1-8：超预算分片走降级缓存（_TextOnlyShard）——匹配用预存小写列，
+    命中行翻页后按页补取 packed，富化结果与全文缓存路径一致。"""
     q_low = q.lower() if q else ""
     type_set = _KIND_TYPES.get(kind, ()) if kind else ()
     resolve_many = make_record_resolver(acc, chat)
     matches = []
+    match_srcs = []   # 与 matches 平行：None=全文缓存行；Path=降级分片来源
     for db in shards_for(acc, chat):
-        for (ts, local_id, server_id, t, origin, rsid, text, packed, smap) \
-                in _decoded_rows(db, table):
-            # t 是完整 local_type：复合 49 的高 16 位 subtype 必须保留给
-            # _enrich_chat_row → _fmt；筛选比较只取低 16 位基本类型。
-            base_t = (t or 0) & 0xFFFF
-            if kind == "record":
-                # 合并转发与普通 49 卡片同 type，必须解析内容才能区分（issue #31）
-                if base_t != 49 or not _is_recordinfo(text):
+        mode, rows, lows = _decoded_shard(db, table)
+        if mode == "full":
+            for (ts, local_id, server_id, t, origin, rsid, text, packed,
+                 smap) in rows:
+                # t 是完整 local_type：复合 49 的高 16 位 subtype 必须保留给
+                # _enrich_chat_row → _fmt；筛选比较只取低 16 位基本类型。
+                base_t = (t or 0) & 0xFFFF
+                if kind == "record":
+                    # 合并转发与普通 49 卡片同 type，必须解析内容才能区分（issue #31）
+                    if base_t != 49 or not _is_recordinfo(text):
+                        continue
+                elif type_set and base_t not in type_set:
                     continue
-            elif type_set and base_t not in type_set:
-                continue
-            if start_ts and ts < start_ts:
-                continue
-            if end_ts and ts > end_ts:
-                continue
-            if q_low and q_low not in text.lower():
-                continue
-            matches.append((ts, local_id, server_id, t, origin, rsid,
-                            text, packed, smap))
-    matches.sort(key=lambda m: (m[0], m[1]))
+                if start_ts and ts < start_ts:
+                    continue
+                if end_ts and ts > end_ts:
+                    continue
+                if q_low and q_low not in text.lower():
+                    continue
+                matches.append((ts, local_id, server_id, t, origin, rsid,
+                                text, packed, smap))
+                match_srcs.append(None)
+        else:
+            # 降级分片：匹配直接用预存小写列（解码时 lower 一次），
+            # 不再每次搜索对每行分配一个新串；packed 恒为 None，
+            # 命中行在翻页后按页补取。
+            for i, (ts, local_id, server_id, t, origin, rsid, text, _pk,
+                    smap) in enumerate(rows):
+                base_t = (t or 0) & 0xFFFF
+                if kind == "record":
+                    if base_t != 49 or not _is_recordinfo(text):
+                        continue
+                elif type_set and base_t not in type_set:
+                    continue
+                if start_ts and ts < start_ts:
+                    continue
+                if end_ts and ts > end_ts:
+                    continue
+                if q_low and q_low not in lows[i]:
+                    continue
+                matches.append((ts, local_id, server_id, t, origin, rsid,
+                                text, None, smap))
+                match_srcs.append(db)
+    order = sorted(range(len(matches)),
+                   key=lambda i: (matches[i][0], matches[i][1]))
+    matches = [matches[i] for i in order]
+    match_srcs = [match_srcs[i] for i in order]
     total = len(matches)
     keys = [(m[0], m[1]) for m in matches]
     forward = bool(after)
@@ -1589,6 +1714,7 @@ def _filtered_messages_response(acc, account, chat, table, names, my_base,
         lo = (bisect.bisect_right(keys, (after, after_id)) if after_id
               else bisect.bisect_right(keys, (after, _INF)))
         page = matches[lo:lo + limit]
+        page_srcs = match_srcs[lo:lo + limit]
         has_more = lo + limit < total     # after 模式：has_more = 还有更新的
         has_newer = has_more
     else:
@@ -1599,13 +1725,27 @@ def _filtered_messages_response(acc, account, chat, table, names, my_base,
             hi = total
         start = max(0, hi - limit)
         page = matches[start:hi]
+        page_srcs = match_srcs[start:hi]
         has_more = start > 0
         has_newer = hi < total
-    msgs = [_enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text,
-                             packed, smap, names, my_base, self_ids, is_group,
-                             chat, resolve_many=resolve_many)
-            for (ts, local_id, server_id, t, origin, rsid, text, packed, smap)
-            in page]
+    # 降级分片的命中行补取 packed：按来源分片分组、一次 IN 点查/分片
+    fetched = {}
+    need = {}
+    for m, src in zip(page, page_srcs):
+        if src is not None and m[7] is None:
+            entry = need.setdefault(str(src), (src, set()))
+            entry[1].add(m[1])
+    for src, lids in need.values():
+        fetched.update(_refetch_packed(src, table, sorted(lids)))
+    msgs = []
+    for (ts, local_id, server_id, t, origin, rsid, text, packed, smap), src \
+            in zip(page, page_srcs):
+        if packed is None and src is not None:
+            packed = fetched.get((str(src), local_id))
+        msgs.append(_enrich_chat_row(
+            local_id, server_id, t, ts, origin, rsid, text, packed, smap,
+            names, my_base, self_ids, is_group, chat,
+            resolve_many=resolve_many))
     display = names.get(chat, chat)
     _log(f"[msg] 筛选返回 {len(msgs)}/{total} 条, q={'有' if q else '无'}, "
          f"kind={kind or '全部'}, has_more={has_more}, has_newer={has_newer}")

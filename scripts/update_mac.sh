@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO="ImUpXuu/SIWX"
 RAW="https://raw.gh.1s.fan/${REPO}/main"
+GITHUB_RAW="https://raw.githubusercontent.com/${REPO}/main"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "============================================"
@@ -15,9 +16,12 @@ echo ""
 
 # ── 1. 获取远程版本信息 ──────────────────────
 echo "[1/5] 检查新版本..."
-REMOTE_JSON=$(curl -fsSL "${RAW}/version.json" 2>/dev/null) || {
-    echo "[错误] 无法获取版本信息，请检查网络连接"
-    exit 1
+REMOTE_JSON=$(curl -fsSL --connect-timeout 10 -m 30 "${RAW}/version.json" 2>/dev/null) || {
+    echo "      镜像源不可用，回退官方源 raw.githubusercontent.com ..."
+    REMOTE_JSON=$(curl -fsSL --connect-timeout 10 -m 30 "${GITHUB_RAW}/version.json" 2>/dev/null) || {
+        echo "[错误] 无法获取版本信息，请检查网络连接"
+        exit 1
+    }
 }
 NEW_VER=$(echo "$REMOTE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])")
 echo "      新版本: v${NEW_VER}"

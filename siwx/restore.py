@@ -30,6 +30,7 @@ from pathlib import Path
 from siwx import keystore
 from siwx import paths as _paths
 from siwx import logger as _slog
+from siwx import validate as _validate
 from siwx.pack import read_pack
 from siwx.sqlcipher import (collect_db_files, decrypt_database,
                             encrypt_database, verify_enc_key)
@@ -57,6 +58,18 @@ def _stage_root(root: Path = None) -> Path:
 
 def _out_root(root: Path = None) -> Path:
     return Path(root) if root else _paths.out_root()
+
+
+def _validated_account(account) -> str:
+    """manifest 自带的 account 来自备份包，制包者完全可控——`../..` 这类值
+    拼上 out_root 会把写入落点送出输出根（P1-6）。规则与 siwx/validate 的
+    account_dir 同源：单段路径分量、显式拒绝 "."/".."；调用方拼完路径后
+    还须做 resolve/relative_to 兜底。"""
+    if not _validate.valid_account(account) or account in (".", ".."):
+        raise RestoreError(
+            f"包 manifest 的 account 非法: {str(account)[:3]}***"
+            "（重新备份一次）")
+    return account
 
 
 def _conn(p: Path):
@@ -115,8 +128,23 @@ def stage_pack(pack_path, password: str, stage_root: Path = None,
     return {"id": sid, "dir": work, "manifest": manifest}
 
 
+# stage_id 只能是 stage_pack 生成的形态（uuid4().hex[:12]）。请求体原样
+# 透传到这里，白名单钉死，防止 `../..` 之类拼到暂存根之外（P1-5）；
+# resolve/relative_to 兜底与 siwx/validate 同一风格。
+STAGE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
 def load_stage(stage_id: str, stage_root: Path = None) -> dict:
-    work = _stage_root(stage_root) / stage_id
+    if not isinstance(stage_id, str) or not STAGE_ID_RE.fullmatch(stage_id):
+        raise RestoreError(f"暂存 id 非法: {stage_id!r}"
+                           "（重新分析一次即可）")
+    root = _stage_root(stage_root).resolve()
+    work = (root / stage_id).resolve()
+    try:
+        work.relative_to(root)
+    except ValueError:               # 兜底：白名单已挡，防御 resolve 差异
+        raise RestoreError(
+            f"暂存 {stage_id} 不存在或已过期（重新分析一次即可）")
     if not (work / "manifest.json").is_file():
         raise RestoreError(f"暂存 {stage_id} 不存在或已过期（重新分析一次即可）")
     manifest = json.loads((work / "manifest.json").read_text(encoding="utf-8"))
@@ -219,12 +247,39 @@ def _table_rows(conn, table) -> int:
         return 0
 
 
+def _dedup_sid(row, sid_i):
+    """消息行 server_id 去重键（与 siwx/backup.py 同一口径）：
+    仅 server_id>0 参与去重；0/NULL（系统类/未同步消息）返回 None，
+    调用方必须放行——0 值在库中大量并存，按裸值去重会把同会话
+    除首条外的 0 值消息全部静默塌缩。"""
+    sid = row[sid_i]
+    return sid if sid is not None and sid > 0 else None
+
+
 def _server_ids(conn, table) -> set:
+    """表内 server_id>0 的集合。0/NULL 不入集合：它们不参与去重
+    （见 _dedup_sid），入集合只会让对账把多条 0 值行算成一条。"""
     try:
         return {r[0] for r in conn.execute(
-            f"SELECT server_id FROM [{table}]")}
+            f"SELECT server_id FROM [{table}] WHERE server_id>0")}
     except sqlite3.Error:
         return set()
+
+
+def _table_sid_stats(conn, table) -> tuple:
+    """(server_id>0 集合, 总行数, server_id 0/NULL 行数)——对账口径：
+    0/NULL 行不去重、永远算待插入，>0 行按集合差去重。"""
+    sids, rows, zero = set(), 0, 0
+    try:
+        for (s,) in conn.execute(f"SELECT server_id FROM [{table}]"):
+            rows += 1
+            if s is not None and s > 0:
+                sids.add(s)
+            else:
+                zero += 1
+    except sqlite3.Error:
+        pass
+    return sids, rows, zero
 
 
 # ── 阶段 2：analyze（只读 diff 报告）──────────────────────────
@@ -261,7 +316,9 @@ def analyze(stage: dict, out_root: Path = None) -> dict:
             c.close()
 
     chats, total_pack, total_dup, total_new = [], 0, 0, 0
-    pack_tables = {}                     # tbl → server_id 并集（同表跨包内分片）
+    # tbl → {"sids": >0 并集, "rows": 总行数, "zero": 0/NULL 行数}
+    # （同表跨包内分片聚合；0/NULL 行不去重，逐行计数）
+    pack_tables = {}
     for sp in pack_shards:
         c = sqlite3.connect(str(sp))
         try:
@@ -269,25 +326,30 @@ def analyze(stage: dict, out_root: Path = None) -> dict:
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name LIKE 'Msg_%'")]
             for tbl in tables:
-                pack_tables.setdefault(tbl, set()).update(_server_ids(c, tbl))
+                st = pack_tables.setdefault(
+                    tbl, {"sids": set(), "rows": 0, "zero": 0})
+                sids, rows, zero = _table_sid_stats(c, tbl)
+                st["sids"] |= sids
+                st["rows"] += rows
+                st["zero"] += zero
         finally:
             c.close()
 
-    for tbl, sids in pack_tables.items():
+    for tbl, st in pack_tables.items():
         existing = tgt_sids.get(tbl, set())
-        dup = len(sids & existing)
-        insert = len(sids) - dup
+        insert = len(st["sids"] - existing) + st["zero"]
+        dup = st["rows"] - insert       # 含包内 >0 重复 sid（apply 同样跳过）
         username = rev.get(tbl, "")
         chats.append({
             "table": tbl[:10] + "…",
             "username": username,
             "display": names.get(username, username or tbl[:12] + "…"),
-            "pack_rows": len(sids),
+            "pack_rows": st["rows"],
             "existing": len(existing),
             "dup": dup,
             "to_insert": insert,
         })
-        total_pack += len(sids)
+        total_pack += st["rows"]
         total_dup += dup
         total_new += insert
     chats.sort(key=lambda e: (-e["to_insert"], e["display"]))
@@ -504,7 +566,14 @@ def apply(stage: dict, out_root: Path = None, log=print,
     account = manifest.get("account") or ""
     if not account:
         raise RestoreError("包 manifest 缺少 account（旧版包？重新备份一次）")
-    acc_dir = _out_root(out_root) / account
+    account = _validated_account(account)
+    root = _out_root(out_root).resolve()
+    acc_dir = (root / account).resolve()
+    try:
+        acc_dir.relative_to(root)    # 兜底：单段分量已挡，防 resolve 差异
+    except ValueError:
+        raise RestoreError(
+            f"包 manifest 的 account 落点越界: {account[:3]}***")
 
     # ── 全新安装：目标账号目录不存在 → 直接落盘，无需合并 ──
     if not acc_dir.is_dir():
@@ -516,6 +585,9 @@ def apply(stage: dict, out_root: Path = None, log=print,
             if not src.is_file() or rel.endswith(("-wal", "-shm")):
                 continue
             dst = acc_dir / Path(*rel.split("/"))
+            # 包内 rel 同样制包者可控：逐项断言落点在账号目录内（P1-6）
+            if not _validate.within(dst, acc_dir):
+                raise RestoreError(f"包内文件落点越界: {rel}")
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
             n += 1
@@ -590,8 +662,8 @@ def apply(stage: dict, out_root: Path = None, log=print,
                             skip_tbl = False
                             for row in sc.execute(
                                     f"SELECT {', '.join(MSG_COLUMNS)} FROM [{tbl}]"):
-                                s = row[sid_i]
-                                if s in have:
+                                s = _dedup_sid(row, sid_i)
+                                if s is not None and s in have:
                                     dup += 1
                                     continue
                                 if tbl not in tbl_created:
@@ -606,7 +678,9 @@ def apply(stage: dict, out_root: Path = None, log=print,
                                     tbl_created.add(tbl)
                                 if skip_tbl:
                                     break
-                                have.add(s)
+                                if s is not None:
+                                    have.add(s)
+                                # s is None（server_id 0/NULL）不去重，全量落库
                                 vals = [v for k, v in zip(MSG_COLUMNS, row)
                                         if k != "local_id"]
                                 u = shard_senders.get(row[src_si])
@@ -678,39 +752,6 @@ def _ensure_backup(backup_dir: Path, target: Path) -> Path:
 #   - FTS 索引不写（微信私有分词器）：恢复的消息在微信内搜索搜不到，
 #     属预期；resource/媒体不动。
 
-WECHAT_MSG_SHARD_RE = None  # 占位见 _wechat_msg_shards
-
-
-def _wechat_account_dir(account: str, store: dict, log=print) -> Path:
-    """正身定位：同名多副本按（密钥覆盖, 库数, 最新 mtime）选优。"""
-    from siwx.discover import find_wechat_data_dirs
-    hits = []
-    for w, d in find_wechat_data_dirs():
-        if w != account:
-            continue
-        try:
-            es = collect_db_files(d)
-        except Exception:
-            continue
-        covered = sum(1 for e in es if e.salt_hex in store)
-        try:
-            latest = max((e.path.stat().st_mtime for e in es), default=0)
-        except OSError:
-            latest = 0
-        hits.append((covered, len(es), latest, d))
-    if not hits:
-        raise RestoreError(f"账号 {account[:3]}*** 不在本机微信数据目录中")
-    hits.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
-    best = hits[0]
-    if len(hits) > 1:
-        log(f"[restore-wechat] ▲ 该账号有 {len(hits)} 个数据目录，"
-            f"已选密钥覆盖最高的（{best[0]}/{best[1]} 库）")
-    if not best[1] or best[0] < best[1]:
-        # 覆盖不满：apply 前必须补齐（extract 由 api 层负责引导/执行）
-        raise RestoreError(
-            f"微信库密钥覆盖 {best[0]}/{best[1]}——请先在控制台完成一次密钥提取")
-    return best[3]
-
 
 def _wechat_msg_shards(db_dir: Path) -> list:
     return [e for e in collect_db_files(db_dir)
@@ -723,119 +764,6 @@ def _decrypt_to(entry, key: bytes, dest: Path) -> Path:
     if not dest.is_file():
         decrypt_database(entry.path, dest, key)
     return dest
-
-
-def _wechat_require_closed():
-    from siwx.discover import find_wechat_pids
-    pids = find_wechat_pids()
-    if pids:
-        raise RestoreError(f"微信正在运行 (pids={pids})——恢复到微信要求完全退出")
-
-
-def _snapshot_wechat_tables(db_dir: Path, store: dict, work: Path,
-                            want_chat: str = None) -> dict:
-    """解密全部分片到 work（只读分析用），返回 {table: {"sids": set,
-    "shards": [(rel, max_ct)]}, "shard_keys": {rel: key_hex},
-    "entries": {rel: DbEntry}, "active": rel}。"""
-    entries = {e.rel.replace("\\", "/"): e
-               for e in collect_db_files(db_dir)}
-    shards = {rel: e for rel, e in entries.items()
-              if re.fullmatch(r"message/message_\d+\.db", rel)}
-    snap = {"shards": {}, "keys": {}, "entries": entries, "active": None,
-            "tables": {}}
-    global_ct = {}
-    for rel, e in sorted(shards.items()):
-        key = bytes.fromhex(store[e.salt_hex]["key"])
-        snap["keys"][rel] = store[e.salt_hex]["key"]
-        plain = _decrypt_to(e, key, work / rel.replace("/", "_"))
-        c = sqlite3.connect(str(plain))
-        try:
-            tables = [r[0] for r in c.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name LIKE 'Msg_%'")]
-            for tbl in tables:
-                mx, cnt = c.execute(
-                    f"SELECT MAX(create_time), COUNT(*) FROM [{tbl}]"
-                ).fetchone()
-                ent = snap["tables"].setdefault(
-                    tbl, {"sids": set(), "shards": []})
-                if want_chat is None or _sids_any(c, tbl, want_chat, cnt):
-                    ent["sids"] |= _server_ids(c, tbl)
-                ent["shards"].append((rel, mx or 0, cnt))
-                global_ct[rel] = max(global_ct.get(rel, 0), mx or 0)
-        finally:
-            c.close()
-    snap["active"] = (max(global_ct, key=global_ct.get)
-                      if global_ct else sorted(shards)[0])
-    return snap
-
-
-def _sids_any(c, tbl, want_chat, cnt):
-    return True
-
-
-def analyze_wechat(stage: dict, log=print, work: Path = None) -> dict:
-    """对微信真库做只读 diff（要求微信退出）。报告结构与 analyze() 对齐，
-    增加 target 字段与 shard 分布。"""
-    _wechat_require_closed()
-    payload = stage["dir"] / "payload"
-    manifest = stage["manifest"]
-    account = manifest.get("account") or ""
-    store = keystore.load()
-    db_dir = _wechat_account_dir(account, store, log)
-    work = work or (stage["dir"] / "wechat_probe")
-    snap = _snapshot_wechat_tables(db_dir, store, work)
-    pack_shards = _pack_msg_shards(payload, manifest)
-    rev = _reverse_usernames(payload, manifest, pack_shards)
-    names = _display_names(payload, _out_root() / account)
-
-    pack_tables = {}
-    for sp in pack_shards:
-        c = sqlite3.connect(str(sp))
-        try:
-            for (tbl,) in c.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' "
-                    "AND name LIKE 'Msg_%'"):
-                pack_tables.setdefault(tbl, set()).update(_server_ids(c, tbl))
-        finally:
-            c.close()
-
-    chats, total_pack, total_dup, total_new = [], 0, 0, 0
-    for tbl, sids in pack_tables.items():
-        live = snap["tables"].get(tbl, {"sids": set(), "shards": []})
-        dup = len(sids & live["sids"])
-        ins = len(sids) - dup
-        username = rev.get(tbl, "")
-        chats.append({
-            "username": username,
-            "display": names.get(username, username or tbl[:12] + "…"),
-            "pack_rows": len(sids),
-            "existing": len(live["sids"]),
-            "dup": dup,
-            "to_insert": ins,
-            "table_exists": bool(live["shards"]),
-            "shards": [s for s, _m, _c in live["shards"]],
-        })
-        total_pack += len(sids)
-        total_dup += dup
-        total_new += ins
-    chats.sort(key=lambda e: (-e["to_insert"], e["display"]))
-    return {
-        "stage_id": stage["id"],
-        "account": account,
-        "target": "wechat",
-        "fresh": False,
-        "pack_mode": manifest.get("mode"),
-        "pack_created": manifest.get("created_at"),
-        "chats": chats[:200],
-        "chats_count": len(chats),
-        "total_pack": total_pack,
-        "total_dup": total_dup,
-        "total_insert": total_new,
-        "sessions_new": 0,
-        "contacts_new": 0,
-        "active_shard": snap["active"],
-    }
 
 
 def _merge_rows_into_plain(plain: Path, tbl: str, rows, pack_senders,
@@ -856,11 +784,13 @@ def _merge_rows_into_plain(plain: Path, tbl: str, rows, pack_senders,
         dst_si = INSERT_COLS.index("real_sender_id")
         sid_i = MSG_COLUMNS.index("server_id")
         for row in rows:
-            sid = row[sid_i]
-            if sid in have:
+            sid = _dedup_sid(row, sid_i)
+            if sid is not None and sid in have:
                 stats["dup"] = stats.get("dup", 0) + 1
                 continue
-            have.add(sid)
+            if sid is not None:
+                have.add(sid)
+            # sid is None（server_id 0/NULL）不去重，全量落库
             vals = [v for k, v in zip(MSG_COLUMNS, row) if k != "local_id"]
             u = pack_senders.get(row[src_si])
             if u and u not in n2i:
@@ -1034,7 +964,7 @@ def analyze_wechat(stage: dict, log=print) -> dict:
     _wechat_require_closed()
     payload = stage["dir"] / "payload"
     manifest = stage["manifest"]
-    account = manifest.get("account") or ""
+    account = _validated_account(manifest.get("account") or "")
     store = keystore.load()
     db_dir = _wechat_account_dir(account, store, log)
     work = stage["dir"] / "wechat_probe"
@@ -1043,6 +973,8 @@ def analyze_wechat(stage: dict, log=print) -> dict:
     rev = _reverse_usernames(payload, manifest, pack_shards)
     names = _display_names(payload, _out_root() / account)
 
+    # tbl → {"sids": >0 并集, "rows": 总行数, "zero": 0/NULL 行数}
+    # （对账口径与 analyze() 一致：0/NULL 行不去重、永远算待插入）
     pack_tables = {}
     for sp in pack_shards:
         c = sqlite3.connect(str(sp))
@@ -1050,27 +982,32 @@ def analyze_wechat(stage: dict, log=print) -> dict:
             for (tbl,) in c.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' "
                     "AND name LIKE 'Msg_%'"):
-                pack_tables.setdefault(tbl, set()).update(_server_ids(c, tbl))
+                st = pack_tables.setdefault(
+                    tbl, {"sids": set(), "rows": 0, "zero": 0})
+                sids, rows, zero = _table_sid_stats(c, tbl)
+                st["sids"] |= sids
+                st["rows"] += rows
+                st["zero"] += zero
         finally:
             c.close()
 
     chats, total_pack, total_dup, total_new = [], 0, 0, 0
-    for tbl, sids in pack_tables.items():
+    for tbl, st in pack_tables.items():
         live = snap["tables"].get(tbl, {"sids": set(), "shards": []})
-        dup = len(sids & live["sids"])
-        ins = len(sids) - dup
+        ins = len(st["sids"] - live["sids"]) + st["zero"]
+        dup = st["rows"] - ins          # 含包内 >0 重复 sid（apply 同样跳过）
         username = rev.get(tbl, "")
         chats.append({
             "username": username,
             "display": names.get(username, username or tbl[:12] + "…"),
-            "pack_rows": len(sids),
+            "pack_rows": st["rows"],
             "existing": len(live["sids"]),
             "dup": dup,
             "to_insert": ins,
             "table_exists": bool(live["shards"]),
             "shards": [s for s, _m in live["shards"]],
         })
-        total_pack += len(sids)
+        total_pack += st["rows"]
         total_dup += dup
         total_new += ins
     chats.sort(key=lambda e: (-e["to_insert"], e["display"]))
@@ -1098,7 +1035,7 @@ def apply_wechat(stage: dict, chats=None, log=print, progress=None) -> dict:
     _wechat_require_closed()
     payload = stage["dir"] / "payload"
     manifest = stage["manifest"]
-    account = manifest.get("account") or ""
+    account = _validated_account(manifest.get("account") or "")
     store = keystore.load()
     db_dir = _wechat_account_dir(account, store, log)
     pack_shards = _pack_msg_shards(payload, manifest)
@@ -1111,8 +1048,10 @@ def apply_wechat(stage: dict, chats=None, log=print, progress=None) -> dict:
         if missing:
             log(f"[restore-wechat] ▲ {len(missing)} 个勾选会话在包内没有消息，跳过")
 
-    # 包内行按表聚合（跨包内分片合并 + server_id 去重）
+    # 包内行按表聚合（跨包内分片合并 + server_id 去重，仅 >0 参与——
+    # 0/NULL 行不去重，见 _dedup_sid）
     pack_rows, pack_senders = {}, {}
+    seen_sids = {}
     _si = sid_i()
     for sp in pack_shards:
         c = sqlite3.connect(str(sp))
@@ -1125,12 +1064,14 @@ def apply_wechat(stage: dict, chats=None, log=print, progress=None) -> dict:
                     continue
                 pack_senders.update(dict(c.execute(
                     "SELECT rowid, user_name FROM Name2Id").fetchall()))
-                seen = {r[_si] for r in pack_rows.get(tbl, [])}
+                seen = seen_sids.setdefault(tbl, set())
                 for row in c.execute(
                         f"SELECT {', '.join(MSG_COLUMNS)} FROM [{tbl}]"):
-                    if row[_si] in seen:
-                        continue
-                    seen.add(row[_si])
+                    s = _dedup_sid(row, _si)
+                    if s is not None:
+                        if s in seen:
+                            continue
+                        seen.add(s)
                     pack_rows.setdefault(tbl, []).append(row)
         finally:
             c.close()

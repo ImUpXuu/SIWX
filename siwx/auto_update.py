@@ -1,7 +1,7 @@
 """自动更新 —— 版本检查 + 平台检测 + 安装替换。
 
 流程:
-1. 启动时异步拉取远程 version.json（raw.gh.1s.fan 代理）
+1. 启动时异步拉取远程 version.json（第三方反代 + GitHub Raw 双源择优）
 2. 比对本地版本 → 有新版本则提示
 3. 用户确认 → 下载对应平台产物到系统临时目录 → 校验 SHA-256 → 安装
 4. 安装（纯 Python，双平台统一，不依赖打包进产物的外部脚本）:
@@ -40,16 +40,23 @@ VERSION_URLS = [f"{RAW_BASE}/version.json", f"{GITHUB_RAW_BASE}/version.json"]
 TIMEOUT = 10
 DOWNLOAD_TIMEOUT = 300
 
-# 更新链域名白名单（审计 S1/S5）：version.json 提供的下载/哈希 URL 必须落在
-# 这些域名内，否则跳过该候选（GitHub Release 直链兜底不受影响），防止
-# manifest 把下载源指到任意域名。
+# 更新链信任模型（审计 S1/S5/P1-4）：
+# - 权威源 = raw.githubusercontent.com / github.com。SHA256SUMS 与产物只从
+#   权威源拉取：version.json 提供的下载/哈希 URL 必须落在下方白名单（且在
+#   本仓库路径下），否则跳过该候选（GitHub Release 直链兜底不受影响）；
+# - raw.gh.1s.fan（第三方 GitHub 反代）只用于 version.json 的版本号发现
+#   （见 VERSION_URLS），绝不参与哈希/产物下载。反代被投毒时只能污染版本号
+#   竞争（最坏导致权威源下载 404 的 DoS），无法伪造可执行的更新内容。
 _ALLOWED_UPDATE_HOSTS = {
-    "github.com", "objects.githubusercontent.com",
-    "raw.githubusercontent.com", "raw.gh.1s.fan",
+    "github.com", "raw.githubusercontent.com",
 }
 
+# 不放行 objects.githubusercontent.com（P2-5）：该域托管任意公开仓库 release
+# 资产的签名 URL，攻击者下载自己恶意仓库的资产即可拿到合法 URL 塞进 manifest。
+# github.com 的 release 直链会 302 到该域，urllib 自动跟随重定向，无需放行。
+
 # 只认域名时 github.com/attacker/repo 一样放行——白名单形同虚设。产物与哈希
-# URL 还必须落在本仓库路径下，这样即使代理被投毒也无法把下载源指到别处。
+# URL 还必须落在本仓库路径下，即使 manifest 被篡改也无法把下载源指到别处。
 _REPO_PATH_PREFIX = f"/{GITHUB_REPO}/releases/"
 
 # version 字段会被拼进文件名 / 安装目标路径 / 正则替换模板，必须是严格语义
@@ -73,22 +80,25 @@ def _host_allowed(url: str) -> bool:
 
 
 def _manifest_url_allowed(url: str) -> bool:
-    """manifest 提供的产物/哈希 URL：域名白名单 + 必须落在本仓库路径下。"""
+    """manifest 提供的产物/哈希 URL：https + 权威域名白名单 + 本仓库路径。
+
+    - 强制 https（P2-4）：明文 http 的 URL 可被中间人整体替换；
+    - 仅权威源放行（P1-4）：第三方反代 raw.gh.1s.fan 只用于版本号发现，
+      出现在哈希/产物位置一律拒绝。"""
     from urllib.parse import urlsplit
     try:
         u = urlsplit(url)
     except ValueError:
+        return False
+    if (u.scheme or "").lower() != "https":
         return False
     host = (u.hostname or "").lower()
     if host not in _ALLOWED_UPDATE_HOSTS:
         return False
     if host == "github.com":
         return u.path.startswith(_REPO_PATH_PREFIX)
-    if host in ("raw.githubusercontent.com", "raw.gh.1s.fan"):
-        return u.path.startswith(f"/{GITHUB_REPO}/")
-    # objects.githubusercontent.com 的路径由 GitHub 生成（Release 资源重定向），
-    # 攻击者无法往该域上传内容，放行。
-    return True
+    # raw.githubusercontent.com
+    return u.path.startswith(f"/{GITHUB_REPO}/")
 
 
 def current_version() -> str:
@@ -169,11 +179,13 @@ def _version_tuple(v: str) -> tuple:
 
 
 def _manifest_download_urls_ok(remote: dict) -> bool:
-    """manifest 声明的产物/哈希地址是否全部落在本仓库路径下。
+    """manifest 声明的产物/哈希地址是否全部落在权威源本仓库路径下。
 
-    代理源（raw.gh.1s.fan）可能被投毒，且 fetch_remote_version 取的是「版本号
-    最大者」——只投毒代理就能压过权威源。这里要求它的下载地址只能指向本仓库
-    releases，投毒最多退化成下载失败（DoS），无法指向攻击者产物。
+    哈希与产物只信权威源（P1-4）：代理源（raw.gh.1s.fan）可能被投毒，且
+    fetch_remote_version 取的是「版本号最大者」——但代理域名已不在
+    _manifest_url_allowed 的白名单内，被投毒的 manifest 只能引用权威源 URL，
+    最坏情况是伪造版本号导致权威源下载 404（DoS），无法让客户端执行
+    攻击者内容。
     """
     urls = [remote.get("sha256") or ""] + list((remote.get("assets") or {}).values())
     return all(_manifest_url_allowed(u) for u in urls if u)
@@ -203,8 +215,8 @@ def _asset_name(remote: dict, plat: str) -> str:
 
 
 def _asset_urls(remote: dict, plat: str) -> list:
-    """候选下载地址：version.json 提供的在前（域名白名单校验），GitHub Release
-    直链兜底在后。"""
+    """候选下载地址：version.json 提供的在前（权威域名白名单校验），GitHub
+    Release 直链兜底在后。"""
     ver = remote.get("version", "")
     urls = []
     key = "macos_dmg" if plat == "macos" else "windows"
@@ -219,7 +231,11 @@ def _asset_urls(remote: dict, plat: str) -> list:
 
 
 def _download_file(url: str, dest: Path, attempts: int = 2) -> bool:
-    """下载文件到 dest，失败重试。"""
+    """下载文件到 dest，失败重试。
+
+    白名单校验只作用于调用方传入的 manifest 声明 URL（必须是权威域）；
+    urllib 会自动跟随重定向（github.com release 直链 302 到
+    objects.githubusercontent.com），重定向落点不做二次白名单校验。"""
     import urllib.request
     for i in range(attempts):
         try:
@@ -277,8 +293,8 @@ def _verify_sha256(file_path: Path, expected_sha: str) -> bool:
 def _get_asset_sha(remote: dict, platform_key: str) -> str:
     """从远程 version.json 获取指定平台产物的 SHA-256。
 
-    哈希 URL 同样受域名白名单约束（审计 S1/S5）：哈希源不在白名单内时
-    返回空串，由 run_update 拒绝安装，而不是静默跳过校验。"""
+    哈希 URL 同样受权威域名白名单约束（审计 S1/S5/P1-4）：哈希源不在
+    白名单内时返回空串，由 run_update 拒绝安装，而不是静默跳过校验。"""
     sha_url = remote.get("sha256", "")
     asset_name = _asset_name(remote, platform_key)
     if not sha_url or not asset_name:

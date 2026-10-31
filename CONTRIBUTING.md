@@ -172,6 +172,9 @@ git push origin v5.0.3
 
 > 默认的 `--cleanup=strip` 会把**整行以 `#` 开头的 Markdown 标题当注释删掉**，导致 Release 正文丢失全部标题结构。
 
+> ⚠️ **一次 `git push` 只推一个 tag**：多 tag 同推不会触发 CI（历史踩坑）。
+> 连发多个版本时，请逐个 `git push origin vX.Y.Z`，确认上一个 tag 的 CI 构建已触发后再推下一个。
+
 ---
 
 ## 九、遇到问题？

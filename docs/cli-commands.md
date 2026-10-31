@@ -14,6 +14,7 @@ python run.py decrypt [--db-dir X] [--out DIR]
 python run.py serve [--port 8787]      # Web 控制台
 python run.py mcp                      # MCP 服务器（stdio, 供 AI 客户端接入）
 python run.py doctor                   # 打印环境信息（提 issue 时粘贴）
+python run.py backup [--mode full|selective]  # 加密备份导出 .siwxpack（⚠️ 须先完全退出微信）
 ```
 
 **裸跑（双击 exe）**: 默认启动 Web 控制台。
@@ -206,6 +207,63 @@ python run.py doctor
 **示例**:
 ```bash
 python run.py doctor
+```
+
+---
+
+## backup — 加密备份导出 (.siwxpack)
+
+> ⚠️ **危险操作：备份要求先完全退出微信**（保证快照一致）。检测到微信正在运行时，
+> CLI 会询问是否允许 SIWX 终止微信进程；脚本/无人值守场景用 `--yes` 免交互确认。
+
+```
+python run.py backup [--mode full|selective] [--chat USERNAME] [--types 1,3,34]
+                     [--start DATE] [--end DATE] [--account WXID] [--out PATH]
+                     [--yes] [--password-stdin] [--workers N] [--no-cache] [--detailed]
+```
+
+**流程**: 退出微信确认 → 读取密钥库 → 按模式筛选 → 打包加密为 `.siwxpack`
+
+**模式**:
+| 模式 | 含义 |
+|---|---|
+| `full` | 整账号全量备份 |
+| `selective` | 按 `--chat` / `--types` / `--start` / `--end` 组合筛选（selective 下不填 `--chat` 即全部会话） |
+
+省略 `--mode` 时按参数自动推断：给了任一筛选参数则 `selective`，否则 `full`。
+
+**参数**:
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `--mode {full,selective}` | 备份模式 | 按参数自动推断 |
+| `--chat USERNAME` | 要备份的会话 username（可多次） | selective 下全部会话 |
+| `--types 1,3,34` | 消息类别，逗号分隔整数（1=文本 3=图片 34=语音 43=视频 49=应用/引用…） | 不限 |
+| `--start DATE` | 起始时间 `YYYY-MM-DD[ HH:MM[:SS]]` | 不限 |
+| `--end DATE` | 结束时间 `YYYY-MM-DD[ HH:MM[:SS]]` | 不限 |
+| `--account WXID` | 账号 wxid（多账号机器指定） | 自动挑密钥齐全的账号 |
+| `--out PATH` | 输出 `.siwxpack` 路径 | `exports/` 下按时间命名 |
+| `--yes` | 允许 SIWX 终止微信进程（免交互确认） | false |
+| `--password-stdin` | 从 stdin 读密码（脚本/管道用，跳过双输交互） | 交互双输 |
+
+密码在交互模式下双输确认（至少 8 位）；两次不一致直接退出。
+
+**退出码**:
+| 码 | 含义 |
+|---|---|
+| 0 | 备份完成 |
+| 1 | 备份失败（参数错误 / 未确认杀进程 / 备份中止等） |
+
+**示例**:
+```bash
+# 全量备份（交互输入密码；会先要求确认退出微信）
+python run.py backup
+
+# 只备份指定会话的文本与图片消息
+python run.py backup --chat wxid_example_01 --types 1,3
+
+# 按时间范围备份，输出到指定路径，脚本化免交互（stdin 传密码）
+echo "$PASSWORD" | python run.py backup --start 2026-01-01 --end 2026-06-30 \
+    --out D:/backup/siwx_backup_selective_2026H1.siwxpack --yes --password-stdin
 ```
 
 ---

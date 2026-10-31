@@ -7,6 +7,7 @@
 4. 双遍扫描：第一遍轻量采集元数据（计数/发送者/图片引用），第二遍流式写出
 """
 import hashlib
+import html as _html
 import json
 import os
 import re
@@ -42,6 +43,11 @@ XLSX_CELL_LIMIT = 30000
 
 # 语音媒体在组合键 media_map 里的槽位前缀（与图片槽位隔离）
 _VOICE_KEY = "\x00voice"
+# 文件消息附件的槽位前缀（文件无 md5 定位键，用 (localId, ts) + 槽位隔离）
+_FILE_KEY = "\x00file"
+# 视频消息附件的槽位前缀（视频 md5 只用于磁盘定位，不进导出消息形状，
+# media_map 键与图片 md5 键隔离）
+_VIDEO_KEY = "\x00video"
 
 
 class ExportCancelled(Exception):
@@ -142,8 +148,13 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
     """第一遍：轻量扫描，只采集计数/发送者/媒体引用。内存 O(发送者数 + 媒体数)。"""
     senders = set()
     images = []       # (md5, bubble_md5, localId, ts) 引用
-    voices = []       # (localId, serverId, ts) 引用
+    voices = []       # (localId, serverId, ts, chat) 引用
+    voice_seen = set()  # (chat, localId, ts) 去重——原始语音消息在本会话时，
+                        # 顶层消息与合并转发子项会采到同一条语音
     stickers = []     # (md5, bubble_md5, localId, ts, cdnurl) 引用
+    videos = []       # (md5, localId, ts) 引用（msg/video 按内容 md5 命名）
+    file_refs = []    # (title, localId, ts) 引用（msg/file 按原文件名落盘）
+    rec_subitems = {"voice": 0, "video": 0, "file": 0}  # P2-3 子项计数留痕
     count = 0
     first_ts = last_ts = 0
     for msg in message_stream(acc_out_dir, chat, start_ts, end_ts, account, names):
@@ -165,14 +176,73 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
                                it.get("srcLocalId") or 0,
                                it.get("srcCreateTime") or 0,
                                it.get("srcChat") or chat))
+            # P2-3：语音子项走 get_voice(svr_id=fromnewmsgid) 链路补齐；
+            # 视频/文件子项暂不复制（原文件无稳定 md5 定位键），仅计数留痕
+            for it in _iter_record_items(msg["record"]):
+                kind = it.get("kind")
+                dtype = str(it.get("datatype") or "")
+                if kind == "voice" or dtype == "34":
+                    rec_subitems["voice"] += 1
+                    v_chat = it.get("srcChat") or chat
+                    v_lid = it.get("srcLocalId") or 0
+                    v_ts = it.get("srcCreateTime") or 0
+                    vk = (v_chat, v_lid, v_ts)
+                    if vk not in voice_seen:
+                        voice_seen.add(vk)
+                        voices.append((v_lid, it.get("srcMsgId") or 0,
+                                       v_ts, v_chat))
+                elif kind == "video" or dtype == "4":
+                    rec_subitems["video"] += 1
+                elif kind == "file" or dtype == "6":
+                    rec_subitems["file"] += 1
         if msg.get("localType") == 34:
-            voices.append((msg["localId"], msg.get("platformMessageId") or "", ts))
+            vk = (chat, msg["localId"], ts)
+            if vk not in voice_seen:
+                voice_seen.add(vk)
+                voices.append((msg["localId"],
+                               msg.get("platformMessageId") or "", ts, chat))
         if msg.get("localType") == 47:
             url = (msg.get("sticker") or {}).get("url") or ""
             if url:
                 stickers.append((msg.get("md5"), msg.get("bubbleMd5"),
                                  msg["localId"], ts, url))
-    return count, first_ts, last_ts, senders, images, voices, stickers
+        # P2-2：视频(43)/文件(6、49-appmsg type=6) 附件纳入导出范围
+        if msg.get("localType") == 43:
+            vmd5 = media.extract_md5_from_xml(msg.get("rawContent") or "")
+            if vmd5:
+                videos.append((vmd5, msg["localId"], ts))
+        else:
+            ftitle = _extract_file_title(msg.get("localType"),
+                                         msg.get("rawContent") or "")
+            if ftitle:
+                file_refs.append((ftitle, msg["localId"], ts))
+    return (count, first_ts, last_ts, senders, images, voices, stickers,
+            videos, file_refs, rec_subitems)
+
+
+_FILE_MSG_RE = re.compile(r'<appmsg\b[^>]*\btype="6"|<type>\s*6\s*</type>'
+                          r'|<fileext>|<totallen>')
+
+
+def _extract_file_title(local_type, raw: str) -> str:
+    """文件消息（type 6 / 49 的 appmsg type=6）提取落盘文件名。
+
+    磁盘上 msg/file/** 按原文件名+扩展名保存（实测 PDF/APK/PNG 头部签名
+    完好），文件名取 <title>；识别口径与 _fmt 的 [文件] 前缀一致：
+    appmsg type="6" / <type>6</type> / 带 fileext/totallen。
+    """
+    if local_type not in (6, 49) or not raw:
+        return ""
+    # 合并转发记录内嵌的文件子项（dataitem）也带 fileext/totallen，
+    # 整条记录不是文件消息——先排除，防把记录标题当文件名
+    if "<recordinfo>" in raw or re.search(r'<appmsg\b[^>]*\btype="19"', raw):
+        return ""
+    if not _FILE_MSG_RE.search(raw):
+        return ""
+    m = re.search(r"<title>(.*?)</title>", raw, re.S)
+    if not m:
+        return ""
+    return _html.unescape(m.group(1)).strip()
 
 
 def _media_key(md5, bubble_md5, local_id, ts) -> tuple:
@@ -191,12 +261,22 @@ def _voice_key(local_id, ts) -> tuple:
     return (_VOICE_KEY, int(local_id or 0), int(ts or 0))
 
 
+def _file_key(local_id, ts) -> tuple:
+    """文件消息附件的组合键（文件按原文件名落盘，无 md5 定位键）。"""
+    return (_FILE_KEY, int(local_id or 0), int(ts or 0))
+
+
+def _video_key(local_id, ts) -> tuple:
+    """视频消息附件的组合键（磁盘定位用内容 md5，media_map 键走独立槽位）。"""
+    return (_VIDEO_KEY, int(local_id or 0), int(ts or 0))
+
+
 def _iter_record_media(record):
     """递归遍历合并转发子项里带媒体引用的条目（issue #31）。
 
     只产出有 md5/bubbleMd5 的子项（图片/表情）；嵌套的下一层记录继续下钻。
     子项的 srcLocalId/srcCreateTime 指向原始消息，是 attach/Bubble/Thumb
-    三级来源的定位键。
+    三级来源的定位键。语音子项无定位 md5，走 _iter_record_voice_items。
     """
     for it in (record or {}).get("items") or []:
         if it.get("md5") or it.get("bubbleMd5"):
@@ -206,11 +286,34 @@ def _iter_record_media(record):
             yield from _iter_record_media(nested)
 
 
-def _attach_record_media(record, media_map) -> None:
-    """把已解密的媒体回填到合并转发子项（issue #31）。
+def _iter_record_items(record):
+    """递归遍历合并转发记录的全部子项（含嵌套下一层）。"""
+    for it in (record or {}).get("items") or []:
+        yield it
+        nested = it.get("record")
+        if nested:
+            yield from _iter_record_items(nested)
 
-    子项与顶层消息共用同一个 media_map：键是 (md5, 原始 local_id, ts)，
-    与顶层消息的 local_id 天然不同，不会互挂。
+
+def _iter_record_voice_items(record):
+    """递归遍历合并转发子项里的语音条目（datatype=34，P2-3）。
+
+    语音子项无 md5/bubbleMd5（_parse_recordinfo 只为图片/表情补 md5），
+    定位走 get_voice(svr_id=fromnewmsgid)：srcMsgId 即原始语音消息的
+    server_id，srcLocalId/srcCreateTime/srcChat 由 resolver 从原始消息
+    回填。
+    """
+    for it in _iter_record_items(record):
+        if it.get("kind") == "voice" or str(it.get("datatype") or "") == "34":
+            yield it
+
+
+def _attach_record_media(record, media_map) -> None:
+    """把已解密的媒体回填到合并转发子项（issue #31 + P2-3）。
+
+    子项与顶层消息共用同一个 media_map：图片键是 (md5, 原始 local_id, ts)，
+    与顶层消息的 local_id 天然不同，不会互挂；语音子项走独立的
+    (\\x00voice, srcLocalId, srcCreateTime) 语音槽位（P2-3）。
     """
     for it in _iter_record_media(record):
         mf = media_map.get(_media_key(it.get("md5"), it.get("bubbleMd5"),
@@ -218,40 +321,59 @@ def _attach_record_media(record, media_map) -> None:
                                       it.get("srcCreateTime") or 0))
         if mf and "/voice_" not in mf:
             it["mediaFile"] = mf
+    # P2-3：语音子项回填。图片槽位与语音槽位互斥的语义不变——上面的
+    # md5 键命中带 "/voice_" 前缀仍拒挂；这里显式按语音槽位键取。
+    for it in _iter_record_voice_items(record):
+        mf = media_map.get(_voice_key(it.get("srcLocalId") or 0,
+                                      it.get("srcCreateTime") or 0))
+        if mf and "/voice_" in mf:
+            it["mediaFile"] = mf
 
 
 def _attach_media(msg: dict, media_map: dict) -> None:
     """按消息类型回填 mediaFile，防跨分片 local_id 撞号错挂。
 
-    导出管线只产出图片(3/47)与语音(34)两类媒体文件，媒体映射以
-    (md5, localId, ts) 组合键（语音为 (\\x00voice, localId, ts)）为索引；
-    多分片会话中各分片的 local_id 独立编号会撞号——图片与图片之间的互挂
-    由 md5 组合键根治。文本/链接/系统消息不在类型门禁内，永不获媒体。
-    图片槽位与语音槽位互斥，防图片/语音之间串型。
+    导出管线产出的媒体文件与映射键（P2-2/P2-3 扩展后）：
+    - 图片/表情(3/47)：(md5, localId, ts) 组合键；
+    - 语音(34)：(\\x00voice, localId, ts) 槽位；
+    - 视频(43)：(\\x00video, localId, ts) 槽位；
+    - 文件(6、49-appmsg type=6)：(\\x00file, localId, ts) 槽位（文件按原
+      文件名落盘，无 md5 定位键）。
+    多分片会话中各分片的 local_id 独立编号会撞号——图片之间的互挂由
+    md5 组合键根治；视频/文件/语音走独立槽位，与图片互不串型。
+    文本/链接/系统消息不在类型门禁内，永不获媒体。
 
-    合并转发（type 49）不产顶层媒体，但子项可能带图片——先回填子项，
-    再走顶层类型门禁（issue #31）。
+    合并转发（type 49）顶层仅文件消息回填附件；子项媒体（图片/语音）
+    先回填子项，再走顶层类型门禁（issue #31 + P2-3）。
     """
     rec = msg.get("record")
     if rec:
         _attach_record_media(rec, media_map)
     t = msg.get("localType")
-    if t not in (3, 47, 34):
+    if t not in (3, 47, 34, 43, 6, 49):
         return
     ts = msg.get("createTime") or 0
     if t == 34:
         mf = media_map.get(_voice_key(msg.get("localId"), ts))
+    elif t == 43:
+        mf = media_map.get(_video_key(msg.get("localId"), ts))
+    elif t in (6, 49):
+        mf = media_map.get(_file_key(msg.get("localId"), ts))
     else:
         mf = media_map.get(_media_key(msg.get("md5"), msg.get("bubbleMd5"),
                                       msg.get("localId"), ts))
     if not mf:
         # 审计 §4.1：媒体未回填正是"图丢了"的发生点，量=失败集合，可控。
-        # ring=False：逐条埋点只进文件轨，防大导出冲掉日志页早期关键记录
-        logger.detailed(
-            "media",
-            f"媒体未回填 localType={t} local_id={msg.get('localId')} ts={ts} "
-            f"md5={(msg.get('md5') or '')[:8]} bm={(msg.get('bubbleMd5') or '')[:8]}",
-            ring=False)
+        # ring=False：逐条埋点只进文件轨，防大导出冲掉日志页早期关键记录。
+        # 视频/文件(43/6/49)的缺失已在 _export_video_media/_export_file_media
+        # 的 skipped 口径聚合留痕，且 49 大多是链接/引用/聊天记录（无附件
+        # 是常态），逐条埋点只会刷噪声——不再重复记。
+        if t in (3, 47, 34):
+            logger.detailed(
+                "media",
+                f"媒体未回填 localType={t} local_id={msg.get('localId')} ts={ts} "
+                f"md5={(msg.get('md5') or '')[:8]} bm={(msg.get('bubbleMd5') or '')[:8]}",
+                ring=False)
         return
     if (t == 34) != ("/voice_" in mf):
         logger.detailed(
@@ -403,12 +525,18 @@ def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
 
 
 def _export_voice_media(acc_out_dir, account, chat, voices, dest, progress=None):
-    """导出语音媒体：优先 WAV，缺少解码器时保留 SILK。"""
+    """导出语音媒体：优先 WAV，缺少解码器时保留 SILK。
+
+    voices 各项为 (local_id, svr_id, ts, chat)：chat 缺省回落到当前导出
+    会话（顶层语音）；合并转发语音子项（P2-3）带原始消息所在会话。
+    """
     dest.mkdir(parents=True, exist_ok=True)
     media_map = {}
     failures = []
-    for i, (local_id, svr_id, ts) in enumerate(voices):
-        out, reason = _try_export_voice(acc_out_dir, chat, local_id, svr_id, ts,
+    for i, (local_id, svr_id, ts, *rest) in enumerate(voices):
+        vchat = rest[0] if rest else chat
+        out, reason = _try_export_voice(acc_out_dir, vchat or chat, local_id,
+                                        svr_id, ts,
                                         dest / f"voice_{i:04d}_{local_id or 'msg'}")
         if out:
             media_map[_voice_key(local_id, ts)] = f"media/{out.name}"
@@ -419,6 +547,109 @@ def _export_voice_media(acc_out_dir, account, chat, voices, dest, progress=None)
             progress(0, f"语音 {i + 1}/{len(voices)}")
     _log_media_failures("语音", failures, len(voices))
     return media_map
+
+
+def _account_msg_root(account: str):
+    """msg/video、msg/file 所在的账号数据根（复用 media_backup 的定位链路）。
+
+    失败返回 None——账号数据目录不存在（如纯解密产物目录）时视频/文件
+    附件按"全部缺失"计数，不阻塞导出。
+    """
+    try:
+        from siwx.media_backup import _account_root
+        return _account_root(account)
+    except Exception as e:  # noqa: BLE001 定位失败等同目录不存在
+        logger.detailed("export", f"账号数据目录定位失败: {type(e).__name__}: {e}")
+        return None
+
+
+def _export_video_media(account, videos, media_map, dest, progress=None):
+    """复制消息引用的视频附件（msg/video/**，明文 MP4 未加密）→ media/。
+
+    复用 media_backup 的原子复制链路（_atomic_copyfile：源文件只读，
+    copyfile 不拷元数据 + .part 原子落盘）。定位键 = 消息 XML <videomsg
+    md5=...> ↔ 磁盘文件名 <md5>.mp4（docs/media-decryption-principles.md
+    实测口径）。文件缺失（微信自动清理旧视频正文）按 skipped 计数留痕，
+    不阻塞导出。返回 {"requested", "ok", "skipped"}。
+    """
+    stats = {"requested": len(videos), "ok": 0, "skipped": 0}
+    if not videos:
+        return stats
+    dest.mkdir(parents=True, exist_ok=True)
+    root = _account_msg_root(account)
+    index = {}
+    if root is not None:
+        video_root = root / "msg" / "video"
+        if video_root.is_dir():
+            # 一次建索引：md5(stem) → 路径。逐条 rglob 在视频量大时是 O(n×m)
+            for f in video_root.rglob("*.mp4"):
+                index.setdefault(f.stem.lower(), f)
+    failures = []
+    for i, (md5, local_id, ts) in enumerate(videos):
+        src = index.get((md5 or "").lower())
+        if src is None:
+            stats["skipped"] += 1
+            failures.append((md5, local_id, ts,
+                             "视频文件未找到（可能已被微信自动清理）"))
+            continue
+        dst = dest / f"video_{i:04d}_{(md5 or 'vid')[:12]}.mp4"
+        try:
+            from siwx.media_backup import _atomic_copyfile
+            _atomic_copyfile(src, dst)
+        except Exception as e:  # noqa: BLE001 单文件失败不阻塞导出
+            stats["skipped"] += 1
+            failures.append((md5, local_id, ts, f"{type(e).__name__}: {e}"))
+            continue
+        stats["ok"] += 1
+        media_map[_video_key(local_id, ts)] = f"media/{dst.name}"
+        if (i + 1) % 50 == 0 and progress:
+            progress(0, f"视频 {i + 1}/{len(videos)}")
+    _log_media_failures("视频", failures, len(videos))
+    return stats
+
+
+def _export_file_media(account, file_refs, media_map, dest, progress=None):
+    """复制消息引用的文件附件（msg/file/**，未加密、原文件名原样保留）→ media/。
+
+    定位键 = 消息 XML <title>（文件名）↔ 磁盘文件名。文件消息无 md5 可与
+    磁盘对接，同名文件多消息引用时各复制一份（media_map 按 local_id+ts
+    区分）。缺失/复制失败按 skipped 计数留痕，不阻塞导出。
+    返回 {"requested", "ok", "skipped"}。
+    """
+    stats = {"requested": len(file_refs), "ok": 0, "skipped": 0}
+    if not file_refs:
+        return stats
+    dest.mkdir(parents=True, exist_ok=True)
+    root = _account_msg_root(account)
+    index = {}
+    if root is not None:
+        file_root = root / "msg" / "file"
+        if file_root.is_dir():
+            # 与 media_backup.backup_files 同口径：跳过 "." 开头的元数据文件
+            for f in file_root.rglob("*"):
+                if f.is_file() and not f.name.startswith("."):
+                    index.setdefault(f.name, f)
+    failures = []
+    for i, (title, local_id, ts) in enumerate(file_refs):
+        src = index.get(title) or index.get(_safe_name(title))
+        if src is None:
+            stats["skipped"] += 1
+            failures.append((title, local_id, ts, "附件文件未找到（可能已被清理或未下载）"))
+            continue
+        dst = dest / f"file_{i:04d}_{_safe_name(title) or 'file'}"
+        try:
+            from siwx.media_backup import _atomic_copyfile
+            _atomic_copyfile(src, dst)
+        except Exception as e:  # noqa: BLE001 单文件失败不阻塞导出
+            stats["skipped"] += 1
+            failures.append((title, local_id, ts, f"{type(e).__name__}: {e}"))
+            continue
+        stats["ok"] += 1
+        media_map[_file_key(local_id, ts)] = f"media/{dst.name}"
+        if (i + 1) % 50 == 0 and progress:
+            progress(0, f"文件 {i + 1}/{len(file_refs)}")
+    _log_media_failures("文件", failures, len(file_refs))
+    return stats
 
 
 def _try_export_voice(acc_dir, chat, local_id, svr_id, ts, dst_base):
@@ -572,7 +803,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
 
     # ── 第一遍：轻量采集元数据 ─────────────────────────────
     progress(3, "扫描消息元数据…")
-    count, first_ts, last_ts, senders, images, voices, stickers = _collect_metadata(
+    (count, first_ts, last_ts, senders, images, voices, stickers,
+     videos, file_refs, rec_subitems) = _collect_metadata(
         acc_out_dir, chat, start_ts, end_ts, account, names)
     # P2-1/P2-3：单遍逻辑条数——want_messages=False（仅元数据/媒体）时为 0。
     # 多格式导出的 message_count/manifest written_count 都用它，不按格式数累加。
@@ -581,7 +813,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
     logger.detailed(
         "export",
         f"扫描: msgs={count} images={len(images)} voices={len(voices)} "
-        f"stickers={len(stickers)} "
+        f"stickers={len(stickers)} videos={len(videos)} files={len(file_refs)} "
+        f"record_subitems={rec_subitems} "
         f"senders={len(senders)} range=[{first_ts},{last_ts}]")
 
     display = display or names.get(chat, chat) or chat
@@ -617,12 +850,16 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         stats_ava = len(avatar_map)
         progress(30, f"头像 {stats_ava}/{len(senders)}")
 
-    # ── 媒体（图片并行解密，语音优先转 WAV，表情 CDN 下载兜底）──────────
+    # ── 媒体（图片并行解密，语音优先转 WAV，表情 CDN 下载兜底；
+    #    视频/文件附件按未加密明文原子复制，P2-2）─────────────────────
     stats_media = 0
     stats_voice = 0
     stats_sticker = 0
+    video_stats = {"requested": 0, "ok": 0, "skipped": 0}
+    file_stats = {"requested": 0, "ok": 0, "skipped": 0}
     media_map = {}
-    if (want_media and (images or stickers)) or (want_voice and voices):
+    if (want_media and (images or stickers or videos or file_refs)) \
+            or (want_voice and voices):
         if should_cancel is not None and should_cancel():
             raise ExportCancelled("导出已取消")
         media_dest = export_dir / "media"
@@ -649,14 +886,32 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             progress(65, f"下载表情（{len(stickers)} 个）…")
             stats_sticker = _export_sticker_media(media_dest, stickers,
                                                   media_map, progress)
+        if want_media and videos:
+            if should_cancel is not None and should_cancel():
+                raise ExportCancelled("导出已取消")
+            progress(66, f"复制视频（{len(videos)} 个）…")
+            video_stats = _export_video_media(account, videos, media_map,
+                                              media_dest, progress)
+        if want_media and file_refs:
+            if should_cancel is not None and should_cancel():
+                raise ExportCancelled("导出已取消")
+            progress(68, f"复制文件附件（{len(file_refs)} 个）…")
+            file_stats = _export_file_media(account, file_refs, media_map,
+                                            media_dest, progress)
         progress(70, f"媒体处理完成: 图片 {stats_media}/{img_total}，"
                      f"语音 {stats_voice}/{voice_total}，"
-                     f"表情 {stats_sticker}/{len(stickers) if want_media else 0}")
+                     f"表情 {stats_sticker}/{len(stickers) if want_media else 0}，"
+                     f"视频 {video_stats['ok']}/{video_stats['requested']}，"
+                     f"文件 {file_stats['ok']}/{file_stats['requested']}")
         logger.detailed(
             "export",
             f"媒体完成 img={stats_media}/{img_total} "
             f"voice={stats_voice}/{voice_total} "
-            f"sticker={stats_sticker}/{len(stickers) if want_media else 0}")
+            f"sticker={stats_sticker}/{len(stickers) if want_media else 0} "
+            f"video={video_stats['ok']}/{video_stats['requested']}"
+            f"(skip={video_stats['skipped']}) "
+            f"file={file_stats['ok']}/{file_stats['requested']}"
+            f"(skip={file_stats['skipped']})")
 
     # ── 第二遍：流式写出（fmt 可传列表，一次写出多种格式）──
     # 扫描/头像/媒体只做一次；每种格式各自重放 message_stream（DB 重查
@@ -765,6 +1020,20 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
             "voices_ok": stats_voice,
             "stickers_requested": len(stickers) if want_media else 0,
             "stickers_ok": stats_sticker,
+            # P2-2：视频/文件附件（msg/video、msg/file，明文未加密直接复制）。
+            # skipped = 文件缺失（微信自动清理/未下载）+ 复制失败，不阻塞导出
+            "videos_requested": video_stats["requested"] if want_media else 0,
+            "videos_ok": video_stats["ok"],
+            "videos_skipped": video_stats["skipped"] if want_media else 0,
+            "files_requested": file_stats["requested"] if want_media else 0,
+            "files_ok": file_stats["ok"],
+            "files_skipped": file_stats["skipped"] if want_media else 0,
+            # P2-3：合并转发子项里的语音/视频/文件计数留痕。语音子项已随
+            # want_voice 导出（计入 voices_requested/ok）；视频/文件子项
+            # 暂不在导出范围（原文件无稳定 md5 定位键），仅计数
+            "record_subitem_voices": rec_subitems["voice"],
+            "record_subitem_videos": rec_subitems["video"],
+            "record_subitem_files": rec_subitems["file"],
         },
         "avatar_count": stats_ava,
     }
@@ -833,6 +1102,8 @@ def run_export(acc_out_dir: Path, account: str, chat: str, display: str,
         "truncated": truncated_by_fmt,
         "media_count": stats_media + stats_voice,
         "image_count": stats_media, "voice_count": stats_voice,
+        "video_count": video_stats["ok"],
+        "file_count": file_stats["ok"],
         "avatar_count": stats_ava,
         "duration_ms": int((time.time() - t0) * 1000),
     }

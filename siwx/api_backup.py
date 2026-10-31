@@ -182,9 +182,15 @@ def start():
 
 @bp.get("/status")
 def status():
-    """任务状态（前端轮询）：progress/msg/logs/result。"""
+    """任务状态（前端轮询）：progress/msg/logs/result。
+
+    P2-8：logs 出口统一过 desensitize_msg（与 /api/logs 同口径）——备份日志
+    含账号目录绝对路径与 wxid，`--trust-lan` 下原样返回即局域网可读。
+    缓冲区保留原文，重建列表返回不污染底层条目。"""
     with _lock:
-        return jsonify(_job)
+        return jsonify({**_job,
+                        "logs": [_log.desensitize_msg(str(m))
+                                 for m in _job["logs"]]})
 
 
 # ── 恢复：analyze（解包暂存 + 只读 diff）→ apply（独立任务槽）────
@@ -341,5 +347,8 @@ def restore_apply():
 
 @bp.get("/restore/status")
 def restore_status():
+    """P2-8：logs 出口脱敏，口径同 /status 与 /api/logs。"""
     with _restore_lock:
-        return jsonify(_restore_job)
+        return jsonify({**_restore_job,
+                        "logs": [_log.desensitize_msg(str(m))
+                                 for m in _restore_job["logs"]]})
