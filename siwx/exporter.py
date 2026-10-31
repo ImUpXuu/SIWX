@@ -379,11 +379,15 @@ def _try_decrypt(acc_dir, account, chat, md5, bubble_md5, local_id, ts, dst):
     "未找到源文件或解密为空"——否则"没这个文件"与"有文件解不开"分不清。
     """
     try:
+        # hq=True：导出永远取本地可用的最优版本——attach 目录里显示版与
+        # _h 高清原图并存时（实测中位 38KB vs 437KB），默认排序取显示版，
+        # 导出件全是糊图（issue #34）
         body, info = media.get_image(account, md5, Path(acc_dir),
                                      chat=chat or None,
                                      local_id=local_id or None,
                                      ts=ts or None,
-                                     bubble_md5=bubble_md5 or None)
+                                     bubble_md5=bubble_md5 or None,
+                                     hq=True)
         if body:
             # PR #28 同族缺陷：按子串猜扩展名会把 WebP 写成 .jpg。
             # info 是 mimetype（media._emit 产出 image/<ext>），直接取子类型；
