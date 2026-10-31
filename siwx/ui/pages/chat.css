@@ -181,6 +181,10 @@
 .m-record-nested .m-record-inner .m-record { max-width: none; margin: 4px 0 0; }
 .m-img { max-width: min(220px, 62vw); max-height: 300px; border-radius: var(--radius-sm); display: block; cursor: zoom-in; border: 1px solid var(--line); }
 .m-retry { font-size: 12px; color: var(--text); cursor: pointer; text-decoration: underline; }
+/* issue #34：缩略图角标 */
+.m-img-badge { font-size: 11px; color: var(--muted); background: var(--card-alt);
+  border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px;
+  margin-top: 3px; align-self: flex-start; max-width: 100%; }
 .m-sticker-text { font-size: 12px; color: var(--muted); }
 .m-finder { max-width: min(280px, 68vw); border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--panel, transparent); }
 .m-finder-cover { position: relative; display: block; background: #000; min-height: 60px; }
