@@ -52,6 +52,8 @@ ALLOW_WXID = {
 ALLOW_CHATROOM = {"123456789@chatroom", "111111@chatroom", "123456@chatroom"}
 ALLOW_PHONE = {"13800138000", "13900000000"}
 ALLOW_HEX64 = {
+    # Public ImUpXuu/SIWX v5.2.0 Windows Release asset digest (2026-10-31).
+    "dcecef343256f8d5c7335da82ea6a0311a0b1b2261a8a7dc763ba7bb7fba8dc6",
     "00112233445566778899aabbccddeeff1032547698badcfe0123456789abcdef",
     "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
     "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",

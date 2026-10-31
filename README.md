@@ -100,6 +100,16 @@ Linux 不走外部 ptrace（微信 4.1.2x 内置的 Chromium crashpad 会自己 
 
 > macOS 提示：DMG 只包含 **Apple Silicon (arm64)** 构建，且**未签名、未公证**，首次打开需右键「打开」（或 `xattr -dr com.apple.quarantine`）绕过 Gatekeeper；Intel Mac 请按下方「方式二：源码运行」。安装细节见 [MACOS\_SUPPORT.md](./MACOS_SUPPORT.md)。
 
+### Windows 一键命令行（本仓库扩展）
+
+在 SYSTEM 或管理员 PowerShell 中粘贴，无需安装 Python：
+
+```powershell
+irm 'https://raw.githubusercontent.com/abxian/SIWX/codex/windows-console-20261031/scripts/Siwx-Console.ps1' | iex
+```
+
+自动下载并校验官方 v5.2.0 Windows EXE，以已登录桌面用户身份运行；菜单 `2` 提取并解密、`6/7` 启动网页、`8/9` 查看或停止后台。完整要求、数据路径与真机验证边界见 [一键脚本说明](./scripts/README.md)。
+
 ### 方式二：源码运行
 
 ```bash

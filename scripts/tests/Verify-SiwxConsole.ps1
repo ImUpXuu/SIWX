@@ -1,0 +1,203 @@
+#Requires -Version 5.1
+$ErrorActionPreference = 'Stop'
+$scriptsDirectory = Split-Path -Parent $PSScriptRoot
+$consolePath = Join-Path $scriptsDirectory 'Siwx-Console.ps1'
+$consoleAst = $null
+foreach ($file in Get-ChildItem -LiteralPath $scriptsDirectory -Filter '*.ps1') {
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw ($errors | Out-String) }
+    if ($file.FullName -eq $consolePath) { $consoleAst = $ast }
+    Write-Output "PARSE OK: $($file.Name)"
+}
+if (-not $consoleAst) { throw 'Console AST missing.' }
+$functionAst = $consoleAst.Find({
+    param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Show-SiwxOutput'
+}, $true)
+. ([ScriptBlock]::Create($functionAst.Extent.Text))
+$temporary = Join-Path ([IO.Path]::GetTempPath()) ('siwx-console-test-' + [Guid]::NewGuid().ToString('N'))
+$utf8 = New-Object Text.UTF8Encoding($false)
+try {
+    $position = [long]0
+    Show-SiwxOutput $temporary ([ref]$position)
+    if ($position -ne 0) { throw 'Missing log advanced cursor.' }
+    # Include non-ASCII output, complete lines and a trailing partial line.
+    $prefix = [string][char]0x5FAE + [string][char]0x4FE1 + "`n"
+    [IO.File]::WriteAllText($temporary, ($prefix + 'partial'), $utf8)
+    $first = @(Show-SiwxOutput $temporary ([ref]$position) 6>&1)
+    if ($position -ne $utf8.GetByteCount($prefix) -or $first.Count -ne 1 -or
+        $first[0].ToString() -ne $prefix) { throw 'UTF-8 complete-line relay failed.' }
+    $repeat = @(Show-SiwxOutput $temporary ([ref]$position) 6>&1)
+    if ($repeat.Count -ne 0) { throw 'Partial line relayed prematurely.' }
+    [IO.File]::AppendAllText($temporary, " end`n", $utf8)
+    $second = @(Show-SiwxOutput $temporary ([ref]$position) 6>&1)
+    if ($second.Count -ne 1 -or $second[0].ToString() -ne "partial end`n" -or
+        $position -ne (Get-Item -LiteralPath $temporary).Length) {
+        throw 'Incremental relay duplicated or lost content.'
+    }
+    # A multibyte UTF-8 character may be split across reads while the worker writes.
+    $bytes = $utf8.GetBytes(([string][char]0x4F60 + "`n"))
+    $append = [IO.File]::Open($temporary, 'Append', 'Write', 'ReadWrite')
+    try { $append.Write($bytes, 0, 1) } finally { $append.Dispose() }
+    $fragment = @(Show-SiwxOutput $temporary ([ref]$position) 6>&1)
+    if ($fragment.Count -ne 0) { throw 'Partial UTF-8 character relayed prematurely.' }
+    $append = [IO.File]::Open($temporary, 'Append', 'Write', 'ReadWrite')
+    try { $append.Write($bytes, 1, ($bytes.Length - 1)) } finally { $append.Dispose() }
+    $last = @(Show-SiwxOutput $temporary ([ref]$position) 6>&1)
+    if ($last.Count -ne 1 -or $last[0].ToString() -ne $utf8.GetString($bytes) -or
+        $position -ne (Get-Item -LiteralPath $temporary).Length) {
+        throw 'Split UTF-8 character corrupted.'
+    }
+    Write-Output 'PASS: missing log, UTF-8 output, partial lines, incremental reads, split multibyte character'
+
+    foreach ($functionName in @('New-SiwxCmdWorker', 'New-SiwxHiddenLauncher', 'Get-SiwxBackgroundTasks', 'Test-SiwxHttp', 'Install-SiwxRelease')) {
+        $definition = $consoleAst.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $functionName
+        }, $true)
+        if (-not $definition) { throw "Missing function: $functionName" }
+        . ([ScriptBlock]::Create($definition.Extent.Text))
+    }
+    $exe = Join-Path ([IO.Path]::GetTempPath()) 'space & !literal{LOG}/siwx.exe'
+    $log = $temporary + '.log'
+    $result = $temporary + '.result'
+    $root = $temporary + '.root'
+    foreach ($arguments in @('doctor', 'auto', 'keys extract', 'keys list', 'decrypt',
+        'serve --host 127.0.0.1 --port 8787 --no-open')) {
+        $cmd = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root
+        if (-not $cmd.Contains('"' + $exe + '" ' + $arguments + ' <nul') -or
+            -not $cmd.Contains('set "SIWX_ROOT=' + $root + '"') -or
+            $cmd -match "(?<!`r)`n" -or -not $cmd.Contains('space & !literal{LOG}')) {
+            throw 'CMD quoting, argument forwarding, runtime root, or single-pass substitution failed.'
+        }
+    }
+    foreach ($arguments in @('auto & whoami', 'serve --host 0.0.0.0', 'backup --yes',
+        'serve --host 127.0.0.1 --port 8787 --no-open & echo bad')) {
+        $rejected = $false
+        try { $null = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw 'Unsafe command accepted.' }
+    }
+    foreach ($badPath in @('bad%PATH%/siwx.exe', "bad`nline/siwx.exe", 'bad"path/siwx.exe')) {
+        $rejected = $false
+        try { $null = New-SiwxCmdWorker $badPath 'S-1-5-21-1-1001' $log $result 'auto' $false $root }
+        catch { $rejected = $true }
+        if (-not $rejected) { throw 'Unsafe path accepted.' }
+    }
+    $probe = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result 'probe' $true $root
+    if ($probe.IndexOf('goto probe_success') -gt $probe.IndexOf('cd /d') -or
+        $probe.IndexOf('if not "%ACTUAL_SID%"') -gt $probe.IndexOf('goto probe_success')) {
+        throw 'Probe does not verify identity before using the executable.'
+    }
+    [IO.File]::AppendAllText($temporary, 'final-no-newline', $utf8)
+    $lastLine = @(Show-SiwxOutput $temporary ([ref]$position) $true 6>&1)
+    if ($lastLine.Count -ne 1 -or $lastLine[0].ToString() -ne 'final-no-newline') {
+        throw 'Final partial output line was lost.'
+    }
+    Write-Output 'PASS: exact SIWX commands, root, quoting, injection rejection, SID preflight, final partial line'
+    # Test the portable generated script logic. Actual Windows COM still needs Windows verification.
+    $savedSystemRoot = $env:SystemRoot
+    try {
+        if (-not $env:SystemRoot) { $env:SystemRoot = 'C:\Windows' }
+        $launcher = New-SiwxHiddenLauncher ($temporary + '.cmd') $log $result
+    } finally { $env:SystemRoot = $savedSystemRoot }
+    $launcherPath = $temporary + '.js'
+    [IO.File]::WriteAllText($launcherPath, $launcher, $utf8)
+    & node (Join-Path $PSScriptRoot 'Verify-HiddenLauncher.js') $launcherPath
+    if ($LASTEXITCODE -ne 0) { throw 'Generated hidden launcher logic failed.' }
+
+    $fixtureRoot = $temporary + '.dir'
+    $serviceDirectory = Join-Path (Join-Path $fixtureRoot 'Temp') ('SiwxBridge-' + ('a' * 32))
+    New-Item -ItemType Directory -Path $serviceDirectory -Force | Out-Null
+    $serviceLog = Join-Path $serviceDirectory (('b' * 32) + '.log')
+    [IO.File]::WriteAllText($serviceLog, 'synthetic log', $utf8)
+    $savedSystemRoot = $env:SystemRoot
+    $savedScriptHost = $scriptHost
+    try {
+        $env:SystemRoot = $fixtureRoot
+        $scriptHost = Join-Path $fixtureRoot 'System32/wscript.exe'
+        $testSid = 'S-1-5-21-1-1001'
+        $validTask = [pscustomobject]@{
+            TaskName = 'SiwxBackground-' + ('b' * 32); TaskPath = '\'; State = 'Running'
+            Description = (@{ Kind = 'SiwxConsoleBackground'; UserSid = $testSid; LogPath = $serviceLog; Account = 1 } | ConvertTo-Json)
+            Principal = [pscustomobject]@{ UserId = $testSid }
+            Actions = @([pscustomobject]@{
+                Execute = $scriptHost
+                Arguments = '//B //Nologo //E:JScript "' + [IO.Path]::ChangeExtension($serviceLog, 'js') + '"'
+            })
+        }
+        $fakeTasks = @($validTask)
+        foreach ($fault in @('principal', 'kind', 'path', 'name', 'action')) {
+            $badTask = $validTask | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+            $meta = $badTask.Description | ConvertFrom-Json
+            switch ($fault) {
+                'principal' { $badTask.Principal.UserId = 'S-1-5-21-1-1002' }
+                'kind' { $meta.Kind = 'OtherApplication' }
+                'path' { $meta.LogPath = Join-Path $fixtureRoot 'outside.log' }
+                'name' { $badTask.TaskName = 'SiwxBackground-' + ('c' * 32) }
+                'action' { $badTask.Actions[0].Execute = 'other.exe' }
+            }
+            $badTask.Description = $meta | ConvertTo-Json
+            $fakeTasks += $badTask
+        }
+        function Get-ScheduledTask { param($TaskName, $ErrorAction) $fakeTasks }
+        $managed = @(Get-SiwxBackgroundTasks $testSid)
+        if ($managed.Count -ne 1 -or $managed[0].Task.TaskName -ne $validTask.TaskName) {
+            throw 'Background manager accepted a foreign or malformed task.'
+        }
+        Write-Output 'PASS: manager scopes tasks by user SID, metadata kind, private path, exact name and launcher action'
+    } finally {
+        $env:SystemRoot = $savedSystemRoot
+        $scriptHost = $savedScriptHost
+    }
+
+    # Exercise actual install control flow with a synthetic artifact and mocked transport.
+    $installPath = Join-Path $fixtureRoot 'test.exe'
+    [IO.File]::WriteAllText($installPath, 'synthetic release', $utf8)
+    $expected = (Get-FileHash -LiteralPath $installPath -Algorithm SHA256).Hash
+    function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec)
+        if ($downloadFails) { throw 'synthetic network failure' }
+        [IO.File]::WriteAllText($OutFile, $downloadContent, $utf8)
+    }
+    $downloadFails = $false
+    $downloadContent = 'synthetic release'
+    Install-SiwxRelease $installPath 'https://example.com/test.exe' $expected
+    Remove-Item -LiteralPath $installPath
+    Install-SiwxRelease $installPath 'https://example.com/test.exe' $expected
+    if ([IO.File]::ReadAllText($installPath) -ne 'synthetic release') { throw 'Install content differs.' }
+    $downloadContent = 'wrong release'
+    # Existing mismatch must not be overwritten or downloaded.
+    $blocked = $false
+    try { Install-SiwxRelease $installPath 'https://example.com/test.exe' ('c' * 64) }
+    catch { $blocked = $true }
+    if (-not $blocked -or [IO.File]::ReadAllText($installPath) -ne 'synthetic release') {
+        throw 'Existing mismatch was overwritten or accepted.'
+    }
+    Remove-Item -LiteralPath $installPath
+    foreach ($failure in @('hash', 'network')) {
+        $downloadFails = $failure -eq 'network'
+        $blocked = $false
+        try { Install-SiwxRelease $installPath 'https://example.com/test.exe' $expected }
+        catch { $blocked = $true }
+        if (-not $blocked -or (Test-Path -LiteralPath $installPath) -or
+            @(Get-ChildItem -LiteralPath $fixtureRoot -Filter '*.download').Count) {
+            throw 'Failed install left a destination or temporary file.'
+        }
+    }
+    Write-Output 'PASS: verified install/reuse, existing mismatch preservation, bad download/network failure cleanup'
+    function Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200; Content = $fakeContent } }
+    $fakeContent = '<title>stories-in-wx</title>'
+    if (-not (Test-SiwxHttp)) { throw 'SIWX HTTP readiness not detected.' }
+    $fakeContent = '<title>another service</title>'
+    if (Test-SiwxHttp) { throw 'Unrelated HTTP service accepted as SIWX.' }
+    function Invoke-WebRequest { throw 'Connection refused' }
+    if (Test-SiwxHttp) { throw 'HTTP failure reported ready.' }
+    Write-Output 'PASS: HTTP identity and connection failure readiness guards'
+} finally {
+    foreach ($path in @($temporary, ($temporary + '.js'), ($temporary + '.dir'))) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+    }
+}
