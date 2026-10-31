@@ -6,7 +6,7 @@
 irm 'https://raw.githubusercontent.com/abxian/SIWX/codex/windows-console-20261031/scripts/Siwx-Console.ps1' | iex
 ```
 
-无需 Git、Python 或手动安装依赖。脚本首次从 **ImUpXuu/SIWX 的 v5.2.0 官方 Release** 下载约 19 MB 的 Windows x64 EXE，按固定公开 SHA-256 校验，已有文件也校验；不匹配时停止并保留原文件，不自动覆盖。运行的是发布版 v5.2.0，并非本分支源码重新打包。下载需要 GitHub 可达；失败不改用其他来源、不降低 TLS 校验。
+无需 Git、Python 或手动安装依赖。脚本首次从指定 Dufs 下载 **ImUpXuu/SIWX v5.2.0 官方 Release 的原件副本**（约 19 MB Windows x64 EXE），按固定公开 SHA-256 校验，已有文件也校验；不匹配时停止并保留原文件，不自动覆盖。运行的是发布版 v5.2.0，并非本分支源码重新打包。下载需指定 Dufs 可达；失败不改用其他来源。
 
 1. 确认目标 Windows 用户（回车使用检测到的桌面用户）。该用户需要保持登录，且只有一个 Explorer 桌面会话；微信 4.x 应在该用户会话内运行并登录。
 2. 自动完成下载校验、用户身份自检、环境检查后进入菜单。
@@ -58,3 +58,17 @@ pwsh -NoProfile -File scripts/tests/Verify-SiwxConsole.ps1
 PowerShell 源文件保持 ASCII，中文以 Unicode 转义存储，由脚本内 `ConvertFrom-ConsoleText` 解码，兼容旧版 Windows PowerShell 5.1 的本地文件及 `irm | iex` 编码路径，无需调整系统语言或执行策略。修改文案时沿用此编码方式。测试新增真实菜单字串的中文解码和入口 ASCII 校验，并复验既有用户会话/命令参数/日志/后台管理用例。验证环境为 macOS PowerShell 7.6.9，Windows 5.1 真机仍待验证。
 
 GitHub 一键入口使用原分支地址，重新运行会获取新版；已运行的控制台需退出后重新执行入口命令。自托管复制的脚本不会自动更新，需同步相应文件。回滚可恢复本次提交前的脚本，诊断及聊天数据目录无需修改。
+
+## Dufs 一键分发（2026-10-31，任务 307）
+
+用户指定的无密码 Dufs 为 `http://139.196.47.109:9939/AAAAAAAA/`，本轮使用以下入口：
+
+```powershell
+irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn307' | iex
+```
+
+SIWX 的脚本与 EXE 为 `siwx.ps1` / `siwx.exe`；脚本直接从该 Dufs 下载固定官方 v5.2.0 EXE，仍核对官方 SHA-256，不依赖 GitHub 下载运行环境。wx 的脚本为 `wx.ps1`（`1wx.ps1` 同内容兼容入口），EXE 为 `wx.exe`（`wexport.exe` 同原件）；本轮复用既有 EXE，不宣称重新编译。另同步原文件名的脚本及 wx 配套下载器/用户启动器。HTTP 沿用用户指定服务，SIWX 固定摘要只校验 EXE 字节，不等于 HTTP 脚本具发布者认证。
+
+发布工具与恢复证据在本地工作区 `ops/dufs307-20261031/`：`publish-dufs.py prepare` 完整备份现网目标；`publish` 先核未漂移，EXE先行、临时 PUT/完整GET校验/MOVE覆盖/再次全文GET；`rollback` 仅回退仍匹配本轮发布内容的目标，拒绝覆盖后续改动。`before.json` / `before/` 是原件，`manifest.json` / `verified.json` 为最终大小及 SHA-256；目录仅本机授权用户可访问，不入 Git。本地备份前约122GB空闲；旧工具备份约20MB且为明确回退点，全保留不裁剪。远端容量无法通过现有API读取，约20MB有界新增以暂存上传成功为门禁，不清理其他文件。
+
+发布验收以最终 `verified.json` 与 Trilium 实际记录为准：源代码推送、Dufs文件发布、Windows真机提取/后台运行是独立状态。Windows真机仍待设备测试。后续替换 EXE 要同步固定摘要和版本；只改菜单无需重编译 EXE。恢复时优先使用同一工具精确恢复原字节，不批量覆盖目录。

