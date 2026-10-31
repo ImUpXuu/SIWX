@@ -1,7 +1,7 @@
 {
   "version": "5.3.0",
-  "date": "2026-10-31 22:45:44",
-  "notes": "## 发版前审计修复与导出增强\n\n> 无破坏性变更，无需迁移。全量测试 859 通过 / 9 跳过。\n\n### 安全\n\n- 更新链加固：哈希与产物仅从 GitHub 权威源拉取并强制 https，第三方反代仅用于版本号检查（代理投毒不再可达代码执行）\n- 恢复链加固：stage_id 白名单校验、manifest account 落点断言，杜绝越目录写入\n- 朋友圈卡片链接 scheme 白名单（Web 界面与 HTML/Markdown 导出三处同口径）\n- /api/job 等任务日志出口统一脱敏；Linux 钩子临时日志收紧为 0600 随机路径、读毕即删\n\n### 功能\n\n- 导出包纳入视频与文件附件，合并转发语音子项可导出（manifest 计数留痕）\n- 修复备份页「杀微信」两段式确认死循环：微信运行时备份/恢复可正常走完\n- 修复 server_id=0/NULL 消息在备份与恢复去重时被静默丢失\n- 缩略图角标：本机无高清原图的图片明示提示（issue #34）\n\n### 性能与工程\n\n- 聊天图片缓存加 128MB 字节预算 LRU；大会话搜索超预算分片降级为文本列缓存，不再每次全量重解码\n- CI 接线隐私红线扫描与版本一致性校验；发版脚本兼容 Windows GBK 控制台\n- 命令行新增 backup 子命令文档；手动更新脚本补官方 raw 兜底",
+  "date": "2026-10-31 15:04:20",
+  "notes": "# v5.3.0 发版前审计修复与导出增强\n\n> 无破坏性变更，无需迁移。全量测试 859 通过 / 9 跳过。\n\n## 安全\n\n- 更新链加固：哈希与产物仅从 GitHub 权威源拉取并强制 https，第三方反代仅用于版本号检查（代理投毒不再可达代码执行）\n- 恢复链加固：stage_id 白名单校验、manifest account 落点断言，杜绝越目录写入\n- 朋友圈卡片链接 scheme 白名单（Web 界面与 HTML/Markdown 导出三处同口径）\n- /api/job 等任务日志出口统一脱敏；Linux 钩子临时日志收紧为 0600 随机路径、读毕即删\n\n## 功能\n\n- 导出包纳入视频与文件附件，合并转发语音子项可导出（manifest 计数留痕）\n- 修复备份页「杀微信」两段式确认死循环：微信运行时备份/恢复可正常走完\n- 修复 server_id=0/NULL 消息在备份与恢复去重时被静默丢失\n- 缩略图角标：本机无高清原图的图片明示提示（issue #34）\n\n## 性能与工程\n\n- 聊天图片缓存加 128MB 字节预算 LRU；大会话搜索超预算分片降级为文本列缓存，不再每次全量重解码\n- CI 接线隐私红线扫描与版本一致性校验；发版脚本兼容 Windows GBK 控制台\n- 命令行新增 backup 子命令文档；手动更新脚本补官方 raw 兜底\n- mcp.js 轮询销毁竞态守卫；备份页轮询失败阈值；KNOWN_LIMITATIONS 同步 v5.2.0 能力边界",
   "assets": {
     "windows": "https://github.com/ImUpXuu/SIWX/releases/download/v5.3.0/stories-in-wx-v5.3.0-windows-x64.exe",
     "macos_dmg": "https://github.com/ImUpXuu/SIWX/releases/download/v5.3.0/stories-in-wx-v5.3.0-macos.dmg"
