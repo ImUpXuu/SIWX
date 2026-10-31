@@ -232,6 +232,19 @@ async function init() {
       SX.imgFallback(img, img.dataset.retry);
     }
   }, true);
+  // issue #34：缩略图标识。本机没有 _h 高清、只有 _t 缩略图的图（微信里从未
+  // 点开过原图），加载完成后加角标提示——长边 ≤320px 是缩略图区间（实测
+  // _t 约 120-260px，显示版一般 ≥600px）。load 不冒泡，与 error 同走捕获。
+  el('c-msgs').addEventListener('load', (ev) => {
+    const img = ev.target.closest('.m-img');
+    if (!img || img.dataset.badged) return;
+    if (!(img.naturalWidth > 0 && img.naturalWidth <= 320)) return;
+    img.dataset.badged = '1';
+    const badge = document.createElement('span');
+    badge.className = 'm-img-badge';
+    badge.textContent = '缩略图 · 在微信中点开原图后重新导出可得高清';
+    (img.closest('.m-bubble') || img.parentElement)?.appendChild(badge);
+  }, true);
   el('c-msgs').addEventListener('contextmenu', (ev) => {
     if (!selectionMode) return;
     const row = ev.target.closest('.m-row[data-key]');
