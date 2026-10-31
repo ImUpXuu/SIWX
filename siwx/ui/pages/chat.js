@@ -960,11 +960,14 @@ function bubble(m) {
             `<audio controls preload="none" src="${wav}"></audio>` +
             `<a href="${silk}" download="voice_${m.id || 'msg'}.silk">下载 SILK</a></div>`;
   } else if (m.kind === 'image') {
+    // hq=1：本地有 _h 高清原图时直接取高清（issue #34）。此前聊天页按默认
+    // 排序取"聊天显示版"（实测中位 38KB vs 高清 437KB），画面发糊；本地
+    // 回环无带宽代价，浏览器按气泡宽度缩放显示
     const src = `/api/chat/media/image?account=${encodeURIComponent(account)}` +
                 (m.md5 ? `&md5=${encodeURIComponent(m.md5)}` : '') +
                 (m.bubble_md5 ? `&bubble_md5=${encodeURIComponent(m.bubble_md5)}` : '') +
                 `&chat=${encodeURIComponent(currentChat.username)}` +
-                `&local_id=${m.id || 0}&ts=${m.ts || 0}`;
+                `&local_id=${m.id || 0}&ts=${m.ts || 0}&hq=1`;
     // 失败重试由捕获级 error 委托接管，重试 URL 放 data-retry（不带 r 参数，
     // imgFallback 会自行拼缓存穿透参数）；点击查看大图由 click 委托处理
     inner = `<img class="m-img" loading="lazy" src="${src}" alt="图片" data-retry="${esc(src)}">`;

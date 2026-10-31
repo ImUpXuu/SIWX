@@ -1,6 +1,6 @@
 # stories-in-wx 文档中心
 
-> **版本**: v5.1.1 | **日期**: 2026-10-25 | **平台**: Windows / macOS / Linux (依赖 DPAPI / 微信进程读取 / LLDB / INT3 进程内钩子)
+> **版本**: v5.2.0 | **日期**: 2026-10-31 | **平台**: Windows / macOS / Linux (依赖 DPAPI / 微信进程读取 / LLDB / INT3 进程内钩子)
 
 ## 一句话定位
 

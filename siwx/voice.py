@@ -332,10 +332,16 @@ def _chat_id(conn, chat: str):
 def _candidate_queries(chat_id, local_id, svr_id, ts):
     """按可信度生成 VoiceInfo 查询条件。
 
-    带 chat_name_id 的查询优先。**只有在无法确定会话**（chat_id is None）时
-    才退到不带会话约束的查询：真实库 VoiceInfo 实测 40708 行只有 3556 个不同
-    local_id（平均 ~11 行共用一个值），裸 local_id=? 会捞到别的会话的语音，
-    而 get_voice 首个命中即返回 —— 跨会话音频泄漏（导出件是要外发的）。
+    带 chat_name_id 的查询优先。**会话未知（chat_id is None）时只信
+    svr_id**——它是服务端消息 id，全局唯一，跨会话命中即正确。
+
+    此前会话未知时还降级到 ``local_id=? AND create_time=?`` 与裸
+    ``local_id=?``：VoiceInfo 的 local_id 是**每会话独立编号**（真实库实测
+    同一分片就有 43 个 local_id 被多个会话共用），且 get_voice 首个命中即
+    返回——某会话在某个 media 分片的 Name2Id 里缺席时（它的语音都在别的
+    分片，本分片没有它的任何媒体），本分片的裸查询会先撞上别的会话同号
+    语音并直接返回，正确的那条永远轮不到。这正是 issue #40「别人的语音
+    出现在特定好友聊天里」的根因。宁可诚实未命中，不能串音。
     """
     if chat_id is not None:
         if svr_id:
@@ -345,13 +351,8 @@ def _candidate_queries(chat_id, local_id, svr_id, ts):
         if local_id:
             yield "chat_name_id=? AND local_id=?", (chat_id, local_id)
         return
-    # 会话未知（Name2Id 查不到）：只能按消息自身标识兜底，命中结果不作会话校验
     if svr_id:
         yield "svr_id=?", (svr_id,)
-    if local_id and ts:
-        yield "local_id=? AND create_time=?", (local_id, ts)
-    if local_id:
-        yield "local_id=?", (local_id,)
 
 
 def get_voice(acc_dir: Path, chat: str = "", local_id: int = 0,
