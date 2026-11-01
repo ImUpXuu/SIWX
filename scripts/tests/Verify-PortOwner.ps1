@@ -75,3 +75,57 @@ Reset-Fixture
 $script:listeners=@()
 if(-not (Stop-SiwxPortOwner $exe $sid $sessionId) -or $script:killed.Count){throw 'Empty port changed processes'}
 Write-Output 'PASS: exact path/name/SID/session/command/create-time identity; PID reuse; parent-first cleanup; mixed/foreign listeners refused; all-handles-before-stop; orphan/no-listener cases'
+# Dynamic ports retain exact command validation, including fallback-port parents.
+$dynamic=New-Fixture;$dynamic.Command=$dynamic.Command.Replace('8787','8789')
+if(-not (Test-SiwxProcessRecord $dynamic $exe $sid $sessionId 8789) -or
+    (Test-SiwxProcessRecord $dynamic $exe $sid $sessionId 8788)){throw 'Port identity mismatch accepted'}
+Reset-Fixture
+$script:child.Command=$script:child.Command.Replace('8787','8789')
+$script:parent.Command=$script:parent.Command.Replace('8787','8789')
+if(-not (Stop-SiwxPortOwner $exe $sid $sessionId 8789) -or ($script:killed -join ',') -ne '100,101'){
+    throw 'Fallback port cleanup failed'
+}
+foreach($name in @('Test-SiwxPort','Select-SiwxPort')){
+    $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
+    . ([ScriptBlock]::Create($node.Extent.Text))
+}
+# Exercise real socket bind detection without Windows process APIs.
+$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+try {
+    # Find an available port within the launcher's bounded range.
+    $freePort=0
+    foreach($candidate in 8787..8887){if(-not (Test-SiwxPort $candidate)){$freePort=$candidate;break}}
+    if(-not $freePort){throw 'Test environment has no free fixture port'}
+    $socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $freePort)
+    $socket.Start()
+    if(-not (Test-SiwxPort $freePort)){throw 'Real bound port undetected'}
+} finally {$socket.Stop()}
+if(Test-SiwxPort $freePort){throw 'Released port detected as occupied'}
+function Reset-PortSelection {
+    $script:busy=@{}
+    $script:owned=@{}
+    $script:attempted=New-Object 'Collections.Generic.List[int]'
+}
+function Test-SiwxPort {param($Port=8787) [bool]$script:busy[[int]$Port]}
+function Stop-SiwxPortOwner {param($ExePath,$UserSid,$SessionId,$Port=8787)
+    $script:attempted.Add([int]$Port)
+    if($script:owned[[int]$Port]){$script:busy[[int]$Port]=$false;return $true}
+    return $false
+}
+Reset-PortSelection
+if((Select-SiwxPort $exe $sid $sessionId) -ne 8787 -or $script:attempted.Count){throw 'Free default changed processes'}
+Reset-PortSelection
+$script:busy[8787]=$true;$script:owned[8787]=$true
+if((Select-SiwxPort $exe $sid $sessionId) -ne 8787 -or ($script:attempted -join ',') -ne '8787'){throw 'Owned default not restarted'}
+Reset-PortSelection
+$script:busy[8787]=$true;$script:busy[8788]=$true
+if((Select-SiwxPort $exe $sid $sessionId) -ne 8789 -or ($script:attempted -join ',') -ne '8787,8788'){throw 'Foreign occupancy fallback failed'}
+Reset-PortSelection
+$script:busy[8789]=$true;$script:owned[8789]=$true
+if((Select-SiwxPort $exe $sid $sessionId 8789) -ne 8789 -or ($script:attempted -join ',') -ne '8789'){throw 'Existing managed port not preferred'}
+Reset-PortSelection
+foreach($p in 8787..8887){$script:busy[$p]=$true}
+$failed=$false
+try{$null=Select-SiwxPort $exe $sid $sessionId}catch{$failed=$true}
+if(-not $failed -or $script:attempted.Count -ne 101){throw 'Exhausted port range accepted'}
+Write-Output 'PASS: real socket bind/release; dynamic command identity; fallback cleanup; free/owned/foreign/default/preferred/exhausted selection'

@@ -150,7 +150,9 @@ try {
     $root = $temporary + '.root'
     foreach ($arguments in @('doctor', 'auto', 'keys extract', 'keys list', 'decrypt',
         'serve --host 127.0.0.1 --port 8787 --no-open',
-        'serve --host 127.0.0.1 --port 8787 --no-open --trust-lan')) {
+        'serve --host 127.0.0.1 --port 8787 --no-open --trust-lan',
+        'serve --host 127.0.0.1 --port 8788 --no-open',
+        'serve --host 127.0.0.1 --port 8887 --no-open --trust-lan')) {
         $cmd = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root
         if (-not $cmd.Contains('"' + $exe + '" ' + $arguments + ' <nul') -or
             -not $cmd.Contains('set "SIWX_ROOT=' + $root + '"') -or
@@ -159,7 +161,9 @@ try {
         }
     }
     foreach ($arguments in @('auto & whoami', 'serve --host 0.0.0.0', 'serve --host 0.0.0.0 --trust-lan', 'backup --yes',
-        'serve --host 127.0.0.1 --port 8787 --no-open & echo bad')) {
+        'serve --host 127.0.0.1 --port 8787 --no-open & echo bad',
+        'serve --host 127.0.0.1 --port 8786 --no-open',
+        'serve --host 127.0.0.1 --port 8888 --no-open')) {
         $rejected = $false
         try { $null = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root }
         catch { $rejected = $true }
@@ -232,6 +236,20 @@ try {
         if ($managed.Count -ne 1 -or $managed[0].Task.TaskName -ne $validTask.TaskName) {
             throw 'Background manager accepted a foreign or malformed task.'
         }
+        if ($managed[0].Port -ne 8787) { throw 'Legacy task port compatibility failed.' }
+        $dynamicTask = $validTask | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        $meta = $dynamicTask.Description | ConvertFrom-Json
+        $meta | Add-Member -NotePropertyName Port -NotePropertyValue 8789
+        $dynamicTask.Description = $meta | ConvertTo-Json
+        $fakeTasks = @($dynamicTask)
+        $managed = @(Get-SiwxBackgroundTasks $testSid)
+        if ($managed.Count -ne 1 -or $managed[0].Port -ne 8789) { throw 'Dynamic task port not restored.' }
+        foreach ($invalidPort in @('8888', '8786', '8789 & echo bad', 'not a port')) {
+            $meta.Port = $invalidPort
+            $dynamicTask.Description = $meta | ConvertTo-Json
+            if (@(Get-SiwxBackgroundTasks $testSid).Count) { throw 'Invalid task port accepted.' }
+        }
+        Write-Output 'PASS: legacy/dynamic task ports and malformed port rejection'
         Write-Output 'PASS: manager scopes tasks by user SID, metadata kind, private path, exact name and launcher action'
     } finally {
         $env:SystemRoot = $savedSystemRoot
@@ -272,9 +290,10 @@ try {
         }
     }
     Write-Output 'PASS: verified install/reuse, existing mismatch preservation, bad download/network failure cleanup'
-    function Invoke-WebRequest { [pscustomobject]@{ StatusCode = 200; Content = $fakeContent } }
+    function Invoke-WebRequest { param($Uri) $script:requestedUri = $Uri; [pscustomobject]@{ StatusCode = 200; Content = $fakeContent } }
     $fakeContent = '<title>stories-in-wx</title>'
     if (-not (Test-SiwxHttp)) { throw 'SIWX HTTP readiness not detected.' }
+    if (-not (Test-SiwxHttp 8789) -or $script:requestedUri -ne 'http://127.0.0.1:8789/') { throw 'Dynamic readiness checked wrong port.' }
     $fakeContent = '<title>another service</title>'
     if (Test-SiwxHttp) { throw 'Unrelated HTTP service accepted as SIWX.' }
     function Invoke-WebRequest { throw 'Connection refused' }
