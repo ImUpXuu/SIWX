@@ -156,6 +156,7 @@ try {
         $cmd = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root
         if (-not $cmd.Contains('"' + $exe + '" ' + $arguments + ' <nul') -or
             -not $cmd.Contains('set "SIWX_ROOT=' + $root + '"') -or
+            -not $cmd.Contains('cd /d "' + $root + '"') -or
             $cmd -match "(?<!`r)`n" -or -not $cmd.Contains('space & !literal{LOG}')) {
             throw 'CMD quoting, argument forwarding, runtime root, or single-pass substitution failed.'
         }

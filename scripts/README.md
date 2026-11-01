@@ -33,7 +33,7 @@ irm 'https://raw.githubusercontent.com/abxian/SIWX/codex/windows-console-2026103
 
 - 实际 EXE 通过 Interactive/Limited 计划任务，以选定桌面用户身份运行，避免在 SYSTEM 的用户目录及 DPAPI 上下文中处理账号；不索取用户密码，不修改执行策略，不自动打开用户桌面的浏览器。
 - 隐藏启动使用 Windows Task Scheduler + Windows Script Host/JScript + CMD，不依赖 Java、Python、VBScript。组织策略禁用 WSH 时明确报错，不尝试启用或绕过策略。
-- EXE 与运行产物根：目标用户的 `%LOCALAPPDATA%\stories-in-wx-console`；数据库在其 `output`，导出在 `exports`，日志在 `logs`。CMD 显式设置 `SIWX_ROOT`，不跟随当前 SYSTEM 工作目录。密钥库仍使用目标用户原有 `%LOCALAPPDATA%\stories-in-wx`。
+- v1.7起EXE安装在`%SystemRoot%\SIWX\siwx-v5.2.0.exe`（通常`C:\Windows\SIWX`）。运行产物根：目标用户的 `%LOCALAPPDATA%\stories-in-wx-console`；数据库在其 `output`，导出在 `exports`，日志在 `logs`。CMD 显式设置 `SIWX_ROOT`，不跟随当前 SYSTEM 工作目录。密钥库仍使用目标用户原有 `%LOCALAPPDATA%\stories-in-wx`。
 - 新建的运行目录与 `%SystemRoot%\Temp\SiwxBridge-随机编号` 诊断目录仅授权 SYSTEM、管理员、目标用户。已存在运行目录若允许其他主体读取则拒绝，保留原 ACL；拒绝经 reparse point 的路径。
 - 临时诊断目录保留本次 CMD/JScript、身份核验结果、日志、真实退出码，可能含账号路径，不上传或提交。后台任务管理只接受匹配用户 SID、名称、元数据、诊断路径与启动动作的任务，不触碰其他计划任务。
 - 网页只绑定本机 `127.0.0.1`，默认端口8787，不含 wexport1 的访问 token。v1.5遇到当前用户本工具占用时先结束再重启，其他程序占用时保留并尝试8788、8789至8887；无可用端口时报错。默认不提供远程网址。后台服务存在时，菜单拒绝再启动其他读写操作，改用网页或先停止后台任务。
@@ -128,3 +128,11 @@ NAS可编辑配置：/vol1/@appdata/1Panel/1panel/www/conf.d/wx.sxnn.de.conf 与
 这是发起管理员/SYSTEM PowerShell看到的盘符及权限，不保证包含目标桌面用户独有映射盘。只搜索目录名称，不读取聊天文件内容、不自动解密、不改目录/数据库，也不把路径写入本工具日志或上传。后台网页运行时仍可使用12/13。用户可从输出选择路径，本轮不自动修改SIWX配置。
 
 更新：先0退出旧菜单，再执行`irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn320' | iex`；看到v1.6，选12全盘或13仅C盘。仅发布两个脚本别名，EXE不变；恢复点`ops/search320-20261101/before`与before.json可按旧字节恢复，源码撤销本次Git提交。语法/完整隔离回归及合成文件夹实际递归检查通过，Windows真实全盘搜索待用户重跑确认。
+
+## EXE系统目录安装（2026-11-01，任务321，脚本v1.7）
+
+用户授权EXE放Windows/SIWX：按`$env:SystemRoot`定位Windows目录，程序固定`%SystemRoot%\SIWX\siwx-v5.2.0.exe`；标准C盘Windows即`C:\Windows\SIWX\siwx-v5.2.0.exe`。新建专用目录禁继承，Administrators/SYSTEM完全控制、Authenticated Users仅读执行；不改Windows父目录ACL。现有安装目录/EXE要求所有者是管理员或SYSTEM且其他主体无写入/删除/改权限/所有权，否则停止并保留，不自动放宽原ACL。路径拒绝重解析点。每次启动前重查目录/EXE ACL和固定官方SHA。
+
+数据根和密钥缓存不移动：目标用户LocalAppData/stories-in-wx-console及stories-in-wx。CMD工作目录改数据根，显式SIWX_ROOT不变，Limited桌面用户只读执行系统目录EXE。旧用户目录EXE保留不删除；残留清理在原SID/会话/创建时间/严格参数校验之外，仅额外接受准确旧EXE路径，命令行须匹配实际那一路径，其他位置同名程序不接受。
+
+生效：0退出旧菜单，再`irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn321' | iex`，管理员/SYSTEM运行，显示v1.7和程序实际路径，首次下载校验官方EXE。不关闭安全策略、不保证解决原9020。完整PowerShell隔离回归和旧新路径识别通过；Windows ACL实际设置/普通用户启动需用户重新运行验证，本机macOS不能替代Windows ACL验收。Dufs仅两个脚本替换，EXE分发原件不变。回退ops/install321-20261101/before旧两脚本及Git撤销，旧EXE/数据保留，不自动删除系统目录。小备份全部保留无裁剪。

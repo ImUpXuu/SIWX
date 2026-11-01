@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.6\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.7\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -78,9 +78,51 @@
                 }
             }
         }
+        function Assert-SiwxInstallAcl([string]$Path) {
+            Assert-SiwxLocalPath $Path
+            $acl = Get-Acl -LiteralPath $Path
+            $writers = @('S-1-5-18', 'S-1-5-32-544')
+            $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            if ($ownerSid -notin $writers) { throw (ConvertFrom-ConsoleText '\u7a0b\u5e8f\u8def\u5f84\u6240\u6709\u8005\u5fc5\u987b\u662f\u7ba1\u7406\u5458\u6216SYSTEM\u3002') }
+            $writeMask = [Security.AccessControl.FileSystemRights]::Write -bor
+                [Security.AccessControl.FileSystemRights]::Delete -bor
+                [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+                [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                [Security.AccessControl.FileSystemRights]::TakeOwnership
+            foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+                if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $writers -and
+                    ([int]$rule.FileSystemRights -band $writeMask)) {
+                    throw (ConvertFrom-ConsoleText '\u7a0b\u5e8f\u8def\u5f84\u5141\u8bb8\u975e\u7ba1\u7406\u5458\u5199\u5165\uff0c\u5df2\u4fdd\u7559\u539f\u6743\u9650\u5e76\u62d2\u7edd\u6267\u884c\u3002')
+                }
+            }
+        }
+        function New-SiwxInstallDirectory([string]$Path) {
+            Assert-SiwxLocalPath $Path
+            if (-not (Test-Path -LiteralPath $Path)) {
+                New-Item -ItemType Directory -Path $Path | Out-Null
+                $acl = New-Object Security.AccessControl.DirectorySecurity
+                $acl.SetAccessRuleProtection($true, $false)
+                $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+                foreach ($accessSid in @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-11')) {
+                    $rights = 'ReadAndExecute'
+                    if ($accessSid -ne 'S-1-5-11') { $rights = 'FullControl' }
+                    $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+                        (New-Object Security.Principal.SecurityIdentifier($accessSid)),
+                        $rights, 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+                    $acl.AddAccessRule($rule)
+                }
+                Set-Acl -LiteralPath $Path -AclObject $acl
+            }
+            if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw (ConvertFrom-ConsoleText '\u7a0b\u5e8f\u8def\u5f84\u4e0d\u662f\u6587\u4ef6\u5939\u3002') }
+            Assert-SiwxInstallAcl $Path
+        }
         $rootPath = Join-Path $profile.LocalPath 'AppData\Local\stories-in-wx-console'
         New-SiwxPrivateDirectory $rootPath $sid
-        $exePath = Join-Path $rootPath 'siwx-v5.2.0.exe'
+        $legacyExePath = Join-Path $rootPath 'siwx-v5.2.0.exe'
+        $installPath = Join-Path $env:SystemRoot 'SIWX'
+        New-SiwxInstallDirectory $installPath
+        $exePath = Join-Path $installPath 'siwx-v5.2.0.exe'
+        if (Test-Path -LiteralPath $exePath) { Assert-SiwxInstallAcl $exePath }
         # Public GitHub Release SHA-256 digest, verified against API on 2026-10-31.
         $expectedHash = 'dcecef343256f8d5c7335da82ea6a0311a0b1b2261a8a7dc763ba7bb7fba8dc6'
         $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx.exe'
@@ -104,7 +146,8 @@
             }
         }
         Install-SiwxRelease $exePath $downloadUrl $expectedHash
-        Assert-SiwxLocalPath $exePath
+        Assert-SiwxInstallAcl $exePath
+        Write-Host (ConvertFrom-ConsoleText "\u7a0b\u5e8f\u4f4d\u7f6e\uff1a$exePath")
         Write-Host (ConvertFrom-ConsoleText "\u8fd0\u884c\u53ca\u8f93\u51fa\u76ee\u5f55\uff1a$rootPath")
         Write-Host (ConvertFrom-ConsoleText '\u5bc6\u94a5\u7f13\u5b58\u5728\u76ee\u6807\u7528\u6237\u7684 LocalAppData \u4e2d\u3002\u8bf7\u59a5\u5584\u4fdd\u7ba1\u89e3\u5bc6\u6587\u4ef6\u53ca\u65e5\u5fd7\u3002')
         $bridgeDirectory = Join-Path "$env:SystemRoot\Temp" ('SiwxBridge-' + [Guid]::NewGuid().ToString('N'))
@@ -148,9 +191,11 @@
 
         function Test-SiwxProcessRecord($Record, [string]$ExePath, [string]$UserSid, [int]$SessionId, [ValidateRange(8787, 8887)][int]$Port = 8787) {
             if (-not $Record -or -not $Record.Created -or $Record.Name -ine 'siwx-v5.2.0.exe' -or
-                -not [StringComparer]::OrdinalIgnoreCase.Equals($Record.Path, $ExePath) -or
                 $Record.Sid -ne $UserSid -or $Record.Session -ne $SessionId) { return $false }
-            $pathPattern = [regex]::Escape($ExePath)
+            $knownPath = [StringComparer]::OrdinalIgnoreCase.Equals($Record.Path, $ExePath)
+            if ($legacyExePath -and [StringComparer]::OrdinalIgnoreCase.Equals($Record.Path, $legacyExePath)) { $knownPath = $true }
+            if (-not $knownPath) { return $false }
+            $pathPattern = [regex]::Escape($Record.Path)
             $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+serve\s+--host\s+127\.0\.0\.1\s+--port\s+' + $Port + '\s+--no-open(?:\s+--trust-lan)?\s*$'
             return $Record.Command -imatch $pattern
         }
@@ -287,7 +332,7 @@
                 throw (ConvertFrom-ConsoleText '\u4e0d\u652f\u6301\u6b64\u547d\u4ee4\u53c2\u6570\u3002')
             }
             if (-not $RootPath -or $RootPath -match '[%"\r\n]') { throw (ConvertFrom-ConsoleText '\u8fd0\u884c\u6839\u76ee\u5f55\u5305\u542b\u4e0d\u5b89\u5168\u5b57\u7b26\u3002') }
-            $directory = Split-Path -Parent $ExePath
+            $directory = $RootPath
             $probeLine = 'rem Not a probe'
             if ($Probe) { $probeLine = 'goto probe_success' }
             # Disable ! expansion; reject % expansion. All paths are quoted.
@@ -597,7 +642,9 @@ try {
             }
             $nextCommand = $null
             Assert-SiwxLocalPath $rootPath
-            Assert-SiwxLocalPath $exePath
+            Assert-SiwxInstallAcl $installPath
+            Assert-SiwxInstallAcl $exePath
+            if ((Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash -ne $expectedHash) { throw (ConvertFrom-ConsoleText '\u7a0b\u5e8f\u6821\u9a8c\u5931\u8d25\uff0c\u672a\u542f\u52a8\u3002') }
             $jobId = [Guid]::NewGuid().ToString('N')
             $logPath = Join-Path $bridgeDirectory "$jobId.log"
             $resultPath = Join-Path $bridgeDirectory "$jobId.result"

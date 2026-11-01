@@ -26,6 +26,13 @@ foreach($field in @('Name','Path','Sid','Session','Created','Command')){
     }
     if(Test-SiwxProcessRecord $bad $exe $sid $sessionId){throw "Unverified field accepted: $field"}
 }
+# Accept only the exact legacy install path, and match command to actual path.
+$legacyExePath='C:\Data\user_a\siwx-v5.2.0.exe'
+$moved=New-Fixture;$moved.Path=$legacyExePath;$moved.Command=$moved.Command.Replace($exe,$legacyExePath)
+if(-not (Test-SiwxProcessRecord $moved $exe $sid $sessionId)){throw 'Exact legacy path rejected'}
+$moved.Command=$moved.Command.Replace($legacyExePath,$exe)
+if(Test-SiwxProcessRecord $moved $exe $sid $sessionId){throw 'Legacy command/path mismatch accepted'}
+$legacyExePath=$null
 # A recycled PID must be rejected before attempting to open/kill the native process.
 $changed=New-Fixture;$changed.Created=$changed.Created.AddSeconds(2)
 function Get-SiwxProcessRecord {param($ProcessId) $changed}
