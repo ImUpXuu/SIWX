@@ -24,6 +24,8 @@ irm 'https://raw.githubusercontent.com/abxian/SIWX/codex/windows-console-2026103
 | 8 | 查看本脚本的后台任务、网址与最近日志 |
 | 9 | 选择准确编号，停止并注销对应后台任务 |
 | 0 | 退出菜单，保留已成功脱离的后台任务 |
+| 12 | 在所有文件系统盘搜索 `xwechat_files` 文件夹 |
+| 13 | 仅在 C盘搜索 `xwechat_files` 文件夹 |
 
 命令执行中按 `Q` 停止并返回菜单，`Ctrl+C` 退出。后台启动成功后可以选 `0` 或关闭当前控制台；重新运行同一行命令后用 `8/9` 管理。没有开机/登录触发器，注销或重启后需重新启动。
 
@@ -118,3 +120,11 @@ NAS可编辑配置：/vol1/@appdata/1Panel/1panel/www/conf.d/wx.sxnn.de.conf 与
 验证：Verify-PortOwner.ps1覆盖真实回环socket绑定/释放、动态端口身份、父子清理、默认空闲/本工具占用/其他程序连续占用/优先旧端口/全部占用；Verify-SiwxConsole.ps1覆盖端口白名单、旧新任务元数据、非法端口拒绝及动态HTTP网址，完整既有编码和启动器回归。实际Windows5.1及用户电脑停止/重新启动仍需重新运行确认。
 
 发布仅两个Dufs脚本别名，不改EXE。备份ops/port315-20261101/before与before.json可精确恢复旧字节，Git撤销本次提交可恢复源码。小型历史恢复点全部保留，不裁剪；本轮不结束真实Windows进程、不改业务数据/认证/NAS映射。
+
+## 查找微信数据目录（2026-11-01，任务320，脚本v1.6）
+
+菜单12使用`Get-PSDrive -PSProvider FileSystem`枚举文件系统盘，再用`Get-ChildItem -LiteralPath <根目录> -Directory -Filter xwechat_files -Recurse -Force -ErrorAction SilentlyContinue`搜索；菜单13只搜索C盘。逐条显示完整路径和最终数量；无权限/不可达目录跳过，找到0项不表示电脑一定不存在目录。扫描可能耗时，映射网络盘也可能参与；Ctrl+C沿用退出脚本行为。
+
+这是发起管理员/SYSTEM PowerShell看到的盘符及权限，不保证包含目标桌面用户独有映射盘。只搜索目录名称，不读取聊天文件内容、不自动解密、不改目录/数据库，也不把路径写入本工具日志或上传。后台网页运行时仍可使用12/13。用户可从输出选择路径，本轮不自动修改SIWX配置。
+
+更新：先0退出旧菜单，再执行`irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn320' | iex`；看到v1.6，选12全盘或13仅C盘。仅发布两个脚本别名，EXE不变；恢复点`ops/search320-20261101/before`与before.json可按旧字节恢复，源码撤销本次Git提交。语法/完整隔离回归及合成文件夹实际递归检查通过，Windows真实全盘搜索待用户重跑确认。

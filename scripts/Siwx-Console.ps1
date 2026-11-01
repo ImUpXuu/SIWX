@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.5\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.6\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -491,6 +491,13 @@ try {
             } finally { $stream.Dispose() }
         }
 
+        function Find-SiwxDataFolders([string[]]$Roots) {
+            foreach ($searchRoot in $Roots) {
+                Get-ChildItem -LiteralPath $searchRoot -Directory -Filter 'xwechat_files' -Recurse -Force -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty FullName
+            }
+        }
+
         $nextCommand = 'p'
         while ($true) {
             if (-not $nextCommand) {
@@ -499,9 +506,25 @@ try {
                 Write-Host (ConvertFrom-ConsoleText '6 = \u542f\u52a8\u7f51\u9875\u5e76\u663e\u793a\u65e5\u5fd7   7 = \u540e\u53f0\u542f\u52a8\u7f51\u9875')
                 Write-Host (ConvertFrom-ConsoleText '8 = \u540e\u53f0\u72b6\u6001 / \u7f51\u5740 / \u65e5\u5fd7   9 = \u505c\u6b62\u540e\u53f0\u7f51\u9875   0 = \u9000\u51fa')
                 Write-Host (ConvertFrom-ConsoleText '10 = \u5df2\u52a0\u5bc6\u7801\u53cd\u4ee3\uff1a\u542f\u52a8\u7f51\u9875\u5e76\u663e\u793a\u65e5\u5fd7   11 = \u5df2\u52a0\u5bc6\u7801\u53cd\u4ee3\uff1a\u540e\u53f0\u542f\u52a8')
+                Write-Host (ConvertFrom-ConsoleText '12 = \u5168\u76d8\u641c\u7d22 xwechat_files \u6587\u4ef6\u5939   13 = \u4ec5\u641c\u7d22 C\u76d8')
                 $nextCommand = Read-Host (ConvertFrom-ConsoleText '\u8bf7\u9009\u62e9')
             }
             if ($nextCommand -eq '0') { break }
+            if ($nextCommand -in @('12', '13')) {
+                $searchRoots = @('C:\')
+                if ($nextCommand -eq '12') {
+                    $searchRoots = @(Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root -Unique)
+                }
+                Write-Host (ConvertFrom-ConsoleText '\u6b63\u5728\u641c\u7d22 xwechat_files\uff0c\u78c1\u76d8\u8f83\u5927\u65f6\u53ef\u80fd\u9700\u8981\u8f83\u957f\u65f6\u95f4\uff1b\u65e0\u6743\u9650\u7684\u76ee\u5f55\u4f1a\u8df3\u8fc7\u3002\u641c\u7d22\u53ea\u8bfb\uff0c\u8def\u5f84\u4ec5\u663e\u793a\u5728\u5f53\u524d\u7a97\u53e3\u3002')
+                $foundCount = 0
+                Find-SiwxDataFolders $searchRoots | ForEach-Object {
+                    Write-Host $_
+                    $foundCount++
+                }
+                Write-Host ((ConvertFrom-ConsoleText '\u641c\u7d22\u5b8c\u6210\uff1a\u627e\u5230 {0} \u4e2a\u6587\u4ef6\u5939\uff08\u65e0\u6743\u9650\u6216\u4e0d\u53ef\u8fbe\u7684\u76ee\u5f55\u672a\u8ba1\u5165\uff09\u3002') -f $foundCount)
+                $nextCommand = $null
+                continue
+            }
             if ($nextCommand -in @('8', '9')) {
                 $backgroundTasks = @(Get-SiwxBackgroundTasks $sid)
                 if ($backgroundTasks.Count -eq 0) { Write-Host (ConvertFrom-ConsoleText '\u8be5\u7528\u6237\u6ca1\u6709\u672c\u811a\u672c\u7ba1\u7406\u7684\u540e\u53f0\u4efb\u52a1\u3002') }
