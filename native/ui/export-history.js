@@ -8,7 +8,7 @@
     const card=document.getElementById('e-history');if(!card||busy)return;
     busy=true;const result=card.querySelector('[data-history-list]');
     try{
-      const response=await fetch('/api/native/exports?'+new URLSearchParams({offset,limit:30,q:query}),{cache:'no-store',credentials:'omit'});
+      const response=await fetch('/api/native/exports?'+new URLSearchParams({offset,limit:30,q:query}),{cache:'no-store'});
       if(!response.ok)throw new Error('导出文件列表读取失败，请刷新重试。');
       const data=await response.json();if(!card.isConnected)return;
       if(offset&&offset>=data.total){offset=Math.max(0,Math.floor((data.total-1)/30)*30);busy=false;return load(true);}
