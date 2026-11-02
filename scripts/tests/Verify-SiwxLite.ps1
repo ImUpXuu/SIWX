@@ -81,7 +81,7 @@ try {
     # Simulate scheduler/CIM/ACL APIs. Never create a real task or execute any process.
     $desktop = [pscustomobject]@{Sid='S-1-5-21-1-1001';Session=2}
     $ListenAddress = '0.0.0.0'; $Port = 8787; $DataDirectory = ''; $UserId = ''
-    $script:registrations = 0; $script:unregistrations = 0; $script:stops = 0; $script:failDispatch = $false
+    $script:registrations = 0; $script:unregistrations = 0; $script:stops = 0; $script:failDispatch = $false; $script:backgroundReady = $false
     $savedSystemRoot = $env:SystemRoot; $env:SystemRoot = 'C:\Windows'
     function Import-Module { param($Name) }
     function Get-LiteDesktop { param($RequestedUser) $desktop }
@@ -97,12 +97,15 @@ try {
         $script:jobRoot=$Action.WorkingDirectory }
     function Start-ScheduledTask { param($TaskName)
         if ($script:failDispatch) { throw 'synthetic dispatch failure' }
+        if ($script:backgroundReady) { return }
         $job = Get-ChildItem -LiteralPath $script:jobRoot -Directory | Where-Object Name -like 'job-*' | Select-Object -Last 1
         [IO.File]::WriteAllText((Join-Path $job.FullName 'logs/output.log'), "synthetic user worker`n")
         [IO.File]::WriteAllText((Join-Path $job.FullName 'logs/exit.txt'), "0`n") }
     function Get-ScheduledTask { param($TaskName,$ErrorAction) $script:task }
     function Stop-ScheduledTask { param($TaskName,$ErrorAction) $script:stops++ }
     function Unregister-ScheduledTask { param($TaskName,$Confirm,$ErrorAction) $script:unregistrations++ }
+    function Test-LitePort { param($Port) $false }
+    function Test-LiteService { param($WebPort,$ExePath,$Desktop) $script:backgroundReady }
     try {
         $bridgeRoot = Join-Path $temp 'bridge1'; New-Item -ItemType Directory -Path $bridgeRoot | Out-Null
         Start-LiteUserTask $exe $desktop $bridgeRoot 6>$null
@@ -111,8 +114,12 @@ try {
         $bridgeRoot = Join-Path $temp 'bridge2'; New-Item -ItemType Directory -Path $bridgeRoot | Out-Null
         Must-Fail { Start-LiteUserTask $exe $desktop $bridgeRoot 6>$null }
         if ($script:registrations -ne 2 -or $script:unregistrations -ne 2 -or $script:stops -ne 2) { throw 'Failed dispatch cleanup was not restricted to this task.' }
+        $script:failDispatch = $false; $script:backgroundReady = $true
+        $bridgeRoot = Join-Path $temp 'bridge3'; New-Item -ItemType Directory -Path $bridgeRoot | Out-Null
+        Start-LiteUserTask $exe $desktop $bridgeRoot $true 6>$null
+        if ($script:registrations -ne 3 -or $script:unregistrations -ne 2 -or $script:stops -ne 2) { throw 'Ready background was stopped while returning to the menu.' }
     } finally { $env:SystemRoot = $savedSystemRoot }
-    Write-Output 'PASS: syntax/hash/path/download gates; desktop selection, CMD SID/quoting/injection, output relay, Limited task dispatch+failure cleanup simulated; EXE never executed.'
+    Write-Output 'PASS: syntax/hash/path/download gates; desktop selection, CMD SID/quoting/injection, output relay, Limited dispatch/failure cleanup/background retention simulated; EXE never executed.'
 } finally {
     if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
 }
