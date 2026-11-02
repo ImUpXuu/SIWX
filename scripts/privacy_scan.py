@@ -52,6 +52,9 @@ ALLOW_WXID = {
 ALLOW_CHATROOM = {"123456789@chatroom", "111111@chatroom", "123456@chatroom"}
 ALLOW_PHONE = {"13800138000", "13900000000"}
 ALLOW_HEX64 = {
+    # Public task350 original native edition ZIP and internal manifest.
+    "5d87d3e41bffefec085173890d9ca024c5ad5663565437fde2fdd7c9043f562a",
+    "ff43d33b8ac01935994413316f34bc4e31732f4cb60826da64b37d8651cfbd90",
     # Public task349 release ZIP and internal manifest, not account keys.
     "9311087ad00478552c806ceceb548bb21d937feee9156ad6bf498f8b0ba3c372",
     "69720eaa52e899f5d11f5df938174d6340b60fcef602cc4f7a253418b9831f7a",
