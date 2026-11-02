@@ -46,6 +46,8 @@ jobs:
             $relative = $_.FullName.Substring((Resolve-Path dist/siwx-lite).Path.Length + 1)
             "$( (Get-FileHash $_.FullName -Algorithm SHA256).Hash )  $relative"
           } | Set-Content -Encoding utf8 dist/siwx-lite/SHA256SUMS.txt
+      - name: Frozen original runtime HTTP and SQLite smoke
+        run: python native/smoke.py dist/siwx-lite/siwx-lite.exe
       - uses: actions/upload-artifact@v4
         with:
           name: siwx-native-windows-x64
