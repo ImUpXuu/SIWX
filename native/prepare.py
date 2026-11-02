@@ -83,6 +83,9 @@ def find_wechat_data_dirs():''');s=once(s,"if drive.is_dir():","if _is_accessibl
  p=ui/'pages/disclaimer.html';s=p.read_text().replace('GitHub Issues（github.com/ImUpXuu/SIWX/issues）或作者博客（upxuu.com）','原作者公开联系渠道').replace('github.com/ImUpXuu/SIWX/issues · 完整版见仓库 README「免责声明 · 法律声明」。','请通过原作者公开联系渠道提交。');p.write_text(s)
  for p in [ui/'index.html',ui/'app.js']:
   s=p.read_text().replace('2026102404','2026110201');p.write_text(s)
+ # Add one isolated history widget; original export.js/html remain exact.
+ extra=ui/'export-history.js';shutil.copyfile(ROOT/'ui/export-history.js',extra)
+ p=ui/'index.html';s=p.read_text();s=once(s,'</body>','<script src="/export-history.js?v=2026110202"></script>\n</body>');p.write_text(s)
  # Python sources compile, and original cryptography/extraction/export/SNS remain exact.
  changes={};files={}
  for p in sorted(SOURCE.rglob('*')):
@@ -94,9 +97,10 @@ def find_wechat_data_dirs():''');s=once(s,"if drive.is_dir():","if _is_accessibl
   if before!=after:changes[rel]={'source_sha256':sha(before),'edition_sha256':sha(after) if after is not None else None}
  for name in ['extract.py','sqlcipher.py','api_export.py','api_sns.py','sns.py','media.py','voice.py','ui/onboarding.js','ui/pages/export.js','ui/pages/sns.js']:
   assert (SOURCE/name).read_bytes()==(BUILD/'siwx'/name).read_bytes(),name
+ files['ui/export-history.js']=sha(extra.read_bytes());changes['ui/export-history.js']={'source_sha256':None,'edition_sha256':files['ui/export-history.js']}
  try:source_ref=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,stderr=subprocess.DEVNULL).decode().strip()
  except subprocess.CalledProcessError:source_ref=(ROOT.parent/'SOURCE-REVISION.txt').read_text().strip()
- manifest={'version':'1.5.2','base':'SIWX5.2.0','source_ref':source_ref,'changed':changes,'files':files,'removed':sorted(REMOVED_MODULES),'retained':'Original upstream chat/messages/media/export/SNS/setup/settings/logs and extract/decrypt/cache; no safe/adapter imports'}
+ manifest={'version':'1.6.0','base':'SIWX5.2.0','source_ref':source_ref,'changed':changes,'files':files,'removed':sorted(REMOVED_MODULES),'retained':'Original upstream chat/messages/media/export/SNS/setup/settings/logs and extract/decrypt/cache; no safe/adapter imports'}
  (BUILD/'native-source-manifest.json').write_text(json.dumps(manifest,indent=2))
  return manifest
 if __name__=='__main__':

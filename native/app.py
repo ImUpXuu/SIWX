@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse, json, os, platform, sys
 
-VERSION='1.5.2'
+VERSION='1.6.0'
 BASE=Path(__file__).resolve().parent
 if not getattr(sys,'frozen',False):sys.path.insert(0,str(BASE/'_build'))
 
@@ -17,6 +17,12 @@ def configure_home():
 def make_app():
  configure_home()
  from siwx import server
+ from export_history import bp as export_history_bp
+ server.app.register_blueprint(export_history_bp)
+ @server.app.get('/export-history.js')
+ def export_history_script():
+  from flask import send_from_directory
+  return send_from_directory(server.UI_DIR,'export-history.js',max_age=0)
  @server.app.get('/api/native/version')
  def native_version():return {'version':VERSION,'base':'5.2.0','edition':'original pages and backend'}
  # Defense against plugin reintroductions; feature removal, not caller authentication.
@@ -25,7 +31,7 @@ def make_app():
   from flask import abort,send_file
   path=(Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else BASE)/'SOURCE.zip'
   if not path.is_file():abort(404)
-  return send_file(path,as_attachment=True,download_name='SIWX-1.5.2-source.zip')
+  return send_file(path,as_attachment=True,download_name='SIWX-1.6.0-source.zip')
  @server.app.before_request
  def removed_features():
   from flask import abort,request
