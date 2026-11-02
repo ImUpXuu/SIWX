@@ -39,13 +39,16 @@ def original_roots():
   except OSError:continue
  return roots
 
+def source_id(root):
+ return "original-"+hashlib.sha256(str(root.resolve()).casefold().encode("utf-8")).hexdigest()[:16]
+
 def export_sources():
  from siwx import paths
  sources=[('native','修改版',paths.exports_root())]
  for index,root in enumerate(original_roots()):
   path=root/'exports'
   try:
-   if plain(path) and path.is_dir() and path.resolve()!=sources[0][2].resolve():sources.append(('original-'+str(index),'原版',path))
+   if plain(path) and path.is_dir() and path.resolve()!=sources[0][2].resolve():sources.append((source_id(root),'原版',path))
   except OSError:continue
  return sources
 
@@ -139,7 +142,7 @@ def import_outputs(home,roots):
       try:
        digest=copy_missing(path,destination)
        if digest:
-        records.append({'target':destination.relative_to(home).as_posix(),'source':'original-'+str(index),'sha256':digest});STATE['copied']+=1
+        records.append({'target':destination.relative_to(home).as_posix(),'source':source_id(root),'sha256':digest});STATE['copied']+=1
         if STATE['copied']%20==0:atomic_json(journal,records)
        else:STATE['existing']+=1
       except (OSError,ValueError,sqlite3.Error,TimeoutError):STATE['failed']+=1

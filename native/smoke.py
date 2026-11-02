@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix='siwx_frozen_synthetic_') as tmp:
    with urllib.request.urlopen(base+'/api/native/version',timeout=10) as response:assert json.load(response)['version']=='1.7.0'
    with urllib.request.urlopen(base+'/api/native/source',timeout=10) as response:assert response.read(4)==b'PK\x03\x04'
    with urllib.request.urlopen(base+'/api/native/exports',timeout=10) as response:
-    history=json.load(response);assert history['total']==2 and {row['source'] for row in history['files']}=={'native','original-0'}
+    history=json.load(response);assert history['total']==2 and sum(row['source']=='native' for row in history['files'])==1 and sum(row['source'].startswith('original-') for row in history['files'])==1
    with urllib.request.urlopen(base+history['files'][0]['download'],timeout=10) as response:assert json.load(response) in [{'synthetic':True},{'original_synthetic':True}]
    with urllib.request.urlopen(base+'/export-history.js',timeout=10) as response:assert b'e-history' in response.read()
    print('PASS: frozen runtime default listen socket is 127.0.0.1 only; original runtime serves original UI, sessions and 80 actual synthetic SQLite messages')
@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='siwx_frozen_synthetic_') as tmp:
     except OSError:
      if process.poll() is not None or time.monotonic()>deadline:raise RuntimeError('Restart failed')
      time.sleep(.2)
-   assert history['total']==2 and {row['source'] for row in history['files']}=={'native','original-0'}
+   assert history['total']==2 and sum(row['source']=='native' for row in history['files'])==1 and sum(row['source'].startswith('original-') for row in history['files'])==1
    with urllib.request.urlopen(base+history['files'][0]['download'],timeout=10) as response:assert json.load(response) in [{'synthetic':True},{'original_synthetic':True}]
    assert (original/'output'/ACCOUNT/'message/message_0.db').is_file()
    print('PASS: frozen compatibility imports original synthetic SQLite, retains original files, lists and downloads both edition exports')

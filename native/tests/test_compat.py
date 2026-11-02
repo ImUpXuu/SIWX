@@ -34,11 +34,14 @@ class CompatibilityTests(unittest.TestCase):
   import export_history
   for root,text in [(self.home,'synthetic native'),(self.old,'synthetic original')]:
    (root/'exports').mkdir();(root/'exports/same.txt').write_text(text)
-  app=Flask('compat_synthetic');app.register_blueprint(export_history.bp);client=app.test_client();rows=client.get('/api/native/exports').json['files'];self.assertEqual(2,len(rows));self.assertEqual({'native','original-0'},{r['source'] for r in rows})
+  app=Flask('compat_synthetic');app.register_blueprint(export_history.bp);client=app.test_client();rows=client.get('/api/native/exports').json['files'];self.assertEqual(2,len(rows));self.assertEqual({'native',compat.source_id(self.old)},{r['source'] for r in rows})
   for row in rows:
-   response=client.get(row['download']);self.assertEqual(200,response.status_code);self.assertIn('original' if row['source']=='original-0' else 'native',response.data.decode());response.close()
+   response=client.get(row['download']);self.assertEqual(200,response.status_code);self.assertIn('original' if row['source'].startswith('original-') else 'native',response.data.decode());response.close()
   self.assertEqual(404,client.get('/api/native/exports/download?path=same.txt&source=unknown').status_code)
-  self.assertEqual(404,client.get('/api/native/exports/download?path=../same.txt&source=original-0').status_code)
+  self.assertEqual(404,client.get('/api/native/exports/download',query_string={'path':'../same.txt','source':compat.source_id(self.old)}).status_code)
+  original_id=compat.source_id(self.old);other=self.base/'other-original';other.mkdir();(other/'exports').mkdir();(other/'exports/same.txt').write_text('different synthetic original')
+  with patch.dict(os.environ,SIWX_COMPAT_ROOTS=json.dumps([str(other)])):
+   self.assertEqual(404,client.get('/api/native/exports/download',query_string={'path':'same.txt','source':original_id}).status_code)
   with patch.dict(os.environ,SIWX_COMPAT_ROOTS='[]'):self.assertEqual([],compat.original_roots())
  def test_linked_original_or_target_never_copied(self):
   source=self.old/'output/wxid_example_01';source.mkdir(parents=True);outside=self.base/'outside';outside.mkdir();(outside/'record.txt').write_text('synthetic')
