@@ -27,6 +27,10 @@ with tempfile.TemporaryDirectory(prefix='siwx_frozen_synthetic_') as tmp:
    with urllib.request.urlopen(base+'/api/native/version',timeout=10) as response:assert json.load(response)['version']=='1.5.0'
    with urllib.request.urlopen(base+'/api/native/source',timeout=10) as response:assert response.read(4)==b'PK\x03\x04'
    print('PASS: frozen original runtime serves original UI, sessions and 80 actual synthetic SQLite messages')
+  except BaseException:
+   log.flush()
+   print("Synthetic frozen runtime diagnostic:", (home/"console.log").read_text(encoding="utf-8",errors="replace"),flush=True)
+   raise
   finally:
    process.terminate()
    try:process.wait(timeout=5)
