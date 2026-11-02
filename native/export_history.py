@@ -60,7 +60,7 @@ def inventory():
       relative=path.relative_to(root).as_posix()
       if query and query not in relative.casefold():continue
       info=entry.stat(follow_symlinks=False)
-      rows.append({'name':path.name,'path':relative,'batch':relative.split('/')[0] if '/' in relative else '直接导出文件','format':path.suffix[1:].upper(),'bytes':info.st_size,'modified':datetime.fromtimestamp(info.st_mtime).isoformat(timespec='seconds'),'modified_ns':info.st_mtime_ns,'download':'/api/native/exports/download?'+urlencode({'path':relative})})
+      rows.append({'name':path.name,'directory':str(path.parent),'path':relative,'batch':relative.split('/')[0] if '/' in relative else '直接导出文件','format':path.suffix[1:].upper(),'bytes':info.st_size,'modified':datetime.fromtimestamp(info.st_mtime).isoformat(timespec='seconds'),'modified_ns':info.st_mtime_ns,'download':'/api/native/exports/download?'+urlencode({'path':relative})})
    except OSError:continue
    if visited>MAX_ENTRIES:break
  rows.sort(key=lambda row:(-row['modified_ns'],row['path']))

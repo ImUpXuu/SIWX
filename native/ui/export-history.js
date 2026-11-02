@@ -1,6 +1,30 @@
 /* Native edition extension: disk-backed export history; original export module unchanged. */
 (() => {
   'use strict';
+  const style=elStyle();
+  function elStyle(){const n=document.createElement('style');n.textContent=`
+    .export-wrap .e-side > .card {flex-shrink:0}
+    .export-wrap .e-side > .e-logcard {flex:0 0 auto;overflow:visible}
+    .export-wrap #e-log {flex:none;height:clamp(320px,48vh,640px);min-height:320px;max-height:none;resize:vertical;overflow:auto;overflow-wrap:anywhere}
+    .export-wrap #e-log.native-expanded {height:75vh;min-height:320px}
+    .export-wrap .e-log-actions {flex-wrap:wrap}
+    .export-wrap .e-logcard .card-head {flex-wrap:wrap}
+  `;document.head.append(n);return n;}
+  async function copyDirectory(directory){
+    try{const ok=await window.SX.copyText(directory);window.SX.toast(ok?'目录路径已复制':'复制失败，请手动选择目录路径复制。',!ok);}
+    catch(error){window.SX.toast('复制失败，请手动选择目录路径复制。',true);}
+  }
+  function enhanceResults(){
+    const log=document.getElementById('e-log'),actions=document.querySelector('.e-log-actions');
+    if(log&&actions&&!document.getElementById('e-log-expand')){
+      const expand=el('button','mini-btn','展开日志');expand.type='button';expand.id='e-log-expand';expand.setAttribute('aria-expanded','false');
+      expand.onclick=()=>{const on=log.classList.toggle('native-expanded');log.style.height='';expand.textContent=on?'收起日志':'展开日志';expand.setAttribute('aria-expanded',String(on));};actions.append(expand);
+    }
+    document.querySelectorAll('#e-result [data-open-path]').forEach(open=>{
+      if(open.parentElement.querySelector('[data-native-copy-dir]'))return;
+      const copy=el('button','btn','复制目录路径');copy.type='button';copy.dataset.nativeCopyDir='';copy.onclick=()=>copyDirectory(open.dataset.openPath);open.after(copy);
+    });
+  }
   let offset=0,query='',busy=false,lastKey='',mounted=null;
   const el=(tag,cls,text)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;};
   function size(bytes){return bytes>=1048576?(bytes/1048576).toFixed(1)+' MB':bytes>=1024?(bytes/1024).toFixed(1)+' KB':bytes+' B';}
@@ -19,7 +43,7 @@
         const row=el('div');row.style.display='flex';row.style.padding='12px 0';row.style.borderBottom='1px solid var(--line)';row.style.fontSize='13px';row.style.alignItems='start';row.style.gap='12px';
         const meta=el('div');meta.style.minWidth='0';meta.style.flex='1';meta.style.overflowWrap='anywhere';
         meta.append(el('b','',file.name),el('div','dim',file.path),el('div','dim',file.format+' · '+size(file.bytes)+' · '+file.modified.replace('T',' ')));
-        const link=el('a','btn','下载');link.href=file.download;link.setAttribute('download','');row.append(meta,link);result.append(row);
+        const link=el('a','btn','下载');link.href=file.download;link.setAttribute('download','');const actions=el('div');actions.style.display='flex';actions.style.gap='8px';actions.style.flexWrap='wrap';const copy=el('button','btn','复制目录路径');copy.type='button';copy.dataset.historyCopyDir='';copy.onclick=()=>copyDirectory(file.directory);actions.append(link,copy);row.append(meta,actions);result.append(row);
       }
       card.querySelector('[data-history-count]').textContent='共 '+data.total+' 个文件'+(data.truncated?'（目录过大，已限制扫描范围）':'');
       card.querySelector('[data-history-page]').textContent=data.total?(Math.floor(offset/30)+1)+' / '+Math.ceil(data.total/30):'0 / 0';
@@ -39,7 +63,7 @@
     let timer;search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>{query=search.value.trim();offset=0;load(true);},250);});refresh.onclick=()=>load(true);prev.onclick=()=>{offset=Math.max(0,offset-30);load(true);};next.onclick=()=>{offset+=30;load(true);};
     for(const bar of [controls,nav]){bar.style.display='flex';bar.style.alignItems='center';bar.style.gap='8px';bar.style.flexWrap='wrap';bar.style.marginTop='12px';}controls.append(search,refresh);nav.append(prev,page,next);card.append(controls,list,nav);host.append(card);mounted=card;load(true);
   }
-  const observer=new MutationObserver(mount);observer.observe(document.getElementById('view'),{childList:true,subtree:true});mount();
+  const observer=new MutationObserver(()=>{mount();enhanceResults();});observer.observe(document.getElementById('view'),{childList:true,subtree:true});mount();enhanceResults();
   setInterval(()=>{if(mounted?.isConnected&&!document.hidden)load();},3000);
   window.addEventListener('focus',()=>load());
 })();

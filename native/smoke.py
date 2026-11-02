@@ -29,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix='siwx_frozen_synthetic_') as tmp:
    with urllib.request.urlopen(base+'/api/chat/sessions?account='+ACCOUNT,timeout=10) as response:assert json.load(response)['sessions'][0]['username']==CHAT
    with urllib.request.urlopen(base+'/api/chat/messages?account='+ACCOUNT+'&chat='+CHAT+'&limit=80',timeout=10) as response:
     messages=json.load(response)['messages'];assert len(messages)==80 and '原生合成消息' in json.dumps(messages,ensure_ascii=False)
-   with urllib.request.urlopen(base+'/api/native/version',timeout=10) as response:assert json.load(response)['version']=='1.6.1'
+   with urllib.request.urlopen(base+'/api/native/version',timeout=10) as response:assert json.load(response)['version']=='1.6.2'
    with urllib.request.urlopen(base+'/api/native/source',timeout=10) as response:assert response.read(4)==b'PK\x03\x04'
    with urllib.request.urlopen(base+'/api/native/exports',timeout=10) as response:
     history=json.load(response);assert history['total']==1 and history['files'][0]['name']=='restart-proof.json'

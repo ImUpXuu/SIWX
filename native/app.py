@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse, json, os, platform, sys
 
-VERSION='1.6.1'
+VERSION='1.6.2'
 BASE=Path(__file__).resolve().parent
 if not getattr(sys,'frozen',False):sys.path.insert(0,str(BASE/'_build'))
 
@@ -31,7 +31,7 @@ def make_app():
   from flask import abort,send_file
   path=(Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else BASE)/'SOURCE.zip'
   if not path.is_file():abort(404)
-  return send_file(path,as_attachment=True,download_name='SIWX-1.6.1-source.zip')
+  return send_file(path,as_attachment=True,download_name='SIWX-1.6.2-source.zip')
  @server.app.before_request
  def removed_features():
   from flask import abort,request
