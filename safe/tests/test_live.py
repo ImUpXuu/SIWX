@@ -144,18 +144,31 @@ class WebTests(unittest.TestCase):
         conn.close()
         return status, response_headers, data
 
-    def test_anonymous_access_with_host_origin_and_path_guards(self):
+    def test_anonymous_access_without_host_origin_or_fetch_allowlists(self):
         self.assertEqual(200, self.request("/api/accounts")[0])
         self.assertEqual(200, self.request("/api/accounts", extra={"Authorization": "irrelevant"})[0])
         self.assertNotIn("#", self.server.url)
         self.assertFalse(hasattr(self.server, "token"))
-        self.assertEqual(403, self.request("/api/accounts", extra={"Host": "example.invalid"})[0])
-        self.assertEqual(403, self.request("/api/open", {}, extra={"Origin": "https://example.invalid"})[0])
-        self.assertEqual(403, self.request("/api/accounts", extra={"Sec-Fetch-Site": "cross-site"})[0])
+        self.assertEqual(200, self.request("/api/accounts", extra={"Host": "example.invalid"})[0])
+        self.assertEqual(200, self.request("/api/open", {"account": 0, "consent": True}, extra={"Origin": "https://example.invalid"})[0])
+        self.assertEqual(200, self.request("/api/accounts", extra={"Sec-Fetch-Site": "cross-site"})[0])
         self.assertEqual(404, self.request("/../../secret.txt")[0])
         self.assertEqual(400, self.request("/api/open", {"account": 0, "consent": False})[0])
         for path in ("/api/stats", "/api/backup", "/api/mcp", "/api/update"):
             self.assertEqual(404, self.request(path)[0])
+
+    def test_public_domain_mapped_port_and_tls_reverse_proxy_origin(self):
+        headers = {"Host": "example.invalid:5443", "Origin": "https://example.invalid:5443", "Sec-Fetch-Site": "same-origin"}
+        self.assertEqual(200, self.request("/", extra=headers)[0])
+        self.assertEqual(200, self.request("/api/open", {"account": 0, "consent": True}, extra=headers)[0])
+        for path, body in (("/api/messages", {"chat": "user_example"}),
+                           ("/api/export", {"chat": "user_example", "format": "html"})):
+            self.assertEqual(200, self.request(path, body, extra=headers)[0])
+        self.assertEqual(200, self.request("/api/accounts", extra={"Host": "203.0.113.9:39000"})[0])
+        self.assertEqual(200, self.request("/api/accounts", extra={"Host": "example.invalid:443", "Origin": "https://example.invalid"})[0])
+        self.assertEqual(200, self.request("/api/accounts", extra={"Host": "example.invalid", "Origin": "https://other.invalid"})[0])
+        self.assertEqual("0.0.0.0", self.server.server_address[0])
+        self.assertNotIn("Access-Control-Allow-Credentials", self.request("/")[1])
 
     def test_extract_web_search_all_exports_and_close(self):
         self.assertEqual(200, self.request("/api/open", {"account": 0, "consent": True})[0])

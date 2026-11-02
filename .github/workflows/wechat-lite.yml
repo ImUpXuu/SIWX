@@ -2,7 +2,7 @@ name: Build WeChat lite Windows
 
 on:
   push:
-    branches: ['codex/wechat-lite-*', 'codex/wechat-cli-web-*']
+    branches: ['codex/wechat-lite-*', 'codex/wechat-cli-web-*', 'codex/lite-task-verify-*']
     paths: ['safe/**', '.github/workflows/wechat-lite.yml']
   workflow_dispatch:
 
