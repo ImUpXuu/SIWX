@@ -16,43 +16,105 @@ from .vendor.wexport.sources.win4 import Win4Source
 from .vendor.wexport.parse import parse_message
 
 
+def _local_path(value):
+    if not isinstance(value, (str, Path)):
+        return None
+    text = str(value).strip().strip('"')
+    if not text or text.casefold() == "mydocument:" or text.startswith(("\\\\", "//")) or "://" in text:
+        return None
+    return Path(os.path.expandvars(os.path.expanduser(text)))
+
+
+def _windows_roots():
+    """Current-user settings and fixed/removable local drive roots; no other users."""
+    import winreg
+    roots = []
+    for key, value_name in (
+        (r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders", "Personal"),
+        (r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders", "Personal"),
+        (r"Software\Tencent\Weixin", "FileSavePath"),
+        (r"Software\Tencent\WeChat", "FileSavePath"),
+        (r"Software\Tencent\Weixin", "InstallPath"),
+        (r"Software\Tencent\WeChat", "InstallPath"),
+    ):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
+                value, _ = winreg.QueryValueEx(handle, value_name)
+            path = _local_path(value)
+            if path is not None:
+                roots.append(path)
+                if value_name == "InstallPath":
+                    roots.append(path.parent / "xwechat_files")
+        except OSError:
+            continue
+    try:
+        import ctypes
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        for index in range(26):
+            if mask & (1 << index):
+                drive = chr(65 + index) + ":\\"
+                if ctypes.windll.kernel32.GetDriveTypeW(drive) in (2, 3):
+                    roots.append(Path(drive) / "xwechat_files")
+                    roots.append(Path(drive) / "WeChat Files")
+    except (OSError, AttributeError):
+        pass
+    return roots
+
+
+def _accounts_at(value):
+    """Normalize explicit account/db_storage paths and known one-level containers."""
+    base = _local_path(value)
+    if base is None:
+        return []
+    try:
+        if base.is_file():
+            base = base.parent
+        for parent in (base, *list(base.parents)[:6]):
+            if parent.name.casefold() == "db_storage":
+                base = parent.parent
+                break
+        containers = (base, base / "xwechat_files", base / "WeChat Files",
+                      base / "WeChat Files" / "xwechat_files", base / "Documents" / "xwechat_files",
+                      base / "Data" / "Documents" / "xwechat_files")
+        accounts, checked = [], set()
+        for directory in containers:
+            if directory in checked or directory.is_symlink() or not directory.is_dir():
+                continue
+            checked.add(directory)
+            if (directory / "db_storage").is_dir():
+                account = Win4Source.discover(directory)
+                if account:
+                    accounts.append(account)
+            elif directory.name.casefold() in ("xwechat_files", "wechat files"):
+                # Never recurse through the drive, user tree, or arbitrary containers.
+                try:
+                    children = list(directory.iterdir())[:500]
+                except OSError:
+                    continue
+                for child in children:
+                    if child.is_dir() and not child.is_symlink() and (child / "db_storage").is_dir():
+                        account = Win4Source.discover(child)
+                        if account:
+                            accounts.append(account)
+        return accounts
+    except OSError:
+        return []
+
+
 def discover_accounts(explicit: Path | None = None):
-    """An explicit account directory, or bounded current-user known locations."""
-    if explicit is not None:
-        account = Win4Source.discover(explicit.resolve())
-        if account is None:
-            raise ValueError("请选择包含 db_storage 的本人微信4.x账号目录。")
-        return [account]
-    bases = [Path.home(), Path.home() / "Documents"]
-    if sys.platform == "win32":
-        import winreg
-        for key, value in (
-            (r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders", "Personal"),
-            (r"Software\Tencent\Weixin", "FileSavePath"),
-            (r"Software\Tencent\WeChat", "FileSavePath"),
-        ):
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as handle:
-                    path, _ = winreg.QueryValueEx(handle, value)
-                    if isinstance(path, str) and path and path.lower() != "mydocument:":
-                        bases.append(Path(os.path.expandvars(path)))
-            except OSError:
-                pass
+    """Discover bounded current-user locations, redirected settings and local drive roots."""
+    bases = [explicit] if explicit is not None else [Path.home(), Path.home() / "Documents"]
+    if explicit is None and sys.platform == "win32":
+        bases.extend(_windows_roots())
     accounts, seen = [], set()
     for base in bases:
-        for root in (base, base / "xwechat_files"):
-            if root.name.lower() != "xwechat_files":
-                continue
-            try:
-                children = sorted(root.iterdir())
-            except OSError:
-                continue
-            for child in children:
-                if child.is_dir() and not child.is_symlink():
-                    account = Win4Source.discover(child)
-                    if account and str(child.resolve()).casefold() not in seen:
-                        seen.add(str(child.resolve()).casefold())
-                        accounts.append(account)
+        for account in _accounts_at(base):
+            identity = os.path.normcase(str(account.root.resolve()))
+            if identity not in seen:
+                accounts.append(account)
+                seen.add(identity)
+    if explicit is not None and not accounts:
+        raise ValueError("未找到微信4.x账号，请选择 xwechat_files、账号目录或 db_storage。")
     return accounts
 
 
@@ -103,8 +165,9 @@ def _date(text, end=False):
 
 
 class Engine:
-    def __init__(self, accounts, opener=open_account):
+    def __init__(self, accounts, opener=open_account, discoverer=None):
         self.accounts, self.opener = list(accounts), opener
+        self.discoverer = discoverer or discover_accounts
         self.source = None
         self.account_index = None
         self.moments = None
@@ -118,40 +181,35 @@ class Engine:
     def account_list(self):
         return [{"id": i, "name": a.label} for i, a in enumerate(self.accounts)]
 
+    def refresh_accounts(self):
+        discovered = self.discoverer()
+        seen = {os.path.normcase(str(a.root.resolve())) for a in self.accounts if a.root is not None}
+        added = 0
+        for account in discovered:
+            identity = os.path.normcase(str(account.root.resolve()))
+            if identity not in seen:
+                self.accounts.append(account)
+                seen.add(identity)
+                added += 1
+        self.event("info", "账号检测完成，发现可用账号。" if self.accounts else "账号检测完成，未发现账号，可手动指定微信数据目录。")
+        return {"accounts": self.account_list(), "added": added, "detected": len(discovered)}
+
     def add_account_directory(self, path):
         if not isinstance(path, str) or not path.strip() or len(path) > 4096:
             raise ValueError("请输入微信数据目录。")
-        if path.strip().startswith(("\\\\", "//")) or "://" in path:
-            raise ValueError("请使用本地磁盘上的微信目录，不使用网络共享地址。")
-        root = Path(path.strip())
-        if not root.is_absolute():
-            raise ValueError("请填写完整的本地微信数据目录。")
-        # Bounded explicit selection only: normalize db_storage/subdirectory back
-        # to its account directory, or enumerate direct xwechat_files children.
-        candidates = []
-        for candidate in (root, *list(root.parents)[:5]):
-            if candidate.name.casefold() == "db_storage":
-                candidates = [candidate.parent]
-                break
-            if candidate.name.casefold() == "xwechat_files":
-                if root == candidate:
-                    candidates = list(candidate.iterdir())[:100]
-                break
-        if not candidates:
-            candidates = [root]
+        root = _local_path(path)
+        if root is None or not root.is_absolute():
+            raise ValueError("请填写本地磁盘上的完整微信数据目录，不使用网络共享地址。")
+        candidates = _accounts_at(root)
+        if any(p.is_symlink() for p in (root, *root.parents)):
+            raise ValueError("请使用实际微信数据目录，不使用目录链接。")
         added = 0
-        for candidate in candidates:
-            if not candidate.is_dir() or not (candidate / "db_storage").is_dir():
-                continue
-            cursor = candidate
-            if any(p.is_symlink() for p in (cursor, *cursor.parents)):
-                raise ValueError("请使用实际微信数据目录，不使用目录链接。")
-            account = Win4Source.discover(candidate)
-            if account and all(a.root is None or a.root.resolve() != account.root.resolve() for a in self.accounts):
+        for account in candidates:
+            if all(a.root is None or a.root.resolve() != account.root.resolve() for a in self.accounts):
                 self.accounts.append(account)
                 added += 1
         if not added:
-            raise ValueError("未发现新的微信4.x账号，请选择包含 db_storage 的目录。")
+            raise ValueError("未发现新的微信4.x账号，请选择 xwechat_files、账号目录或 db_storage。")
         self.event("info", "已添加微信数据目录。")
         return {"added": added, "accounts": self.account_list()}
 

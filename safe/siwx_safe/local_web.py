@@ -113,7 +113,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"opened": engine.source is not None, "account": engine.account_index})
         elif self.path == "/api/status":
             engine = self.server.engine
-            self._json(200, {"version": "1.4.0", "opened": engine.source is not None,
+            self._json(200, {"version": "1.4.1", "opened": engine.source is not None,
                              "account": engine.account_index, "accounts": engine.account_list(),
                              "warnings": len(engine.source.load_errors) if engine.source else 0})
         elif self.path == "/api/logs":
@@ -181,6 +181,8 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/logs/clear":
                 engine.events.clear()
                 self._json(200, {"cleared": True})
+            elif self.path == "/api/accounts/refresh":
+                self._json(200, engine.refresh_accounts())
             elif self.path == "/api/accounts/add":
                 self._json(200, engine.add_account_directory(body.get("path")))
             elif self.path == "/api/sns/export":
