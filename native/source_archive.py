@@ -4,7 +4,7 @@ import subprocess,sys,zipfile
 root=Path(__file__).resolve().parent.parent
 output=Path(sys.argv[1]).resolve()
 assert output.suffix=='.zip'
-subprocess.run(['git','archive','--format=zip','--output='+str(output),'HEAD','siwx','native','tests','requirements.txt','requirements-dev.txt','requirements-build.txt','LICENSE','run.py','.github/workflows/native.yml'],cwd=root,check=True)
+subprocess.run(['git','archive','--format=zip','--output='+str(output),'HEAD'],cwd=root,check=True)
 
 with zipfile.ZipFile(output,"a",zipfile.ZIP_DEFLATED) as archive:
  archive.writestr("SOURCE-REVISION.txt",subprocess.check_output(["git","rev-parse","HEAD"],cwd=root))
