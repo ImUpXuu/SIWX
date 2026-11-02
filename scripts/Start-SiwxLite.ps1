@@ -7,7 +7,7 @@ param(
     [string]$UserId
 )
 
-# Task341 / 2026-11-02: SIWX-style menu, owned-port reuse, Limited user-session relay.
+# Task342 / 2026-11-02: SIWX-style menu, owned-port reuse, Limited user-session relay.
 # ASCII source supports Windows PowerShell 5.1 when downloaded through irm/iex.
 # Pins the exact task338 package and its internal hash manifest. No AV/policy changes.
 function ConvertFrom-LiteText([string]$Text) {
@@ -299,6 +299,29 @@ function Stop-LitePortOwner([string]$ExePath, [string]$UserSid, [int]$SessionId,
 }
 
 
+function Get-LiteAccountSid([string]$Account) {
+    if ([string]::IsNullOrWhiteSpace($Account)) { throw 'Task principal UserId is empty.' }
+    if ($Account -match '^S-1-[0-9-]+$') { return $Account }
+    return (New-Object Security.Principal.NTAccount($Account)).Translate([Security.Principal.SecurityIdentifier]).Value
+}
+
+function Get-LiteSchedulerUser([string]$Sid) {
+    if ($Sid -notmatch '^S-1-[0-9-]+$' -or $Sid -in @('S-1-5-18','S-1-5-19','S-1-5-20')) { throw 'Invalid desktop SID for scheduler.' }
+    $account = (New-Object Security.Principal.SecurityIdentifier($Sid)).Translate([Security.Principal.NTAccount]).Value
+    if ([string]::IsNullOrWhiteSpace($account) -or (Get-LiteAccountSid $account) -ne $Sid) { throw 'Desktop account name/SID roundtrip failed.' }
+    return $account
+}
+
+function Test-LiteRegisteredTask($Task, [string]$Sid, [string]$Worker, [string]$Root) {
+    if (-not $Task -or @($Task.Actions).Count -ne 1) { return $false }
+    try {
+        return (Get-LiteAccountSid $Task.Principal.UserId) -eq $Sid -and
+            $Task.Actions[0].Execute -ieq "$env:SystemRoot\System32\cmd.exe" -and
+            $Task.Actions[0].Arguments -eq ('/d /s /c ""' + $Worker + '""') -and
+            $Task.Actions[0].WorkingDirectory -ieq $Root
+    } catch { return $false }
+}
+
 function Get-LiteBackgroundTasks([string]$Root, [string]$Sid, [string]$ExePath) {
     foreach ($task in @(Get-ScheduledTask -TaskName 'SiwxLite-*' -ErrorAction SilentlyContinue)) {
         try {
@@ -307,7 +330,7 @@ function Get-LiteBackgroundTasks([string]$Root, [string]$Sid, [string]$ExePath) 
             $meta = $task.Description | ConvertFrom-Json
             $worker = Join-Path (Join-Path $Root ('job-' + $id)) 'worker.cmd'
             $log = Join-Path (Join-Path (Join-Path $Root ('job-' + $id)) 'logs') 'output.log'
-            if ($meta.Kind -ne 'SiwxLiteMenu341' -or $meta.Sid -ne $Sid -or $task.Principal.UserId -ne $Sid -or
+            if ($meta.Kind -ne 'SiwxLiteMenu341' -or $meta.Sid -ne $Sid -or (Get-LiteAccountSid $task.Principal.UserId) -ne $Sid -or
                 $meta.Exe -ine $ExePath -or $meta.Log -ine $log -or
                 [int]$meta.Port -lt 1 -or [int]$meta.Port -gt 65535 -or
                 $meta.Bind -notin @('0.0.0.0', '127.0.0.1') -or [int]$meta.Session -le 0 -or
@@ -334,8 +357,10 @@ function Test-LiteService([int]$WebPort, [string]$ExePath, $Desktop) {
 }
 
 function Start-LiteUserTask([string]$ExePath, $Desktop, [string]$Root, [bool]$Background = $false) {
+    $ErrorActionPreference = 'Stop'
     # No triggers, no password, no elevated execution: use the existing interactive token.
-    Import-Module ScheduledTasks
+    Import-Module ScheduledTasks -ErrorAction Stop
+    $schedulerUser = Get-LiteSchedulerUser $Desktop.Sid
     $id = [Guid]::NewGuid().ToString('N')
     $job = Join-Path $Root ('job-' + $id)
     New-LiteControlledDirectory $job $Desktop.Sid $false
@@ -346,19 +371,29 @@ function Start-LiteUserTask([string]$ExePath, $Desktop, [string]$Root, [bool]$Ba
     $text = New-LiteUserWorker $ExePath $Desktop.Sid $Desktop.Session $log $result $ListenAddress $Port $DataDirectory
     [IO.File]::WriteAllText($worker, $text, (New-Object Text.UTF8Encoding($false)))
     $taskName = 'SiwxLite-' + $id
-    $registered = $false; $detached = $false; $cancelled = $false
+    $registered = $false; $detached = $false; $cancelled = $false; $stage = 'resolve desktop'
     try {
         $fresh = Get-LiteDesktop $UserId
         if ($fresh.Sid -ne $Desktop.Sid -or $fresh.Session -ne $Desktop.Session) { throw 'Desktop session changed; refusing launch.' }
-        $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument ('/d /s /c ""' + $worker + '""') -WorkingDirectory $Root
-        $principal = New-ScheduledTaskPrincipal -UserId $Desktop.Sid -LogonType Interactive -RunLevel Limited
-        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        $stage = 'build task definition'
+        $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument ('/d /s /c ""' + $worker + '""') -WorkingDirectory $Root -ErrorAction Stop
+        $principal = New-ScheduledTaskPrincipal -UserId $schedulerUser -LogonType Interactive -RunLevel Limited -ErrorAction Stop
+        if (-not $principal -or (Get-LiteAccountSid $principal.UserId) -ne $Desktop.Sid) { throw 'Generated TaskPrincipal has an empty or mismatched UserId.' }
+        $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ErrorAction Stop
         $description = @{ Kind='SiwxLiteMenu341'; Sid=$Desktop.Sid; Session=$Desktop.Session; Exe=$ExePath; Port=$Port; Bind=$ListenAddress; Log=$log } | ConvertTo-Json -Compress
-        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Description $description | Out-Null
+        $definition = New-ScheduledTask -Action $action -Principal $principal -Settings $settings -Description $description -ErrorAction Stop
+        if (-not $definition -or (Get-LiteAccountSid $definition.Principal.UserId) -ne $Desktop.Sid) { throw 'Task definition lost the desktop UserId.' }
+        $stage = 'register task'
+        Register-ScheduledTask -TaskName $taskName -InputObject $definition -ErrorAction Stop | Out-Null
         $registered = $true
-        Write-Host (ConvertFrom-LiteText '\u5df2\u5207\u6362\u5230\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4ee5\u4e0b\u8f93\u51fa\u56de\u4f20\u5230\u5f53\u524dAgent\u7a97\u53e3\u3002')
+        $stage = 'verify registered task'
+        $registeredTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        if (-not (Test-LiteRegisteredTask $registeredTask $Desktop.Sid $worker $Root)) { throw 'Registered task identity/action did not match the requested desktop.' }
         Write-Host ('Task: ' + $taskName + '; Session: ' + $Desktop.Session + '; Log: ' + $log)
-        Start-ScheduledTask -TaskName $taskName
+        $stage = 'dispatch task'
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        Write-Host (ConvertFrom-LiteText '\u4efb\u52a1\u5df2\u6ce8\u518c\u5e76\u63d0\u4ea4\u542f\u52a8\uff0c\u6b63\u5728\u7b49\u5f85\u684c\u9762\u8f93\u51fa\uff1b\u4ee5\u5b9e\u9645\u65e5\u5fd7\u548c\u7f51\u9875\u5c31\u7eea\u4e3a\u51c6\u3002')
+        $stage = 'wait for desktop output'
         $started = Get-Date; $stopped = $null; $position = [long]0
         while (-not (Test-Path -LiteralPath $result)) {
             Show-LiteUserLog $log ([ref]$position)
@@ -371,11 +406,13 @@ function Start-LiteUserTask([string]$ExePath, $Desktop, [string]$Root, [bool]$Ba
                 $cancelled = $true
                 break
             }
-            $state = (Get-ScheduledTask -TaskName $taskName).State.ToString()
+            $currentTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            if (-not $currentTask -or $null -eq $currentTask.State) { throw 'Registered task disappeared while waiting for desktop output.' }
+            $state = $currentTask.State.ToString()
             if ($state -notin @('Running', 'Queued')) {
                 if (-not $stopped) { $stopped = Get-Date }
                 if (((Get-Date) - $stopped).TotalSeconds -ge 3) {
-                    $info = Get-ScheduledTaskInfo -TaskName $taskName
+                    $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction Stop
                     throw ('Desktop task stopped without result; code=' + $info.LastTaskResult + '; log=' + $log)
                 }
             } else { $stopped = $null }
@@ -390,14 +427,16 @@ function Start-LiteUserTask([string]$ExePath, $Desktop, [string]$Root, [bool]$Ba
         $code = (Get-Content -LiteralPath $result -Raw).Trim()
         if ($code -notmatch '^\d{1,10}$') { throw 'Invalid desktop exit marker.' }
         if ($code -ne '0') { throw ('SIWX Lite desktop worker exited: ' + $code + '; log=' + $log) }
+    } catch {
+        throw ('Stage=' + $stage + '; ' + $_.Exception.Message + '; Task=' + $taskName + '; Log=' + $log)
     } finally {
         if ($registered -and -not $detached) {
             $own = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-            if ($own -and $own.Principal.UserId -eq $Desktop.Sid -and $own.Actions[0].Arguments -eq ('/d /s /c ""' + $worker + '""')) {
-                if ($own.State.ToString() -in @('Running', 'Queued')) { Stop-ScheduledTask -TaskName $taskName -ErrorAction Continue }
+            if (Test-LiteRegisteredTask $own $Desktop.Sid $worker $Root) {
+                if ($null -ne $own.State -and $own.State.ToString() -in @('Running', 'Queued')) { Stop-ScheduledTask -TaskName $taskName -ErrorAction Continue }
                 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Continue
+                if (Test-LitePort $Port) { $null = Stop-LitePortOwner $ExePath $Desktop.Sid $Desktop.Session $Port }
             }
-            if (Test-LitePort $Port) { $null = Stop-LitePortOwner $ExePath $Desktop.Sid $Desktop.Session $Port }
         }
         # Keep this private diagnostic job for troubleshooting; no unrelated cleanup.
     }
@@ -408,7 +447,7 @@ function Show-LiteMenu([string]$ExePath, $Desktop, [string]$Root, [bool]$Service
     $preferred = $Port
     if ($preferred -eq 0) { $preferred = 8787 }
     while ($true) {
-        Write-Host (ConvertFrom-LiteText "`nSIWX \u7cbe\u7b80\u7248\u4e2d\u6587\u83dc\u5355 v1.3\uff08\u7a0b\u5e8f1.2.0\uff09  \u9996\u9009\u7aef\u53e3=$preferred  \u76d1\u542c=$ListenAddress")
+        Write-Host (ConvertFrom-LiteText "`nSIWX \u7cbe\u7b80\u7248\u4e2d\u6587\u83dc\u5355 v1.4\uff08\u7a0b\u5e8f1.2.0\uff09  \u9996\u9009\u7aef\u53e3=$preferred  \u76d1\u542c=$ListenAddress")
         Write-Host (ConvertFrom-LiteText '1 = \u73af\u5883\u68c0\u67e5   2 = \u542f\u52a8\u7f51\u9875\u8fdb\u884c\u81ea\u52a8\u63d0\u53d6 / \u89e3\u5bc6 / \u5bfc\u51fa')
         Write-Host (ConvertFrom-LiteText '6 = \u542f\u52a8\u7f51\u9875\u5e76\u663e\u793a\u65e5\u5fd7\uff08Q\u8fd4\u56de\u83dc\u5355\uff09   7 = \u540e\u53f0\u542f\u52a8\u7f51\u9875')
         Write-Host (ConvertFrom-LiteText '8 = \u540e\u53f0\u72b6\u6001 / \u7f51\u5740 / \u65e5\u5fd7   9 = \u505c\u6b62\u672c\u5de5\u5177\u7f51\u9875   0 = \u9000\u51fa\u83dc\u5355')

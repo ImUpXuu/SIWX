@@ -4,7 +4,7 @@ $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile((Resolve-Path $ScriptPath), [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
 # Load only named helper definitions; never call Start-LiteMain or execute the EXE.
-foreach ($name in @('ConvertFrom-LiteText', 'Assert-LitePlainPath', 'Assert-LiteDistribution', 'Get-LitePayload', 'Resolve-LiteDesktop', 'New-LiteUserWorker', 'Show-LiteUserLog', 'Start-LiteUserTask')) {
+foreach ($name in @('ConvertFrom-LiteText', 'Assert-LitePlainPath', 'Assert-LiteDistribution', 'Get-LitePayload', 'Resolve-LiteDesktop', 'New-LiteUserWorker', 'Show-LiteUserLog', 'Get-LiteAccountSid', 'Test-LiteRegisteredTask', 'Start-LiteUserTask')) {
     $node = @($ast.FindAll({ param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] }, $true) | Where-Object Name -eq $name)
     if ($node.Count -ne 1) { throw ('Missing helper: ' + $name) }
     Invoke-Expression $node[0].Extent.Text
@@ -83,25 +83,36 @@ try {
     $ListenAddress = '0.0.0.0'; $Port = 8787; $DataDirectory = ''; $UserId = ''
     $script:registrations = 0; $script:unregistrations = 0; $script:stops = 0; $script:failDispatch = $false; $script:backgroundReady = $false
     $savedSystemRoot = $env:SystemRoot; $env:SystemRoot = 'C:\Windows'
-    function Import-Module { param($Name) }
+    $script:failRegister=$false; $script:startCalls=0; $script:nullTask=$false; $script:badPrincipal=$false
+    function Import-Module { param($Name,$ErrorAction) }
+    function Get-LiteSchedulerUser { param($Sid) 'EXAMPLE\user_example' }
+    function Get-LiteAccountSid { param($Account)
+        if ($Account -eq 'EXAMPLE\user_example' -or $Account -eq $desktop.Sid) { return $desktop.Sid }
+        throw 'Unknown or empty task account.' }
     function Get-LiteDesktop { param($RequestedUser) $desktop }
     function New-LiteControlledDirectory { param($Path, $ReaderSid, $Writable) New-Item -ItemType Directory -Path $Path -Force | Out-Null }
-    function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) [pscustomobject]@{Execute=$Execute;Arguments=$Argument;WorkingDirectory=$WorkingDirectory} }
-    function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel)
+    function New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory,$ErrorAction) [pscustomobject]@{Execute=$Execute;Arguments=$Argument;WorkingDirectory=$WorkingDirectory} }
+    function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel,$ErrorAction)
+        if ($UserId -ne 'EXAMPLE\user_example') { throw 'Scheduler must use the resolved account name.' }
         if ($LogonType -ne 'Interactive' -or $RunLevel -ne 'Limited') { throw 'Incorrect scheduler identity policy.' }
+        if ($script:badPrincipal) { return [pscustomobject]@{UserId=''} }
         [pscustomobject]@{UserId=$UserId} }
-    function New-ScheduledTaskSettingsSet { param($ExecutionTimeLimit,[switch]$AllowStartIfOnBatteries,[switch]$DontStopIfGoingOnBatteries) [pscustomobject]@{} }
-    function Register-ScheduledTask { param($TaskName,$Action,$Principal,$Settings,$Description)
+    function New-ScheduledTaskSettingsSet { param($ExecutionTimeLimit,[switch]$AllowStartIfOnBatteries,[switch]$DontStopIfGoingOnBatteries,$ErrorAction) [pscustomobject]@{} }
+    function New-ScheduledTask {param($Action,$Principal,$Settings,$Description,$ErrorAction) [pscustomobject]@{Principal=$Principal;Actions=@($Action);Description=$Description} }
+    function Register-ScheduledTask { param($TaskName,$InputObject,$ErrorAction)
         if ($TaskName -notmatch '^SiwxLite-[a-f0-9]{32}$') { throw 'Bad task scope.' }
-        $script:registrations++; $script:task=[pscustomobject]@{Principal=$Principal;Actions=@($Action);State='Running'}
-        $script:jobRoot=$Action.WorkingDirectory }
-    function Start-ScheduledTask { param($TaskName)
+        if ($ErrorAction -ne 'Stop') { throw 'Register must explicitly stop on errors.' }
+        if ($script:failRegister) { Write-Error 'synthetic UserId 0x80070057'; return }
+        $script:registrations++; $script:task=[pscustomobject]@{Principal=$InputObject.Principal;Actions=$InputObject.Actions;State='Running'}
+        $script:jobRoot=$InputObject.Actions[0].WorkingDirectory }
+    function Start-ScheduledTask { param($TaskName,$ErrorAction)
+        $script:startCalls++
         if ($script:failDispatch) { throw 'synthetic dispatch failure' }
         if ($script:backgroundReady) { return }
         $job = Get-ChildItem -LiteralPath $script:jobRoot -Directory | Where-Object Name -like 'job-*' | Select-Object -Last 1
         [IO.File]::WriteAllText((Join-Path $job.FullName 'logs/output.log'), "synthetic user worker`n")
         [IO.File]::WriteAllText((Join-Path $job.FullName 'logs/exit.txt'), "0`n") }
-    function Get-ScheduledTask { param($TaskName,$ErrorAction) $script:task }
+    function Get-ScheduledTask { param($TaskName,$ErrorAction) if(-not $script:nullTask){$script:task} }
     function Stop-ScheduledTask { param($TaskName,$ErrorAction) $script:stops++ }
     function Unregister-ScheduledTask { param($TaskName,$Confirm,$ErrorAction) $script:unregistrations++ }
     function Test-LitePort { param($Port) $false }
@@ -118,8 +129,22 @@ try {
         $bridgeRoot = Join-Path $temp 'bridge3'; New-Item -ItemType Directory -Path $bridgeRoot | Out-Null
         Start-LiteUserTask $exe $desktop $bridgeRoot $true 6>$null
         if ($script:registrations -ne 3 -or $script:unregistrations -ne 2 -or $script:stops -ne 2) { throw 'Ready background was stopped while returning to the menu.' }
+        $calls=$script:startCalls; $script:failRegister=$true
+        $bridgeRoot = Join-Path $temp 'bridge4'; New-Item -ItemType Directory -Path $bridgeRoot | Out-Null
+        $failure=''
+        try { Start-LiteUserTask $exe $desktop $bridgeRoot $true 6>$null } catch { $failure=$_.Exception.Message }
+        if ($failure -notmatch 'Stage=register task;.*synthetic UserId' -or $script:startCalls-ne$calls -or $script:unregistrations-ne 2) { throw 'Nonterminating registration failure caused dispatch, false success, or unrelated cleanup.' }
+        $script:failRegister=$false; $script:nullTask=$true
+        $bridgeRoot = Join-Path $temp 'bridge5'; New-Item -ItemType Directory -Path $bridgeRoot | Out-Null
+        Must-Fail { Start-LiteUserTask $exe $desktop $bridgeRoot $true 6>$null }
+        if ($script:startCalls-ne$calls){throw 'Missing registered task was dispatched'}
+        $script:nullTask=$false; $script:badPrincipal=$true
+        $bridgeRoot = Join-Path $temp 'bridge6'; New-Item -ItemType Directory -Path $bridgeRoot | Out-Null
+        $before=$script:registrations
+        Must-Fail { Start-LiteUserTask $exe $desktop $bridgeRoot $true 6>$null }
+        if ($script:registrations-ne$before -or $script:startCalls-ne$calls){throw 'Empty principal was registered/dispatched'}
     } finally { $env:SystemRoot = $savedSystemRoot }
-    Write-Output 'PASS: syntax/hash/path/download gates; desktop selection, CMD SID/quoting/injection, output relay, Limited dispatch/failure cleanup/background retention simulated; EXE never executed.'
+    Write-Output 'PASS: prior hash/session/CMD/relay gates; named Limited principal, full task definition, success/failure/background retention; nonterminating registration error and null task/empty principal stop before dispatch; EXE never executed.'
 } finally {
     if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
 }

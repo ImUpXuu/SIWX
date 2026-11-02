@@ -3,7 +3,7 @@ $tokens=$null; $errors=$null
 $source=Join-Path (Split-Path -Parent $PSScriptRoot) 'Start-SiwxLite.ps1'
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw ($errors|Out-String)}
-foreach($name in @('ConvertFrom-LiteText','Show-LiteMenu','Get-LiteBackgroundTasks')){
+foreach($name in @('ConvertFrom-LiteText','Show-LiteMenu','Get-LiteAccountSid','Get-LiteBackgroundTasks')){
     $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
     . ([scriptblock]::Create($node.Extent.Text))
 }

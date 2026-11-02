@@ -104,3 +104,26 @@ CMD UTF8输出和退出码回传当前Agent终端，保持窗口，网页停止�
 归属与PID复用/外来任务拒绝/真socket绑定和耗尽选择均需通过；实际Windows结束与重启仍待用户测试。
 回退341脚本和配套清单至340备份（核当前新SHA后恢复），原包、旧用户数据及私有诊断目录保留，
 只精确停自有任务不批量删除。跨会话日志仅本机私有记录，不上传真实账号/聊天/密钥。
+
+## 342 · UserId注册失败与错误链修复（2026-11-02）
+
+用户341实测表明程序完整性/端口正常，TaskScheduler在注册XML UserId时返回0x80070057；
+后续Start/Get继续执行形成“文件不存在/Null”连锁。真实SID或用户输出不复制到源码和普通文档。
+
+本版将目标SID解析为明确NTAccount账户名后反向核SID，TaskPrincipal以该账户名+
+Interactive/Limited生成，检查生成principal和完整TaskDefinition的UserId未丢失。
+注册使用完整TaskDefinition对象，并显式`-ErrorAction Stop`，函数自身也设Stop；
+成功注册后Get读取实际任务，再按SID（可接受账户名解析）、准确cmd动作/参数/工作目录核对后才派发。
+任一阶段失败立刻返回菜单，显示Stage及原始错误，不再提示“已切换运行”或盲目Start/轮询空任务。
+注册后的状态为空/任务消失也明确失败；清理只处理核对成功的本次任务。
+后台状态与停止兼容scheduler返回SID或账户名两种格式，不能因名称格式变化漏掉自有任务。
+
+SID标识本身不是一律非法；微软TaskScheduler文档允许账号标识，具体设备的0x80070057原因
+仍需真实Windows反馈判断。本次是账户名规范化和可靠失败处理，不宣称替换名称已实机修好。
+模拟覆盖了正常/派发失败/背景保留、Register非终止错误不dispatch/不误报、空principal和空任务拒绝。
+菜单数字和8787归属/自动换端口规则不改，338原包不改、不关闭防护或提升权限。
+失败请反馈新的Stage错误；不要上传原始聊天、密钥或完整诊断目录。
+
+参考：Microsoft Learn New-ScheduledTaskPrincipal 和 Register-ScheduledTask 参数规范，
+https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/new-scheduledtaskprincipal
+https://learn.microsoft.com/en-us/powershell/module/scheduledtasks/register-scheduledtask
