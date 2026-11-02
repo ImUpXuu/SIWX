@@ -1,3 +1,9 @@
+> **安全离线合并版（任务336）**：SIWX 与 wexport 的安全解析/导出能力已合入
+> [safe/](safe/README.md)。此独立版仅处理主动选择的 JSON 文件，提供桌面浏览、
+> 搜索和五种格式导出，不包含提取密钥、进程注入、后台服务或远程访问。
+> 使用 `python safe/app.py`，或运行 `Build safe offline Windows` 工作流构建。
+> 下文为旧版功能说明，旧版安装入口和旧EXE不会自动变为安全版；实际杀软检测待实测。
+
 <div align="center">
 
 # Stories in WX · SIWX

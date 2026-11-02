@@ -1,0 +1,46 @@
+name: Build safe offline Windows
+
+on:
+  push:
+    branches: ['codex/safe-offline-*']
+    paths: ['safe/**', '.github/workflows/safe-offline.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: '1'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test isolated offline edition
+        working-directory: safe
+        run: python -m unittest discover -s tests -v
+      - name: Build directory distribution without UPX
+        working-directory: safe
+        run: |
+          python -m pip install pyinstaller==6.16.0
+          python -m PyInstaller --noconfirm --clean safe.spec
+          ./dist/siwx-safe/siwx-safe.exe --help
+          ./dist/siwx-safe/siwx-safe.exe --version
+          Copy-Item README.md dist/siwx-safe/README.txt
+          Copy-Item THIRD-PARTY.md dist/siwx-safe/THIRD-PARTY.txt
+          Copy-Item ../LICENSE dist/siwx-safe/LICENSE.txt
+          Copy-Item module-manifest.json dist/siwx-safe/module-manifest.json
+          Get-ChildItem dist/siwx-safe -File -Recurse | ForEach-Object {
+            $relative = $_.FullName.Substring((Resolve-Path dist/siwx-safe).Path.Length + 1)
+            "$( (Get-FileHash $_.FullName -Algorithm SHA256).Hash )  $relative"
+          } | Set-Content -Encoding utf8 dist/siwx-safe/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: siwx-safe-windows-x64
+          path: safe/dist/siwx-safe/
+          if-no-files-found: error
+          retention-days: 14
