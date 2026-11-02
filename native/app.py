@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse, json, os, platform, sys
 
-VERSION='1.5.1'
+VERSION='1.5.2'
 BASE=Path(__file__).resolve().parent
 if not getattr(sys,'frozen',False):sys.path.insert(0,str(BASE/'_build'))
 
@@ -25,7 +25,7 @@ def make_app():
   from flask import abort,send_file
   path=(Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else BASE)/'SOURCE.zip'
   if not path.is_file():abort(404)
-  return send_file(path,as_attachment=True,download_name='SIWX-1.5.1-source.zip')
+  return send_file(path,as_attachment=True,download_name='SIWX-1.5.2-source.zip')
  @server.app.before_request
  def removed_features():
   from flask import abort,request
@@ -37,7 +37,7 @@ def main(argv=None):
  parser=argparse.ArgumentParser(description='SIWX native edition: original pages and backend, selected features removed.')
  parser.add_argument('--version',action='version',version='SIWX '+VERSION+' (original SIWX 5.2.0)')
  parser.add_argument('command',nargs='?',choices=['probe'])
- parser.add_argument('--host',choices=['0.0.0.0','127.0.0.1'],default='0.0.0.0')
+ parser.add_argument('--host',choices=['127.0.0.1'],default='127.0.0.1')
  parser.add_argument('--port',type=int,default=8787)
  parser.add_argument('--no-open',action='store_true')
  parser.add_argument('--data',type=Path)

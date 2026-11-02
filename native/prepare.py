@@ -96,7 +96,7 @@ def find_wechat_data_dirs():''');s=once(s,"if drive.is_dir():","if _is_accessibl
   assert (SOURCE/name).read_bytes()==(BUILD/'siwx'/name).read_bytes(),name
  try:source_ref=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,stderr=subprocess.DEVNULL).decode().strip()
  except subprocess.CalledProcessError:source_ref=(ROOT.parent/'SOURCE-REVISION.txt').read_text().strip()
- manifest={'version':'1.5.1','base':'SIWX5.2.0','source_ref':source_ref,'changed':changes,'files':files,'removed':sorted(REMOVED_MODULES),'retained':'Original upstream chat/messages/media/export/SNS/setup/settings/logs and extract/decrypt/cache; no safe/adapter imports'}
+ manifest={'version':'1.5.2','base':'SIWX5.2.0','source_ref':source_ref,'changed':changes,'files':files,'removed':sorted(REMOVED_MODULES),'retained':'Original upstream chat/messages/media/export/SNS/setup/settings/logs and extract/decrypt/cache; no safe/adapter imports'}
  (BUILD/'native-source-manifest.json').write_text(json.dumps(manifest,indent=2))
  return manifest
 if __name__=='__main__':
