@@ -100,12 +100,12 @@ function clearData() {
   $('c-title').textContent = '微信'; $('c-sub').textContent = '选择一个会话查看聊天记录';
   $('c-page').textContent = ''; $('c-msgs').replaceChildren(node('div', 'c-tip', '选择账号并提取后查看聊天记录'));
   $('c-timeline-list').replaceChildren(node('div', 'tl-empty', '打开会话后可按月份跳转'));
-  renderChats(); renderExport(); renderAccount(); updateSelection();
+  renderChats(); renderExport(); renderAccount(); renderSettings(); updateSelection();
 }
 async function extract(index) {
   clearData(); $('ob-status').textContent = '正在提取并读取，请保持微信登录…';
   const result = await json('/api/open', {account: index, consent: true});
-  state.account = index; state.opened = true; state.chats = await json('/api/chats');
+  state.account = index; state.opened = true; state.chats = await json('/api/chats');$('toast').hidden=true;
   if(!wizardActive)$('account-modal').hidden=true;renderAccount();renderChats();renderExport();renderSettings();
   if(!wizardActive&&!$('sns-page').hidden)await mountSns();
   if (result.warnings) toast('部分数据库未能读取，当前展示可用记录。');
