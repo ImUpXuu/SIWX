@@ -20,6 +20,12 @@ def make_app():
  @server.app.get('/api/native/version')
  def native_version():return {'version':VERSION,'base':'5.2.0','edition':'original pages and backend'}
  # Defense against plugin reintroductions; feature removal, not caller authentication.
+ @server.app.get('/api/native/source')
+ def native_source():
+  from flask import abort,send_file
+  path=(Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else BASE)/'SOURCE.zip'
+  if not path.is_file():abort(404)
+  return send_file(path,as_attachment=True,download_name='SIWX-1.5.0-source.zip')
  @server.app.before_request
  def removed_features():
   from flask import abort,request
