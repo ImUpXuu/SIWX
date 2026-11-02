@@ -149,10 +149,10 @@ try {
     $result = $temporary + '.result'
     $root = $temporary + '.root'
     foreach ($arguments in @('--version',
-        '--host 0.0.0.0 --port 8787 --no-open',
-        '--host 0.0.0.0 --port 8787 --no-open',
-        '--host 0.0.0.0 --port 8788 --no-open',
-        '--host 0.0.0.0 --port 8887 --no-open')) {
+        '--host 127.0.0.1 --port 8787 --no-open',
+        '--host 127.0.0.1 --port 8787 --no-open',
+        '--host 127.0.0.1 --port 8788 --no-open',
+        '--host 127.0.0.1 --port 8887 --no-open')) {
         $cmd = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root
         if (-not $cmd.Contains('"' + $exe + '" ' + $arguments + ' <nul') -or
             -not $cmd.Contains('set "SIWX_ROOT=' + $root + '"') -or
@@ -161,10 +161,10 @@ try {
             throw 'CMD quoting, argument forwarding, runtime root, or single-pass substitution failed.'
         }
     }
-    foreach ($arguments in @('--version & whoami', 'serve --host 0.0.0.0', '--host 0.0.0.0', 'backup --yes',
-        '--host 0.0.0.0 --port 8787 --no-open & echo bad',
-        '--host 0.0.0.0 --port 8786 --no-open',
-        '--host 0.0.0.0 --port 8888 --no-open')) {
+    foreach ($arguments in @('--host 0.0.0.0 --port 8787 --no-open', '--version & whoami', 'serve --host 127.0.0.1', '--host 127.0.0.1', 'backup --yes',
+        '--host 127.0.0.1 --port 8787 --no-open & echo bad',
+        '--host 127.0.0.1 --port 8786 --no-open',
+        '--host 127.0.0.1 --port 8888 --no-open')) {
         $rejected = $false
         try { $null = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root }
         catch { $rejected = $true }

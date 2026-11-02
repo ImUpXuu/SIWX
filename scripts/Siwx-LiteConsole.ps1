@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 # One-command Windows entry; no Python installation required.
-# Task351: original native pages, skip inaccessible drive candidates, 1.5.1.
+# Task352: native 1.5.2 listens only on IPv4 loopback for a local proxy.
 & {
     # ASCII source keeps Chinese prompts intact in Windows PowerShell 5.1 and irm/iex.
     function ConvertFrom-ConsoleText([string]$Text) {
@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.14\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.15\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -122,11 +122,11 @@
         $legacyExePath = $null
         $installBase = Join-Path $env:SystemRoot 'SIWX'
         New-SiwxInstallDirectory $installBase
-        $installPath = Join-Path $installBase 'lite-1.5.1-153c979'
+        $installPath = Join-Path $installBase 'lite-1.5.2-4f20738'
         $exePath = Join-Path $installPath 'siwx-lite.exe'
-        $expectedZipHash = '6c832b5a803a856ab9db628aab751027e9504c3976aed088a49da3878e089e8e'
-        $manifestHash = 'b4d1ab713bfffd00be42e570e8283dacd79eded3fe775c933f79c05ccd3418c5'
-        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-native-1.5.1-153c979-windows-x64.zip'
+        $expectedZipHash = '2c914f24cff85a91731be3356495e39cd48852e55b18c659ae15c1941e7c6c6e'
+        $manifestHash = 'a96f7e62b768c1b544546d9aa7c71139f15cf19b9266f4743ef168b606d61cd2'
+        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-native-1.5.2-4f20738-windows-x64.zip'
         [Net.ServicePointManager]::SecurityProtocol = $previousTls -bor [Net.SecurityProtocolType]::Tls12
         function Assert-SiwxPlainPath([string]$Path) {
             $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -217,13 +217,13 @@
         $preferredPort = 8787
         Write-Host (ConvertFrom-ConsoleText "\u7a0b\u5e8f\u4f4d\u7f6e\uff1a$exePath")
         Write-Host (ConvertFrom-ConsoleText "\u8fd0\u884c\u53ca\u8f93\u51fa\u76ee\u5f55\uff1a$rootPath")
-        Write-Host 'Lite 1.5.1 / 0.0.0.0 / no IP, Host, Origin, token or password checks.'
+        Write-Host 'Lite 1.5.2 / 127.0.0.1 / no IP, Host, Origin, token or password checks.'
         $bridgeDirectory = Join-Path "$env:SystemRoot\Temp" ('SiwxBridge-' + [Guid]::NewGuid().ToString('N'))
         New-SiwxPrivateDirectory $bridgeDirectory $sid
 
         function Test-SiwxPort([ValidateRange(8787, 8887)][int]$Port = 8787) {
             # Binding detects listeners, reserved ports and sockets not accepting connections.
-            $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any, $Port)
+            $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
             try {
                 $listener.Server.ExclusiveAddressUse = $true
                 $listener.Start()
@@ -263,7 +263,7 @@
             $knownPath = [StringComparer]::OrdinalIgnoreCase.Equals($Record.Path, $ExePath)
             if (-not $knownPath) { return $false }
             $pathPattern = [regex]::Escape($Record.Path)
-            $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+--host\s+0\.0\.0\.0\s+--port\s+' + $Port + '\s+--no-open(?:\s+--data\s+"[^"%\r\n]+")?\s*$'
+            $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+--host\s+127\.0\.0\.1\s+--port\s+' + $Port + '\s+--no-open(?:\s+--data\s+"[^"%\r\n]+")?\s*$'
             return $Record.Command -imatch $pattern
         }
 
@@ -395,7 +395,7 @@
                 }
             }
             if ($Sid -notmatch '^S-1-[0-9-]+$') { throw (ConvertFrom-ConsoleText '\u7528\u6237 SID \u65e0\u6548\u3002') }
-            if ($ArgumentLine -notmatch '^(--version|--host 0\.0\.0\.0 --port (?:878[7-9]|879[0-9]|88[0-7][0-9]|888[0-7]) --no-open|probe)$') {
+            if ($ArgumentLine -notmatch '^(--version|--host 127\.0\.0\.1 --port (?:878[7-9]|879[0-9]|88[0-7][0-9]|888[0-7]) --no-open|probe)$') {
                 throw (ConvertFrom-ConsoleText '\u4e0d\u652f\u6301\u6b64\u547d\u4ee4\u53c2\u6570\u3002')
             }
             if (-not $RootPath -or $RootPath -match '[%"\r\n]') { throw (ConvertFrom-ConsoleText '\u8fd0\u884c\u6839\u76ee\u5f55\u5305\u542b\u4e0d\u5b89\u5168\u5b57\u7b26\u3002') }
@@ -710,7 +710,7 @@ try {
             $siwxArguments = switch ($nextCommand) {
                 'p' { 'probe' }
                 '1' { '--version' }
-                { $_ -in @('2', '6', '7', '10', '11') } { '--host 0.0.0.0 --port 8787 --no-open' }
+                { $_ -in @('2', '6', '7', '10', '11') } { '--host 127.0.0.1 --port 8787 --no-open' }
             }
             if (-not $siwxArguments) { $nextCommand = $null; continue }
             $webPort = 8787
@@ -757,7 +757,7 @@ try {
                 -Settings $settings -Description $description -ErrorAction Stop | Out-Null
             Write-Host (ConvertFrom-ConsoleText "`n\u6b63\u5728\u4ee5 $userId \u8eab\u4efd\u8fd0\u884c\uff0c\u4ee5\u4e0b\u4e3a\u8be5\u7528\u6237\u7684\u7a0b\u5e8f\u8f93\u51fa\u3002")
             Write-Host (ConvertFrom-ConsoleText "\u8bca\u65ad\u4efb\u52a1\uff1a$currentTask")
-            if ($isServe) { Write-Host ('Listening 0.0.0.0:' + $webPort + ' / no authentication; use the actual computer IP or mapped domain.') }
+            if ($isServe) { Write-Host ('Listening 127.0.0.1:' + $webPort + ' / no authentication; use localhost or a proxy client on this computer.') }
             if ($isProbe) { Write-Host (ConvertFrom-ConsoleText '\u6b63\u5728\u68c0\u67e5\u7528\u6237\u4f1a\u8bdd CMD \u540e\u7aef\uff0c\u901a\u8fc7\u540e\u624d\u4f1a\u8fd0\u884c siwx.exe\u2026\u2026') }
             Write-Host (ConvertFrom-ConsoleText "\u6309 Q \u505c\u6b62\u5e76\u8fd4\u56de\u83dc\u5355\uff0cCtrl+C \u9000\u51fa\u3002\u7f51\u9875\u5730\u5740\uff1ahttp://127.0.0.1:$webPort/")
             $interactiveKeyboard = -not [Console]::IsInputRedirected

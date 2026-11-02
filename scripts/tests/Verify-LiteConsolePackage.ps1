@@ -59,10 +59,10 @@ try{
     Must-Fail {Assert-SiwxDistribution $payload $unsafeHash}
     $link=Join-Path $temp 'link';New-Item -ItemType SymbolicLink -Path $link -Target $payload|Out-Null
     Must-Fail {Assert-SiwxPlainPath $link}
-    $cmd=New-SiwxCmdWorker 'C:\Tools\siwx-lite.exe' 'S-1-5-21-1-1001' 'C:\Temp\job.log' 'C:\Temp\job.result' '--host 0.0.0.0 --port 8789 --no-open' $false 'C:\Temp\root' 'D:\example & !{LOG}\user_a'
-    if(-not $cmd.Contains('--host 0.0.0.0 --port 8789 --no-open --data "D:\example & !{LOG}\user_a" <nul')){throw 'Data argument quoting/forwarding failed'}
+    $cmd=New-SiwxCmdWorker 'C:\Tools\siwx-lite.exe' 'S-1-5-21-1-1001' 'C:\Temp\job.log' 'C:\Temp\job.result' '--host 127.0.0.1 --port 8789 --no-open' $false 'C:\Temp\root' 'D:\example & !{LOG}\user_a'
+    if(-not $cmd.Contains('--host 127.0.0.1 --port 8789 --no-open --data "D:\example & !{LOG}\user_a" <nul')){throw 'Data argument quoting/forwarding failed'}
     foreach($bad in @('D:\bad%PATH%','D:\bad"path',"D:\bad`npath")){
-        Must-Fail {New-SiwxCmdWorker 'C:\Tools\siwx-lite.exe' 'S-1-5-21-1-1001' 'C:\Temp\j.log' 'C:\Temp\j.result' '--host 0.0.0.0 --port 8787 --no-open' $false 'C:\Temp\root' $bad}
+        Must-Fail {New-SiwxCmdWorker 'C:\Tools\siwx-lite.exe' 'S-1-5-21-1-1001' 'C:\Temp\j.log' 'C:\Temp\j.result' '--host 127.0.0.1 --port 8787 --no-open' $false 'C:\Temp\root' $bad}
     }
     if($Distribution){Assert-SiwxDistribution $Distribution $DistributionManifestHash}
     Write-Output 'PASS: real ZIP install/reuse, full manifest/files, tamper/extra/traversal/symlink rejection, hash/manifest/network failure cleanup, optional data quoting; no EXE execution or real ACL changes'

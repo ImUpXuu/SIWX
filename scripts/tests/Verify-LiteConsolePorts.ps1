@@ -7,12 +7,15 @@ foreach($name in @('ConvertFrom-ConsoleText','Test-SiwxProcessRecord','Open-Siwx
     $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
     . ([ScriptBlock]::Create($node.Extent.Text))
 }
+if(-not $ast.Extent.Text.Contains('[Net.IPAddress]::Loopback') -or $ast.Extent.Text.Contains('[Net.IPAddress]::Any')){throw 'Port probe must bind only loopback'}
 $exe='C:\Tools\siwx-lite.exe';$sid='S-1-5-21-1-1001';$sessionId=2
 function New-Fixture {
     [pscustomobject]@{Id=101;ParentId=100;Name='siwx-lite.exe';Path=$exe;Sid=$sid;Session=$sessionId;
-        Created=[datetime]'2026-01-01T00:00:01Z';Command=('"'+$exe+'" --host 0.0.0.0 --port 8787 --no-open')}
+        Created=[datetime]'2026-01-01T00:00:01Z';Command=('"'+$exe+'" --host 127.0.0.1 --port 8787 --no-open')}
 }
 $record=New-Fixture
+$wrongBind=New-Fixture;$wrongBind.Command=$wrongBind.Command.Replace('127.0.0.1','0.0.0.0')
+if(Test-SiwxProcessRecord $wrongBind $exe $sid $sessionId){throw 'Non-loopback command owner accepted'}
 if(-not (Test-SiwxProcessRecord $record $exe $sid $sessionId)){throw 'Valid owner rejected'}
 foreach($field in @('Name','Path','Sid','Session','Created','Command')){
     $bad=New-Fixture
@@ -101,7 +104,8 @@ try {
     $freePort=0
     foreach($candidate in 8787..8887){if(-not (Test-SiwxPort $candidate)){$freePort=$candidate;break}}
     if(-not $freePort){throw 'Test environment has no free fixture port'}
-    $socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any, $freePort)
+    $socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $freePort)
+    $socket.Server.ExclusiveAddressUse=$true
     $socket.Start()
     if(-not (Test-SiwxPort $freePort)){throw 'Real bound port undetected'}
 } finally {$socket.Stop()}
