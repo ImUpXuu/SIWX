@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.16\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.17\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -122,11 +122,11 @@
         $legacyExePath = $null
         $installBase = Join-Path $env:SystemRoot 'SIWX'
         New-SiwxInstallDirectory $installBase
-        $installPath = Join-Path $installBase 'lite-1.6.0-9419f05'
+        $installPath = Join-Path $installBase 'lite-1.6.1-c7e7a9b'
         $exePath = Join-Path $installPath 'siwx-lite.exe'
-        $expectedZipHash = '0b3b5d94b696370a3b42b46f5b99e4695744317f019beb19968e79495eb9e5bc'
-        $manifestHash = 'bd9ed72c17903dc344b20b880f28828df8797a21febec5dae470c52d5573a688'
-        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-native-1.6.0-9419f05-windows-x64.zip'
+        $expectedZipHash = 'e0c8d40e49d2b6078d49569bf731e8e89976db2cc250b82a45f4a8c5e3ab206e'
+        $manifestHash = '94026daba377efb0b03e68a791e240f382b4f11487ac2acc4aadbec026e80e10'
+        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-native-1.6.1-c7e7a9b-windows-x64.zip'
         [Net.ServicePointManager]::SecurityProtocol = $previousTls -bor [Net.SecurityProtocolType]::Tls12
         function Assert-SiwxPlainPath([string]$Path) {
             $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -217,7 +217,7 @@
         $preferredPort = 8787
         Write-Host (ConvertFrom-ConsoleText "\u7a0b\u5e8f\u4f4d\u7f6e\uff1a$exePath")
         Write-Host (ConvertFrom-ConsoleText "\u8fd0\u884c\u53ca\u8f93\u51fa\u76ee\u5f55\uff1a$rootPath")
-        Write-Host 'Lite 1.6.0 / 127.0.0.1 / no IP, Host, Origin, token or password checks.'
+        Write-Host 'Lite 1.6.1 / 127.0.0.1 / no IP, Host, Origin, token or password checks.'
         $bridgeDirectory = Join-Path "$env:SystemRoot\Temp" ('SiwxBridge-' + [Guid]::NewGuid().ToString('N'))
         New-SiwxPrivateDirectory $bridgeDirectory $sid
 
@@ -265,6 +265,7 @@
                 'lite-1.5.0-9b2b748' = 'ff43d33b8ac01935994413316f34bc4e31732f4cb60826da64b37d8651cfbd90'
                 'lite-1.5.1-153c979' = 'b4d1ab713bfffd00be42e570e8283dacd79eded3fe775c933f79c05ccd3418c5'
                 'lite-1.5.2-4f20738' = 'a96f7e62b768c1b544546d9aa7c71139f15cf19b9266f4743ef168b606d61cd2'
+                'lite-1.6.0-9419f05' = 'bd9ed72c17903dc344b20b880f28828df8797a21febec5dae470c52d5573a688'
             }
             try {
                 $base = Join-Path $env:SystemRoot 'SIWX'
