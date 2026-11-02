@@ -1323,7 +1323,7 @@ return function render(_ctx, _cache) {
 
 async function init(view) {
   const activeGeneration=++generation;
-  store.timeline=[]; store.friends=[]; store.friendsLoaded=false; store.friendsLoading=false; store.account=''; store.notice=''; store.hasMore=false; store.before=null; store.loading=false; store.exportState='idle'; store.exportResult=null; store.modal.visible=false; store.lightbox.visible=false;
+  store.timeline=[]; store.friends=[]; store.friendsLoaded=false; store.friendsLoading=false; store.account=''; store.notice=''; store.hasMore=false; store.before=null; store.loading=false; store.exportState='idle'; store.exportResult=null; store.modal={visible:false,post:null,error:''}; store.lightbox={visible:false,src:'',video:false,items:[],index:0};
   // 全局事件：点外面关弹层 / Esc 关弹层与灯箱（「···」菜单由 widgets.openMenu
   // 自带点外/Esc 收起，不再走 store 互斥）
   _docClick = ev => {
@@ -1409,8 +1409,8 @@ function destroy() {
   if (_docClick) { document.removeEventListener('click', _docClick); _docClick = null; }
   if (_keyDown) { document.removeEventListener('keydown', _keyDown); _keyDown = null; }
   clearTimeout(_kwTimer);
-  store.lightbox.visible = false;
-  store.modal.visible = false;
+  store.lightbox={visible:false,src:'',video:false,items:[],index:0};
+  store.modal={visible:false,post:null,error:''};
   if (_app) { try { _app.unmount(); } catch (e) { /* 忽略 */ } _app = null; }
   vm = null;
 }
