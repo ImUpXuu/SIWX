@@ -1,36 +1,43 @@
-# 当前入口：原 SIWX 脚本启动 Lite 1.2.1（2026-11-02，任务344）
+# 原版 SIWX 与精简版使用独立脚本（2026-11-02，任务346）
 
-用户明确要求使用原先的脚本。`Siwx-Console.ps1` v1.8 继续使用原来的
-WScript 隐藏启动 → CMD → 已登录桌面用户 → 日志回传链路，调用新版 `siwx-lite.exe`。
-不再使用 `Start-SiwxLite.ps1` v1.4 的直接CMD任务读回核对流程。
+用户澄清：原脚本继续启动原版程序，新修改的程序使用新脚本。任务344将原入口
+切换到Lite属于误解，已恢复；以下两个入口分开维护。
+
+| 版本 | 源脚本 | 程序 | 下载入口 |
+|---|---|---|---|
+| 原版 | `Siwx-Console.ps1` v1.7 | 原 SIWX 5.2.0 EXE | `siwx.ps1?v=cn321` |
+| 精简版 | `Siwx-LiteConsole.ps1` v1.8 | Lite 1.2.1 目录包 | `siwx-lite.ps1?v=346` |
+
+原来的命令保持原版：
 
 ```powershell
-irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=344' | iex
+irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn321' | iex
 ```
 
-在原来的 SYSTEM / 管理员 PowerShell 中运行，选择本人已登录且微信在运行的桌面用户。
-菜单1检查版本；2/6启动网页并显示日志；7后台启动；8状态/网址/日志；9停止；
-12/13只读搜索数据目录；14设置包含`db_storage`的账号目录（回车清除）；15选首选端口。
-旧10/11兼容为6/7，不附加任何鉴权模式；不显示精简程序没有的密钥缓存/解密子命令。
-默认 `0.0.0.0:8787`，占用时只停止确认归属的本版本进程，否则在8787–8887寻找空闲端口。
-其他设备用电脑实际IP或已有映射域名访问；0.0.0.0不是浏览器地址。更换端口后手动同步既有映射。
+新修改的精简程序使用：
 
-程序不检查IP、Host、Origin、Sec-Fetch-Site，不设令牌、账号、密码或Cookie鉴权。
-可以连接端口的客户端可直接提取、浏览、导出或停止。程序不自动改已有外部反代的配置。
-HTTP数据格式、大小、路径、CMD参数与进程归属校验仍保留，它们用于防误操作和正确解析。
+```powershell
+irm 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite.ps1?v=346' | iex
+```
 
-目录包固定为云构建 `56e6d05` / run `41396774164` 的 Lite 1.2.1，安装于
-`%SystemRoot%\SIWX\lite-1.2.1-56e6d05`，保留`_internal`。
-下载ZIP固定SHA-256、内部清单固定SHA-256及全部文件核对通过才启动；已有版本不覆盖，
-篡改/额外文件/重解析路径拒绝，失败只清本次临时目录。原5.2.0 EXE、用户数据和旧包保留。
-文件校验及本地账户/任务归属校验不属于网页访问鉴权。
-脚本本身未签名，HTTP bootstrap不构成独立来源认证；不更改执行策略、杀软或防火墙。
+两者都沿用原WScript隐藏启动→CMD→本人已登录桌面用户→日志回传方式；
+在原SYSTEM/管理员PowerShell运行，选择微信所在的本人桌面用户。
+原脚本恢复任务321原字节，不改其5.2.0下载固定摘要/旧功能/监听与反代参数。
+`?v=`只是缓存标记，不能将已被替换的文件变回旧版；原入口本次已实际恢复。
 
-验证：`Verify-SiwxConsole.ps1`、`Verify-PortOwner.ps1`、`Verify-OriginalLite.ps1`；
-Windows云脚本检查走 `Verify original SIWX Lite launcher`。
-源产品和脚本分别提交；本地测试/云构建/分发/真实Windows微信与杀软验收分别记录。
-回退使用备份旧脚本（先核当前新SHA）或Git正常revert；无数据库迁移/回灌和备份裁剪。
-`Start-SiwxLite.ps1`及其文档保留为任务342历史入口，固定旧1.2.0包，不能当成本次新入口。
+精简版菜单1版本，2/6网页前台，7后台，8状态/网址/日志，9停止，12/13只读目录搜索，
+14账号目录(含`db_storage`)，15首选端口。默认`0.0.0.0:8787`；占用只停确认归属的本版本
+进程，否则在8787–8887换空闲端口。使用实际IP/既有映射域名，端口变化手动同步映射。
+精简程序没有IP/Host/Origin/Sec-Fetch-Site白名单或token/密码/Cookie鉴权；
+不自动修改外部反代认证。JSON类型/大小/路径与本地进程归属校验保留。
+新版安装`%SystemRoot%\SIWX\lite-1.2.1-56e6d05`，固定原Windows云构建ZIP、
+内部清单与全部文件SHA，先stage验证再移动；已有版本不覆盖。旧5.2.0 EXE、数据和旧包保留。
+`Start-SiwxLite.ps1`为任务342历史源，独立新分发入口现对应`Siwx-LiteConsole.ps1`。
+
+新脚本验证：`Verify-SiwxLiteConsole.ps1`、`Verify-LiteConsolePorts.ps1`、
+`Verify-LiteConsolePackage.ps1`；原脚本验证保留`Verify-SiwxConsole.ps1`、`Verify-PortOwner.ps1`。
+Windows5.1云检查为`Verify separate SIWX launchers`。真实Windows微信/任务与杀软仍须实机验收。
+恢复四个分发目标须核当前本次新SHA后恢复before字节；无DB回灌、无旧包删除或备份裁剪。
 
 以下为历史维护记录；与上文冲突时以任务344的当前入口为准。
 

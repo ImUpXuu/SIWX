@@ -148,11 +148,11 @@ try {
     $log = $temporary + '.log'
     $result = $temporary + '.result'
     $root = $temporary + '.root'
-    foreach ($arguments in @('--version',
-        '--host 0.0.0.0 --port 8787 --no-open',
-        '--host 0.0.0.0 --port 8787 --no-open',
-        '--host 0.0.0.0 --port 8788 --no-open',
-        '--host 0.0.0.0 --port 8887 --no-open')) {
+    foreach ($arguments in @('doctor', 'auto', 'keys extract', 'keys list', 'decrypt',
+        'serve --host 127.0.0.1 --port 8787 --no-open',
+        'serve --host 127.0.0.1 --port 8787 --no-open --trust-lan',
+        'serve --host 127.0.0.1 --port 8788 --no-open',
+        'serve --host 127.0.0.1 --port 8887 --no-open --trust-lan')) {
         $cmd = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root
         if (-not $cmd.Contains('"' + $exe + '" ' + $arguments + ' <nul') -or
             -not $cmd.Contains('set "SIWX_ROOT=' + $root + '"') -or
@@ -161,10 +161,10 @@ try {
             throw 'CMD quoting, argument forwarding, runtime root, or single-pass substitution failed.'
         }
     }
-    foreach ($arguments in @('--version & whoami', 'serve --host 0.0.0.0', '--host 0.0.0.0', 'backup --yes',
-        '--host 0.0.0.0 --port 8787 --no-open & echo bad',
-        '--host 0.0.0.0 --port 8786 --no-open',
-        '--host 0.0.0.0 --port 8888 --no-open')) {
+    foreach ($arguments in @('auto & whoami', 'serve --host 0.0.0.0', 'serve --host 0.0.0.0 --trust-lan', 'backup --yes',
+        'serve --host 127.0.0.1 --port 8787 --no-open & echo bad',
+        'serve --host 127.0.0.1 --port 8786 --no-open',
+        'serve --host 127.0.0.1 --port 8888 --no-open')) {
         $rejected = $false
         try { $null = New-SiwxCmdWorker $exe 'S-1-5-21-1-1001' $log $result $arguments $false $root }
         catch { $rejected = $true }
@@ -172,7 +172,7 @@ try {
     }
     foreach ($badPath in @('bad%PATH%/siwx.exe', "bad`nline/siwx.exe", 'bad"path/siwx.exe')) {
         $rejected = $false
-        try { $null = New-SiwxCmdWorker $badPath 'S-1-5-21-1-1001' $log $result '--version' $false $root }
+        try { $null = New-SiwxCmdWorker $badPath 'S-1-5-21-1-1001' $log $result 'auto' $false $root }
         catch { $rejected = $true }
         if (-not $rejected) { throw 'Unsafe path accepted.' }
     }
@@ -211,7 +211,7 @@ try {
         $testSid = 'S-1-5-21-1-1001'
         $validTask = [pscustomobject]@{
             TaskName = 'SiwxBackground-' + ('b' * 32); TaskPath = '\'; State = 'Running'
-            Description = (@{ Kind = 'SiwxLiteOriginal344'; UserSid = $testSid; LogPath = $serviceLog; Account = 1 } | ConvertTo-Json)
+            Description = (@{ Kind = 'SiwxConsoleBackground'; UserSid = $testSid; LogPath = $serviceLog; Account = 1 } | ConvertTo-Json)
             Principal = [pscustomobject]@{ UserId = $testSid }
             Actions = @([pscustomobject]@{
                 Execute = $scriptHost
@@ -257,7 +257,40 @@ try {
         $scriptHost = $savedScriptHost
     }
 
-    # Distribution/install gates have a dedicated portable fixture suite.
+    # Exercise actual install control flow with a synthetic artifact and mocked transport.
+    $installPath = Join-Path $fixtureRoot 'test.exe'
+    [IO.File]::WriteAllText($installPath, 'synthetic release', $utf8)
+    $expected = (Get-FileHash -LiteralPath $installPath -Algorithm SHA256).Hash
+    function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing, $TimeoutSec)
+        if ($downloadFails) { throw 'synthetic network failure' }
+        [IO.File]::WriteAllText($OutFile, $downloadContent, $utf8)
+    }
+    $downloadFails = $false
+    $downloadContent = 'synthetic release'
+    Install-SiwxRelease $installPath 'https://example.com/test.exe' $expected
+    Remove-Item -LiteralPath $installPath
+    Install-SiwxRelease $installPath 'https://example.com/test.exe' $expected
+    if ([IO.File]::ReadAllText($installPath) -ne 'synthetic release') { throw 'Install content differs.' }
+    $downloadContent = 'wrong release'
+    # Existing mismatch must not be overwritten or downloaded.
+    $blocked = $false
+    try { Install-SiwxRelease $installPath 'https://example.com/test.exe' ('c' * 64) }
+    catch { $blocked = $true }
+    if (-not $blocked -or [IO.File]::ReadAllText($installPath) -ne 'synthetic release') {
+        throw 'Existing mismatch was overwritten or accepted.'
+    }
+    Remove-Item -LiteralPath $installPath
+    foreach ($failure in @('hash', 'network')) {
+        $downloadFails = $failure -eq 'network'
+        $blocked = $false
+        try { Install-SiwxRelease $installPath 'https://example.com/test.exe' $expected }
+        catch { $blocked = $true }
+        if (-not $blocked -or (Test-Path -LiteralPath $installPath) -or
+            @(Get-ChildItem -LiteralPath $fixtureRoot -Filter '*.download').Count) {
+            throw 'Failed install left a destination or temporary file.'
+        }
+    }
+    Write-Output 'PASS: verified install/reuse, existing mismatch preservation, bad download/network failure cleanup'
     function Invoke-WebRequest { param($Uri) $script:requestedUri = $Uri; [pscustomobject]@{ StatusCode = 200; Content = $fakeContent } }
     $fakeContent = '<title>stories-in-wx</title>'
     if (-not (Test-SiwxHttp)) { throw 'SIWX HTTP readiness not detected.' }

@@ -1,8 +1,8 @@
-name: Verify original SIWX Lite launcher
+name: Verify separate SIWX launchers
 on:
   push:
     branches: ['codex/lite-task-verify-*']
-    paths: ['scripts/Siwx-Console.ps1', 'scripts/tests/**', '.github/workflows/verify-original-launcher.yml']
+    paths: ['scripts/Siwx-Console.ps1', 'scripts/Siwx-LiteConsole.ps1', 'scripts/tests/**', '.github/workflows/verify-original-launcher.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -11,12 +11,18 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check original relay and hidden launcher with Windows PowerShell 5.1
+      - name: Check original SIWX script with Windows PowerShell 5.1
         shell: powershell
         run: ./scripts/tests/Verify-SiwxConsole.ps1
-      - name: Check process ownership and all-interface port selection
+      - name: Check original SIWX process ownership
         shell: powershell
         run: ./scripts/tests/Verify-PortOwner.ps1
-      - name: Check package installer, data arguments and failure cleanup
+      - name: Check independent Lite relay
         shell: powershell
-        run: ./scripts/tests/Verify-OriginalLite.ps1
+        run: ./scripts/tests/Verify-SiwxLiteConsole.ps1
+      - name: Check independent Lite process ownership
+        shell: powershell
+        run: ./scripts/tests/Verify-LiteConsolePorts.ps1
+      - name: Check independent Lite package and failure cleanup
+        shell: powershell
+        run: ./scripts/tests/Verify-LiteConsolePackage.ps1

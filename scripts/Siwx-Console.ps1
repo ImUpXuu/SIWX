@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 # One-command Windows entry; no Python installation required.
-# Task344: original WScript/CMD relay, now launching the verified Lite directory package.
+# Relay adapted from abxian/wexport1/scripts/Wx-Console.ps1 (v3.4).
 & {
     # ASCII source keeps Chinese prompts intact in Windows PowerShell 5.1 and irm/iex.
     function ConvertFrom-ConsoleText([string]$Text) {
@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.8\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.7\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -32,7 +32,6 @@
         $sid = (New-Object Security.Principal.NTAccount($userId)).Translate(
             [Security.Principal.SecurityIdentifier]).Value
         if ($sid -in @('S-1-5-18', 'S-1-5-19', 'S-1-5-20')) { throw (ConvertFrom-ConsoleText '\u8bf7\u9009\u62e9\u684c\u9762\u7528\u6237\uff0c\u4e0d\u80fd\u4f7f\u7528\u7cfb\u7edf\u670d\u52a1\u8d26\u53f7\u3002') }
-        $userId = (New-Object Security.Principal.SecurityIdentifier($sid)).Translate([Security.Principal.NTAccount]).Value
         $sessions = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" | ForEach-Object {
             $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid
             if ($owner.ReturnValue -eq 0 -and $owner.Sid -eq $sid) { $_.SessionId }
@@ -119,111 +118,44 @@
         }
         $rootPath = Join-Path $profile.LocalPath 'AppData\Local\stories-in-wx-console'
         New-SiwxPrivateDirectory $rootPath $sid
-        $legacyExePath = $null
-        $installBase = Join-Path $env:SystemRoot 'SIWX'
-        New-SiwxInstallDirectory $installBase
-        $installPath = Join-Path $installBase 'lite-1.2.1-56e6d05'
-        $exePath = Join-Path $installPath 'siwx-lite.exe'
-        $expectedZipHash = '8aba80879e4a5875e155e975fd5396b8527fa46a49012c4d0f104a7d75b97737'
-        $manifestHash = 'a23d6550a2e9289b50dd973138150613de4d8d2bbefd82fd11dedea2e0e83bec'
-        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite-1.2.1-56e6d05-windows-x64.zip'
+        $legacyExePath = Join-Path $rootPath 'siwx-v5.2.0.exe'
+        $installPath = Join-Path $env:SystemRoot 'SIWX'
+        New-SiwxInstallDirectory $installPath
+        $exePath = Join-Path $installPath 'siwx-v5.2.0.exe'
+        if (Test-Path -LiteralPath $exePath) { Assert-SiwxInstallAcl $exePath }
+        # Public GitHub Release SHA-256 digest, verified against API on 2026-10-31.
+        $expectedHash = 'dcecef343256f8d5c7335da82ea6a0311a0b1b2261a8a7dc763ba7bb7fba8dc6'
+        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx.exe'
         [Net.ServicePointManager]::SecurityProtocol = $previousTls -bor [Net.SecurityProtocolType]::Tls12
-        function Assert-SiwxPlainPath([string]$Path) {
-            $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-            while ($null -ne $item) {
-                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                    throw 'Reparse points are not allowed in the installation path.'
-                }
-                if ($item -is [IO.FileInfo]) { $item = $item.Directory }
-                else { $item = $item.Parent }
-            }
-        }
-
-        function Assert-SiwxDistribution([string]$Directory, [string]$ManifestHash) {
-            Assert-SiwxPlainPath $Directory
-            $manifest = Join-Path $Directory 'SHA256SUMS.txt'
-            Assert-SiwxPlainPath $manifest
-            if ((Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ne $ManifestHash) {
-                throw 'Manifest SHA-256 mismatch. Existing files were preserved.'
-            }
-            $expected = @{}
-            foreach ($line in Get-Content -LiteralPath $manifest -Encoding UTF8) {
-                if ($line -notmatch '^([0-9A-Fa-f]{64})  (.+)$') { throw 'Invalid manifest line.' }
-                $hash = $Matches[1]
-                $relative = $Matches[2].Replace('/', '\')
-                if ([IO.Path]::IsPathRooted($relative) -or $relative -match '^[\\/]' -or $relative.Contains(':') -or
-                    ($relative.Split('\') | Where-Object { $_ -in @('', '.', '..') })) {
-                    throw 'Unsafe manifest path.'
-                }
-                if ($expected.ContainsKey($relative)) { throw 'Duplicate manifest path.' }
-                $expected[$relative] = $true
-                $file = Join-Path $Directory $relative
-                Assert-SiwxPlainPath $file
-                if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
-                    (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $hash) {
-                    throw ('File SHA-256 mismatch: ' + $relative)
-                }
-            }
-            $separator = [IO.Path]::DirectorySeparatorChar
-            $prefix = (Get-Item -LiteralPath $Directory).FullName.TrimEnd($separator) + $separator
-            foreach ($file in Get-ChildItem -LiteralPath $Directory -Recurse -Force -File) {
-                Assert-SiwxPlainPath $file.FullName
-                $relative = $file.FullName.Substring($prefix.Length).Replace('/', '\')
-                if ($relative -ne 'SHA256SUMS.txt' -and -not $expected.ContainsKey($relative)) {
-                    throw ('Unexpected file in distribution: ' + $relative)
-                }
-            }
-            if (-not $expected.ContainsKey('siwx-lite.exe')) { throw 'Executable missing from manifest.' }
-        }
-
-        function Get-SiwxPayload([string]$Url, [string]$Destination, [string]$Hash) {
-            Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 180
-            if ((Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash -ne $Hash) {
-                throw 'ZIP SHA-256 mismatch; package will not be extracted or executed.'
-            }
-        }
-
-        function Install-SiwxRelease([string]$Directory, [string]$DownloadUrl,
-            [string]$ZipHash, [string]$ManifestHash) {
-            if (-not (Test-Path -LiteralPath $Directory)) {
-                $stage = $Directory + '.' + [Guid]::NewGuid().ToString('N') + '.stage'
-                $zip = $stage + '.zip'
+        function Install-SiwxRelease([string]$ExePath, [string]$DownloadUrl, [string]$ExpectedHash) {
+            if (-not (Test-Path -LiteralPath $exePath)) {
+                $temporary = $exePath + '.' + [Guid]::NewGuid().ToString('N') + '.download'
                 try {
-                    New-SiwxInstallDirectory $stage
-                    Get-SiwxPayload $DownloadUrl $zip $ZipHash
-                    Expand-Archive -LiteralPath $zip -DestinationPath $stage
-                    Assert-SiwxDistribution $stage $ManifestHash
-                    if (Test-Path -LiteralPath $Directory) { throw 'Version appeared during install; retry.' }
-                    Move-Item -LiteralPath $stage -Destination $Directory
+                    Write-Host (ConvertFrom-ConsoleText '\u6b63\u5728\u4e0b\u8f7d SIWX v5.2.0 Windows x64\uff08\u7ea6 19 MB\uff09\u2026\u2026')
+                    Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $temporary -TimeoutSec 300
+                    if ((Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ne $expectedHash) {
+                        throw (ConvertFrom-ConsoleText '\u4e0b\u8f7d\u6587\u4ef6\u7684 SHA-256 \u6821\u9a8c\u4e0d\u7b26\uff0c\u5df2\u505c\u6b62\u542f\u52a8\u3002')
+                    }
+                    Move-Item -LiteralPath $temporary -Destination $exePath
                 } finally {
-                    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-                    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+                    if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary }
                 }
             }
-            Assert-SiwxDistribution $Directory $ManifestHash
-            Assert-SiwxInstallAcl $Directory
-            foreach ($file in Get-ChildItem -LiteralPath $Directory -Recurse -Force -File) {
-                Assert-SiwxInstallAcl $file.FullName
+            if ((Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash -ne $expectedHash) {
+                throw (ConvertFrom-ConsoleText '\u5df2\u6709 EXE \u4e0e\u6307\u5b9a\u53d1\u5e03\u7248\u4e0d\u7b26\uff0c\u5df2\u4fdd\u7559\u539f\u6587\u4ef6\uff0c\u4e0d\u6267\u884c\u4e5f\u4e0d\u8986\u76d6\u3002')
             }
         }
-        Install-SiwxRelease $installPath $downloadUrl $expectedZipHash $manifestHash
-        $dataDirectory = $env:SIWX_LITE_DATA
-        if ($dataDirectory) {
-            Assert-SiwxLocalPath $dataDirectory
-            if (-not (Test-Path -LiteralPath (Join-Path $dataDirectory 'db_storage') -PathType Container)) {
-                throw 'SIWX_LITE_DATA must be an account directory containing db_storage.'
-            }
-        }
-        $preferredPort = 8787
+        Install-SiwxRelease $exePath $downloadUrl $expectedHash
+        Assert-SiwxInstallAcl $exePath
         Write-Host (ConvertFrom-ConsoleText "\u7a0b\u5e8f\u4f4d\u7f6e\uff1a$exePath")
         Write-Host (ConvertFrom-ConsoleText "\u8fd0\u884c\u53ca\u8f93\u51fa\u76ee\u5f55\uff1a$rootPath")
-        Write-Host 'Lite 1.2.1 / 0.0.0.0 / no IP, Host, Origin, token or password checks.'
+        Write-Host (ConvertFrom-ConsoleText '\u5bc6\u94a5\u7f13\u5b58\u5728\u76ee\u6807\u7528\u6237\u7684 LocalAppData \u4e2d\u3002\u8bf7\u59a5\u5584\u4fdd\u7ba1\u89e3\u5bc6\u6587\u4ef6\u53ca\u65e5\u5fd7\u3002')
         $bridgeDirectory = Join-Path "$env:SystemRoot\Temp" ('SiwxBridge-' + [Guid]::NewGuid().ToString('N'))
         New-SiwxPrivateDirectory $bridgeDirectory $sid
 
         function Test-SiwxPort([ValidateRange(8787, 8887)][int]$Port = 8787) {
             # Binding detects listeners, reserved ports and sockets not accepting connections.
-            $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any, $Port)
+            $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
             try {
                 $listener.Server.ExclusiveAddressUse = $true
                 $listener.Start()
@@ -258,12 +190,13 @@
         }
 
         function Test-SiwxProcessRecord($Record, [string]$ExePath, [string]$UserSid, [int]$SessionId, [ValidateRange(8787, 8887)][int]$Port = 8787) {
-            if (-not $Record -or -not $Record.Created -or $Record.Name -ine 'siwx-lite.exe' -or
+            if (-not $Record -or -not $Record.Created -or $Record.Name -ine 'siwx-v5.2.0.exe' -or
                 $Record.Sid -ne $UserSid -or $Record.Session -ne $SessionId) { return $false }
             $knownPath = [StringComparer]::OrdinalIgnoreCase.Equals($Record.Path, $ExePath)
+            if ($legacyExePath -and [StringComparer]::OrdinalIgnoreCase.Equals($Record.Path, $legacyExePath)) { $knownPath = $true }
             if (-not $knownPath) { return $false }
             $pathPattern = [regex]::Escape($Record.Path)
-            $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+--host\s+0\.0\.0\.0\s+--port\s+' + $Port + '\s+--no-open(?:\s+--data\s+"[^"%\r\n]+")?\s*$'
+            $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+serve\s+--host\s+127\.0\.0\.1\s+--port\s+' + $Port + '\s+--no-open(?:\s+--trust-lan)?\s*$'
             return $Record.Command -imatch $pattern
         }
 
@@ -302,7 +235,7 @@
                     $records[$record.Id] = $record
                     # PyInstaller one-file has an identical parent supervising the listening child.
                     $parent = Get-SiwxProcessRecord $record.ParentId
-                    if ($parent -and $parent.Name -ieq 'siwx-lite.exe') {
+                    if ($parent -and $parent.Name -ieq 'siwx-v5.2.0.exe') {
                         if (-not (Test-SiwxProcessRecord $parent $ExePath $UserSid $SessionId $Port) -or
                             $parent.Created -gt $record.Created) {
                             throw (ConvertFrom-ConsoleText '\u65e0\u6cd5\u786e\u8ba4SIWX\u7236\u8fdb\u7a0b\u8eab\u4efd\uff0c\u672a\u7ed3\u675f\u4efb\u4f55\u8fdb\u7a0b\u3002')
@@ -348,7 +281,7 @@
             foreach ($task in @(Get-ScheduledTask -TaskName 'SiwxBackground-*' -ErrorAction SilentlyContinue)) {
                 try {
                     $meta = $task.Description | ConvertFrom-Json -ErrorAction Stop
-                    if ($meta.Kind -ne 'SiwxLiteOriginal344' -or $meta.UserSid -ne $UserSid) { continue }
+                    if ($meta.Kind -ne 'SiwxConsoleBackground' -or $meta.UserSid -ne $UserSid) { continue }
                     $principalSid = $task.Principal.UserId
                     if ($principalSid -notmatch '^S-1-') {
                         $principalSid = (New-Object Security.Principal.NTAccount($principalSid)).Translate(
@@ -387,21 +320,18 @@
 
         function New-SiwxCmdWorker(
             [string]$ExePath, [string]$Sid, [string]$LogPath,
-            [string]$ResultPath, [string]$ArgumentLine, [bool]$Probe, [string]$RootPath, [string]$DataDirectory
+            [string]$ResultPath, [string]$ArgumentLine, [bool]$Probe, [string]$RootPath
         ) {
-            foreach ($path in @($ExePath, $LogPath, $ResultPath, $DataDirectory)) {
+            foreach ($path in @($ExePath, $LogPath, $ResultPath)) {
                 if ($path -match '[%"\r\n]') {
                     throw (ConvertFrom-ConsoleText 'CMD \u5de5\u4f5c\u8def\u5f84\u4e0d\u80fd\u5305\u542b\u767e\u5206\u53f7\u3001\u53cc\u5f15\u53f7\u6216\u6362\u884c\u3002')
                 }
             }
             if ($Sid -notmatch '^S-1-[0-9-]+$') { throw (ConvertFrom-ConsoleText '\u7528\u6237 SID \u65e0\u6548\u3002') }
-            if ($ArgumentLine -notmatch '^(--version|--host 0\.0\.0\.0 --port (?:878[7-9]|879[0-9]|88[0-7][0-9]|888[0-7]) --no-open|probe)$') {
+            if ($ArgumentLine -notmatch '^(doctor|auto|keys extract|keys list|decrypt|serve --host 127\.0\.0\.1 --port (?:878[7-9]|879[0-9]|88[0-7][0-9]|888[0-7]) --no-open( --trust-lan)?|probe)$') {
                 throw (ConvertFrom-ConsoleText '\u4e0d\u652f\u6301\u6b64\u547d\u4ee4\u53c2\u6570\u3002')
             }
             if (-not $RootPath -or $RootPath -match '[%"\r\n]') { throw (ConvertFrom-ConsoleText '\u8fd0\u884c\u6839\u76ee\u5f55\u5305\u542b\u4e0d\u5b89\u5168\u5b57\u7b26\u3002') }
-            if ($DataDirectory -and -not $Probe -and $ArgumentLine -ne '--version') {
-                $ArgumentLine += ' --data "' + $DataDirectory + '"'
-            }
             $directory = $RootPath
             $probeLine = 'rem Not a probe'
             if ($Probe) { $probeLine = 'goto probe_success' }
@@ -616,34 +546,15 @@ try {
         $nextCommand = 'p'
         while ($true) {
             if (-not $nextCommand) {
-                Write-Host (ConvertFrom-ConsoleText "`n1 = \u73af\u5883\u548c\u7248\u672c\u68c0\u67e5   2 = \u6253\u5f00\u7f51\u9875\u63d0\u53d6\u3001\u67e5\u770b\u4e0e\u5bfc\u51fa")
+                Write-Host (ConvertFrom-ConsoleText "`n1 = \u73af\u5883\u68c0\u67e5   2 = \u81ea\u52a8\u63d0\u53d6\u5e76\u89e3\u5bc6   3 = \u4ec5\u63d0\u53d6\u5bc6\u94a5")
+                Write-Host (ConvertFrom-ConsoleText '4 = \u67e5\u770b\u6253\u7801\u5bc6\u94a5   5 = \u4f7f\u7528\u7f13\u5b58\u5bc6\u94a5\u89e3\u5bc6')
                 Write-Host (ConvertFrom-ConsoleText '6 = \u542f\u52a8\u7f51\u9875\u5e76\u663e\u793a\u65e5\u5fd7   7 = \u540e\u53f0\u542f\u52a8\u7f51\u9875')
                 Write-Host (ConvertFrom-ConsoleText '8 = \u540e\u53f0\u72b6\u6001 / \u7f51\u5740 / \u65e5\u5fd7   9 = \u505c\u6b62\u540e\u53f0\u7f51\u9875   0 = \u9000\u51fa')
+                Write-Host (ConvertFrom-ConsoleText '10 = \u5df2\u52a0\u5bc6\u7801\u53cd\u4ee3\uff1a\u542f\u52a8\u7f51\u9875\u5e76\u663e\u793a\u65e5\u5fd7   11 = \u5df2\u52a0\u5bc6\u7801\u53cd\u4ee3\uff1a\u540e\u53f0\u542f\u52a8')
                 Write-Host (ConvertFrom-ConsoleText '12 = \u5168\u76d8\u641c\u7d22 xwechat_files \u6587\u4ef6\u5939   13 = \u4ec5\u641c\u7d22 C\u76d8')
-                Write-Host (ConvertFrom-ConsoleText '14 = \u8bbe\u7f6e / \u6e05\u9664\u8d26\u53f7\u6570\u636e\u76ee\u5f55   15 = \u8bbe\u7f6e\u9996\u9009\u7aef\u53e3')
                 $nextCommand = Read-Host (ConvertFrom-ConsoleText '\u8bf7\u9009\u62e9')
             }
             if ($nextCommand -eq '0') { break }
-            if ($nextCommand -eq '14') {
-                $candidate = Read-Host 'Account directory containing db_storage (empty = auto)'
-                if ($candidate) {
-                    Assert-SiwxLocalPath $candidate
-                    if (-not (Test-Path -LiteralPath (Join-Path $candidate 'db_storage') -PathType Container)) {
-                        Write-Host 'Not an account directory; previous selection preserved.'
-                        $nextCommand = $null; continue
-                    }
-                }
-                $dataDirectory = $candidate
-                $nextCommand = $null; continue
-            }
-            if ($nextCommand -eq '15') {
-                $candidatePort = 0
-                $answer = Read-Host 'Preferred port (8787-8887)'
-                if ([int]::TryParse($answer, [ref]$candidatePort) -and $candidatePort -ge 8787 -and $candidatePort -le 8887) {
-                    $preferredPort = $candidatePort
-                } else { Write-Host 'Invalid port; previous selection preserved.' }
-                $nextCommand = $null; continue
-            }
             if ($nextCommand -in @('12', '13')) {
                 $searchRoots = @('C:\')
                 if ($nextCommand -eq '12') {
@@ -699,7 +610,7 @@ try {
             }
             $isProbe = $nextCommand -eq 'p'
             $backgroundMode = $nextCommand -in @('7', '11')
-            $isServe = $nextCommand -in @('2', '6', '7', '10', '11')
+            $isServe = $nextCommand -in @('6', '7', '10', '11')
             # All SIWX operations share the same cache/output root. Avoid concurrent writers.
             if (-not $isProbe -and -not $isServe -and @(Get-SiwxBackgroundTasks $sid | Where-Object {
                 $_.Task.State -in @('Running', 'Queued') }).Count -gt 0) {
@@ -709,13 +620,19 @@ try {
             }
             $siwxArguments = switch ($nextCommand) {
                 'p' { 'probe' }
-                '1' { '--version' }
-                { $_ -in @('2', '6', '7', '10', '11') } { '--host 0.0.0.0 --port 8787 --no-open' }
+                '1' { 'doctor' }
+                '2' { 'auto' }
+                '3' { 'keys extract' }
+                '4' { 'keys list' }
+                '5' { 'decrypt' }
+                { $_ -in @('6', '7') } { 'serve --host 127.0.0.1 --port 8787 --no-open' }
+                { $_ -in @('10', '11') } { 'serve --host 127.0.0.1 --port 8787 --no-open --trust-lan' }
             }
             if (-not $siwxArguments) { $nextCommand = $null; continue }
             $webPort = 8787
             if ($isServe) {
                 $active = @(Get-SiwxBackgroundTasks $sid | Where-Object { $_.Task.State -in @('Running', 'Queued') })
+                $preferredPort = 8787
                 if ($active.Count -gt 0) { $preferredPort = $active[0].Port }
                 $webPort = Select-SiwxPort $exePath $sid ([int]$sessions[0]) $preferredPort
                 $siwxArguments = $siwxArguments.Replace('--port 8787 ', ('--port ' + $webPort + ' '))
@@ -727,12 +644,12 @@ try {
             Assert-SiwxLocalPath $rootPath
             Assert-SiwxInstallAcl $installPath
             Assert-SiwxInstallAcl $exePath
-            Assert-SiwxDistribution $installPath $manifestHash
+            if ((Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash -ne $expectedHash) { throw (ConvertFrom-ConsoleText '\u7a0b\u5e8f\u6821\u9a8c\u5931\u8d25\uff0c\u672a\u542f\u52a8\u3002') }
             $jobId = [Guid]::NewGuid().ToString('N')
             $logPath = Join-Path $bridgeDirectory "$jobId.log"
             $resultPath = Join-Path $bridgeDirectory "$jobId.result"
             $workerPath = Join-Path $bridgeDirectory "$jobId.cmd"
-            $worker = New-SiwxCmdWorker $exePath $sid $logPath $resultPath $siwxArguments $isProbe $rootPath $dataDirectory
+            $worker = New-SiwxCmdWorker $exePath $sid $logPath $resultPath $siwxArguments $isProbe $rootPath
             [IO.File]::WriteAllText($workerPath, $worker, (New-Object Text.UTF8Encoding($false)))
             $launcherPath = Join-Path $bridgeDirectory "$jobId.js"
             $launcher = New-SiwxHiddenLauncher $workerPath $logPath $resultPath
@@ -743,25 +660,24 @@ try {
                 $currentTask = 'SiwxBackground-' + $jobId
                 # Only task ownership and diagnostic path metadata belong here.
                 $description = @{
-                    Kind = 'SiwxLiteOriginal344'; UserSid = $sid
+                    Kind = 'SiwxConsoleBackground'; UserSid = $sid
                     LogPath = $logPath; Port = $webPort
                 } | ConvertTo-Json -Compress
             }
             $action = New-ScheduledTaskAction -Execute $scriptHost `
                 -Argument ('//B //Nologo //E:JScript "' + $launcherPath + '"') `
                 -WorkingDirectory $bridgeDirectory
-            $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+            $principal = New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
             $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
                 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
             Register-ScheduledTask -TaskName $currentTask -Action $action -Principal $principal `
-                -Settings $settings -Description $description -ErrorAction Stop | Out-Null
+                -Settings $settings -Description $description | Out-Null
             Write-Host (ConvertFrom-ConsoleText "`n\u6b63\u5728\u4ee5 $userId \u8eab\u4efd\u8fd0\u884c\uff0c\u4ee5\u4e0b\u4e3a\u8be5\u7528\u6237\u7684\u7a0b\u5e8f\u8f93\u51fa\u3002")
             Write-Host (ConvertFrom-ConsoleText "\u8bca\u65ad\u4efb\u52a1\uff1a$currentTask")
-            if ($isServe) { Write-Host ('Listening 0.0.0.0:' + $webPort + ' / no authentication; use the actual computer IP or mapped domain.') }
             if ($isProbe) { Write-Host (ConvertFrom-ConsoleText '\u6b63\u5728\u68c0\u67e5\u7528\u6237\u4f1a\u8bdd CMD \u540e\u7aef\uff0c\u901a\u8fc7\u540e\u624d\u4f1a\u8fd0\u884c siwx.exe\u2026\u2026') }
             Write-Host (ConvertFrom-ConsoleText "\u6309 Q \u505c\u6b62\u5e76\u8fd4\u56de\u83dc\u5355\uff0cCtrl+C \u9000\u51fa\u3002\u7f51\u9875\u5730\u5740\uff1ahttp://127.0.0.1:$webPort/")
             $interactiveKeyboard = -not [Console]::IsInputRedirected
-            Start-ScheduledTask -TaskName $currentTask -ErrorAction Stop
+            Start-ScheduledTask -TaskName $currentTask
             $position = [long]0
             $started = Get-Date
             $stopRequested = $false

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 param([string]$Distribution, [string]$DistributionManifestHash)
 $ErrorActionPreference = 'Stop'
-$source = Join-Path (Split-Path -Parent $PSScriptRoot) 'Siwx-Console.ps1'
+$source = Join-Path (Split-Path -Parent $PSScriptRoot) 'Siwx-LiteConsole.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw ($errors|Out-String)}
