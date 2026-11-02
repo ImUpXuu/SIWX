@@ -55,7 +55,8 @@ class MomentTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as temp:
    account=Path(temp).resolve()/'xwechat_files'/'user_example';(account/'db_storage').mkdir(parents=True);result=engine.add_account_directory(str(account.parent));self.assertEqual(1,result['added']);self.assertNotIn(temp,json.dumps(list(engine.events)))
    with self.assertRaises(ValueError):engine.add_account_directory(str(account))
-  with self.assertRaises(ValueError):engine.add_account_directory('relative/path')
+  for bad in ('relative/path','//example.invalid/share','https://example.invalid/data'):
+   with self.assertRaises(ValueError):engine.add_account_directory(bad)
   engine.opener=lambda _:(_ for _ in ()).throw(RuntimeError('synthetic-key private-path'))
   with self.assertRaises(RuntimeError):engine.open(0,True)
   self.assertNotIn('synthetic-key',json.dumps(list(engine.events)));self.assertNotIn('private-path',json.dumps(list(engine.events)))

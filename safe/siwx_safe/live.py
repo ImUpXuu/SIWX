@@ -121,6 +121,8 @@ class Engine:
     def add_account_directory(self, path):
         if not isinstance(path, str) or not path.strip() or len(path) > 4096:
             raise ValueError("请输入微信数据目录。")
+        if path.strip().startswith(("\\\\", "//")) or "://" in path:
+            raise ValueError("请使用本地磁盘上的微信目录，不使用网络共享地址。")
         root = Path(path.strip())
         if not root.is_absolute():
             raise ValueError("请填写完整的本地微信数据目录。")
