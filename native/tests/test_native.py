@@ -17,6 +17,10 @@ class NativeTests(unittest.TestCase):
   # File log handlers are closed before fixture deletion (Windows file ownership).
   import logging
   for handler in list(logging.getLogger('siwx').handlers):handler.close();logging.getLogger('siwx').removeHandler(handler)
+  import faulthandler
+  from siwx import logging_setup
+  faulthandler.disable()
+  if logging_setup._CRASH_FH is not None:logging_setup._CRASH_FH.close();logging_setup._CRASH_FH=None
   cls.temp.cleanup()
  def test_original_retained_code_and_removed_pages(self):
   source=ROOT.parent/'siwx';generated=ROOT/'_build/siwx'
