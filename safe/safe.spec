@@ -11,6 +11,9 @@ for entry in list(a.pure) + list(a.binaries):
     name = entry[0]
     if name.split(".")[0] in {"siwx", "wexport", "psutil", "flask", "Crypto", "requests"}:
         raise RuntimeError("Legacy or unnecessary module included: " + name)
+    if name.startswith("siwx_safe.vendor.wexport.win") or name in {
+        "siwx_safe.live", "siwx_safe.local_web", "siwx_safe.live_app"}:
+        raise RuntimeError("Live extraction is not allowed in the offline build: " + name)
     source = Path(entry[1]).resolve()
     project = ROOT.parent.resolve()
     if source.is_relative_to(project) and not source.is_relative_to(ROOT.resolve()):

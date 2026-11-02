@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SIWX × wexport · 精简版</title><link rel="stylesheet" href="/style.css">
+<body><header><div><h1>微信记录 · 精简版</h1><p>本人微信提取 · 本机网页 · 导出</p></div><button id="stop">退出并停止</button></header>
+<main>
+<section><h2>1　选择与提取</h2><p>请保持本人 Windows 微信4.x登录。提取会读取本人微信进程，安全软件仍可能提示。</p>
+<div class="controls"><select id="account" aria-label="微信账号"></select><button id="open">提取并打开</button><button id="close">关闭当前数据</button></div>
+<label><input id="consent" type="checkbox">我确认仅处理本人有权访问的微信数据</label>
+<p id="empty" hidden>未找到账号。请退出后，用 --data 指定包含 db_storage 的本人账号目录。</p></section>
+<section><h2>2　聊天浏览与搜索</h2><div class="controls"><select id="chat" aria-label="聊天会话"></select><input id="query" placeholder="搜索正文或发送者" aria-label="搜索关键词"><button id="search">搜索</button></div>
+<div class="controls"><label>开始 <input id="since" type="date"></label><label>结束 <input id="until" type="date"></label></div>
+<p id="status" role="status">请选择账号并提取。</p><div id="messages"></div>
+<div class="controls"><button id="prev">上一页</button><button id="next">下一页</button><span id="page"></span></div></section>
+<section><h2>3　导出</h2><p>导出当前会话与筛选结果。仅导出文本；图片、语音和附件显示类型占位。</p>
+<div class="controls"><select id="format" aria-label="导出格式"><option>html</option><option>md</option><option>txt</option><option>csv</option><option>json</option></select><button id="export">下载导出文件</button></div></section>
+</main><footer>不含聊天统计、加密备份、MCP、插件、自动更新和远程访问。关闭网页不会自动停止，请点“退出并停止”。</footer><script src="/app.js"></script></body></html>

@@ -16,3 +16,15 @@ imported data are never resolved or fetched. No other wexport modules are copied
 SIWX compatibility is implemented by normalizing its `session` / `messages` JSON
 export, including `createTime`, `senderDisplayName`, `typeName`, and `content`.
 The legacy SIWX runtime is not imported or bundled.
+
+## Live edition (task337)
+
+The separate `live_app.py` / `live.spec` build additionally uses unchanged MIT
+wexport modules from the same source commit: `errors.py`, `crypto/{__init__,aes,
+sqlcipher,zstd}.py`, `sources/{base,win4}.py`, and
+`win/{__init__,memory,processes,wcdb_keys}.py`. The local `sources/__init__.py`
+only documents this selected subset. No extraction algorithm was modified.
+The adapter restricts the original extraction call to current-user WeChat PIDs.
+Read-only process access is intentionally retained and may trigger antivirus.
+No other Windows scanning, image-key, CLI, config, background, or upstream Web
+modules are bundled. The JSON-only offline spec rejects live modules.

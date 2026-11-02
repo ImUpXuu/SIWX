@@ -1,0 +1,191 @@
+import hashlib
+import http.client
+import json
+from pathlib import Path
+import sqlite3
+import tempfile
+import threading
+import unittest
+from types import SimpleNamespace
+
+from siwx_safe.live import Engine, discover_accounts, own_wechat_pids
+from siwx_safe.local_web import LocalServer
+from siwx_safe.vendor.wexport.crypto.aes import AesCbc
+from siwx_safe.vendor.wexport.model import Account, Conversation, Message
+from siwx_safe.vendor.wexport.sources.win4 import Win4Source
+
+
+class FakeSource:
+    def __init__(self):
+        self.load_errors, self._keys = [], {"synthetic": b"test"}
+        self.closed = False
+
+    def conversations(self):
+        return [Conversation("user_example", "合成会话")]
+
+    def iter_messages(self, *args):
+        yield Message(1, timestamp=1700000000, sender_name="测试发送者", type=1,
+                      raw='<script>test</script> & 合成记录')
+
+    def close(self):
+        self.closed = True
+
+
+class EngineTests(unittest.TestCase):
+    def test_explicit_consent_and_account_required(self):
+        called = []
+        engine = Engine([Account("example", "win4")], lambda a: called.append(a))
+        for index, consent in ((0, False), (0, "true"), (-1, True), (True, True), (2, True)):
+            with self.assertRaises(ValueError):
+                engine.open(index, consent)
+        self.assertEqual([], called)
+
+    def test_only_same_user_wechat_processes(self):
+        api = SimpleNamespace(Process=lambda: SimpleNamespace(username=lambda: "PC\\user_example"),
+            process_iter=lambda fields: [SimpleNamespace(info={"pid": i, "name": name, "username": user})
+                for i, name, user in ((1, "Weixin.exe", "PC\\user_example"),
+                                     (2, "Weixin.exe", "PC\\other_example"),
+                                     (3, "browser.exe", "PC\\user_example"),
+                                     (4, "WeChat.exe", None))])
+        self.assertEqual([1], own_wechat_pids(api))
+        api.Process = lambda: SimpleNamespace(username=lambda: "NT AUTHORITY\\SYSTEM")
+        with self.assertRaises(ValueError):
+            own_wechat_pids(api)
+
+    def test_engine_search_date_validation_and_close(self):
+        source = FakeSource()
+        engine = Engine([Account("example", "win4")], lambda _: source)
+        engine.open(0, True)
+        self.assertEqual(1, len(engine.document("user_example", "合成")["messages"]))
+        self.assertEqual([], engine.document("user_example", "不匹配")["messages"])
+        with self.assertRaises(ValueError):
+            engine.document("../outside")
+        with self.assertRaises(ValueError):
+            engine.document("user_example", since="2026-11-03", until="2026-11-02")
+        engine.close()
+        self.assertTrue(source.closed)
+        self.assertEqual({}, source._keys)
+        self.assertIsNone(engine.source)
+
+    def test_encrypted_fixture_to_document_without_source_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "db_storage/message/message_0.db"
+            db.parent.mkdir(parents=True)
+            chat = "user_example"
+            table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
+            conn = sqlite3.connect(db)
+            conn.execute("PRAGMA page_size=4096")
+            conn.executescript(f'''CREATE TABLE Name2Id(id INTEGER PRIMARY KEY,user_name TEXT);
+                INSERT INTO Name2Id VALUES(1,'{chat}');
+                CREATE TABLE {table}(local_id INTEGER PRIMARY KEY,server_id INTEGER,local_type INTEGER,
+                    create_time INTEGER,message_content TEXT,real_sender_id INTEGER,sort_seq INTEGER);
+                INSERT INTO {table} VALUES(1,1,1,1700000000,'合成端到端',1,1);''')
+            conn.close()
+            raw = bytearray(db.read_bytes())
+            raw[20] = 80
+            db.write_bytes(raw)
+            conn = sqlite3.connect(db)
+            conn.execute("VACUUM")
+            conn.close()
+            raw, key, salt, iv = db.read_bytes(), bytes(range(32)), bytes(range(16)), bytes(16)
+            cipher, encrypted = AesCbc(key), bytearray()
+            try:
+                for offset in range(0, len(raw), 4096):
+                    page = raw[offset:offset + 4096]
+                    encrypted.extend((salt if offset == 0 else b"")
+                        + cipher.encrypt(iv, page[16 if offset == 0 else 0:4096 - 80])
+                        + iv + bytes(64))
+            finally:
+                cipher.close()
+            db.write_bytes(encrypted)
+            before = hashlib.sha256(db.read_bytes()).hexdigest()
+            account = discover_accounts(root)[0]
+            account.wxid = chat  # Synthetic self-chat, resolved without a contact database.
+            def opener(a):
+                source = Win4Source(a, key)
+                source.open()
+                return source
+            engine = Engine([account], opener)
+            try:
+                engine.open(0, True)
+                self.assertEqual("合成端到端", engine.document(chat)["messages"][0]["content"])
+            finally:
+                engine.close()
+            self.assertEqual(before, hashlib.sha256(db.read_bytes()).hexdigest())
+            self.assertEqual([db], list(root.rglob("*.db")))
+
+
+class WebTests(unittest.TestCase):
+    def setUp(self):
+        self.source = FakeSource()
+        self.server = LocalServer(Engine([Account("example", "win4", display_name="合成账号")], lambda _: self.source))
+        self.thread = threading.Thread(target=self.server.serve_forever)
+        self.thread.start()
+        self.addCleanup(self.cleanup)
+
+    def cleanup(self):
+        self.server.shutdown()
+        self.thread.join(timeout=3)
+        self.server.server_close()
+
+    def request(self, path, body=None, token=True, extra=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = "Bearer " + self.server.token
+        headers.update(extra or {})
+        conn.request("GET" if body is None else "POST", path,
+                     None if body is None else json.dumps(body), headers=headers)
+        res = conn.getresponse()
+        status, response_headers, data = res.status, dict(res.getheaders()), res.read()
+        conn.close()
+        return status, response_headers, data
+
+    def test_auth_host_origin_and_path_guards(self):
+        self.assertEqual(401, self.request("/api/accounts", token=False)[0])
+        self.assertEqual(403, self.request("/api/accounts", extra={"Host": "example.invalid"})[0])
+        self.assertEqual(403, self.request("/api/open", {}, extra={"Origin": "https://example.invalid"})[0])
+        self.assertEqual(403, self.request("/api/accounts", extra={"Sec-Fetch-Site": "cross-site"})[0])
+        self.assertEqual(404, self.request("/../../secret.txt")[0])
+        self.assertEqual(400, self.request("/api/open", {"account": 0, "consent": False})[0])
+        for path in ("/api/stats", "/api/backup", "/api/mcp", "/api/update"):
+            self.assertEqual(404, self.request(path)[0])
+
+    def test_extract_web_search_all_exports_and_close(self):
+        self.assertEqual(200, self.request("/api/open", {"account": 0, "consent": True})[0])
+        self.assertEqual("user_example", json.loads(self.request("/api/chats")[2])[0]["id"])
+        status, headers, data = self.request("/api/messages", {"chat": "user_example", "query": "合成"})
+        self.assertEqual(200, status)
+        self.assertEqual(1, json.loads(data)["total"])
+        self.assertEqual("no-store", headers["Cache-Control"])
+        for fmt in ("html", "md", "txt", "csv", "json"):
+            status, headers, data = self.request("/api/export", {"chat": "user_example", "format": fmt})
+            self.assertEqual(200, status)
+            self.assertIn("合成记录", data.decode())
+            self.assertIn("attachment", headers["Content-Disposition"])
+            if fmt == "html":
+                self.assertNotIn(b"<script>", data)
+        self.assertEqual(200, self.request("/api/close", {})[0])
+        self.assertTrue(self.source.closed)
+        self.assertEqual(400, self.request("/api/messages", {"chat": "user_example"})[0])
+
+    def test_partial_failures_do_not_expose_keys_paths_or_traces(self):
+        def fail(_):
+            raise RuntimeError("synthetic-secret and private-path")
+        self.server.engine.opener = fail
+        status, headers, data = self.request("/api/open", {"account": 0, "consent": True})
+        self.assertEqual(500, status)
+        self.assertNotIn(b"synthetic-secret", data)
+        self.assertNotIn(b"private-path", data)
+        self.assertNotIn(b"Traceback", data)
+
+    def test_per_launch_token_and_stop(self):
+        other = LocalServer(Engine([]))
+        try:
+            self.assertNotEqual(other.token, self.server.token)
+        finally:
+            other.server_close()
+        self.assertEqual(200, self.request("/api/stop", {})[0])
+        self.thread.join(timeout=3)
+        self.assertFalse(self.thread.is_alive())
