@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from concurrent.futures import ThreadPoolExecutor
 import json
 import io
 from pathlib import Path
@@ -44,6 +45,8 @@ class LocalServer(HTTPServer):
         self.engine = engine
         self.hosts = interface_hosts() if host == "0.0.0.0" else {"127.0.0.1", "localhost"}
         super().__init__((host, port), Handler)
+        self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="siwx-data")
+        self.open_job = None
 
     @property
     def origin(self):
@@ -58,15 +61,36 @@ class LocalServer(HTTPServer):
         return ["http://" + host + ":" + str(self.server_port) + "/"
                 for host in sorted(self.hosts) if host != "localhost"]
 
+    @property
+    def reading(self):
+        return self.open_job is not None and not self.open_job.done()
+
+    def start_open(self, index, consent):
+        if self.reading:
+            raise ValueError("已有提取正在进行，请等待或停止本次提取。")
+        self.engine.validate_open(index, consent)
+        self.engine.read_progress.begin(index)
+        self.open_job = self.worker.submit(self.engine.open, index, consent, True)
+        return self.engine.read_progress.snapshot()
+
+    def read_snapshot(self):
+        result = self.engine.read_progress.snapshot()
+        if self.reading and result["state"] != "running":
+            result["state"] = "running"
+        return result
+
     def server_close(self):
         try:
-            self.engine.close()
+            if hasattr(self, "worker"):
+                self.engine.read_progress.cancelled.set()
+                self.worker.submit(self.engine.close).result()
+                self.worker.shutdown()
         finally:
             super().server_close()
 
 
 class Handler(BaseHTTPRequestHandler):
-    # Single request thread keeps extraction, SQLite and exports serialized.
+    # HTTP remains responsive during extraction; one worker owns all SQLite operations.
     server_version = "SIWX-Lite"
 
     def setup(self):
@@ -99,6 +123,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(value, ensure_ascii=False).encode())
 
     def do_GET(self):
+        if self.path == "/api/open/progress":
+            self._json(200, self.server.read_snapshot())
+        elif self.path in ("/api/logs", "/api/state", "/api/status", "/api/accounts") or self.path.split("?", 1)[0] in ASSETS:
+            self._do_GET()
+        elif self.server.reading:
+            self._json(409, {"error": "正在提取账号，请等待或停止本次提取。"})
+        else:
+            self.server.worker.submit(self._do_GET).result()
+
+    def _do_GET(self):
         path = self.path.split("?", 1)[0]
         if path.startswith("/api/sns/") or path == "/api/chat/avatar":
             self._sns_get(path)
@@ -110,14 +144,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, self.server.engine.account_list())
         elif self.path == "/api/state":
             engine = self.server.engine
-            self._json(200, {"opened": engine.source is not None, "account": engine.account_index})
+            self._json(200, {"opened": engine.source is not None and not self.server.reading, "account": engine.account_index})
         elif self.path == "/api/status":
             engine = self.server.engine
-            self._json(200, {"version": "1.4.1", "opened": engine.source is not None,
+            self._json(200, {"version": "1.4.2", "opened": engine.source is not None and not self.server.reading,
                              "account": engine.account_index, "accounts": engine.account_list(),
-                             "warnings": len(engine.source.load_errors) if engine.source else 0})
+                             "warnings": len(engine.source.load_errors) if engine.source else 0,
+                             "extraction": engine.read_progress.snapshot()})
         elif self.path == "/api/logs":
-            self._json(200, {"logs": list(self.server.engine.events)})
+            self._json(200, {"logs": self.server.engine.events_snapshot()})
         elif self.path == "/api/chats":
             try:
                 self._json(200, self.server.engine.chats())
@@ -166,6 +201,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": "朋友圈读取未完成，请确认已提取朋友圈数据库后重试。"})
 
     def do_POST(self):
+        if self.path in ("/api/open/start", "/api/open/cancel"):
+            self._do_POST()
+        elif self.server.reading:
+            self._json(409, {"error": "正在提取账号，请等待或停止本次提取。"})
+        else:
+            self.server.worker.submit(self._do_POST).result()
+
+    def _do_POST(self):
         try:
             if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
                 raise ValueError("请提交JSON请求。")
@@ -178,7 +221,12 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("请求必须是JSON对象。")
             engine = self.server.engine
-            if self.path == "/api/logs/clear":
+            if self.path == "/api/open/start":
+                self._json(202, self.server.start_open(body.get("account"), body.get("consent")))
+            elif self.path == "/api/open/cancel":
+                engine.read_progress.cancelled.set()
+                self._json(200, {"requested": True})
+            elif self.path == "/api/logs/clear":
                 engine.events.clear()
                 self._json(200, {"cleared": True})
             elif self.path == "/api/accounts/refresh":

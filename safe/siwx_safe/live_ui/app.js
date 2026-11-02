@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const state = {accounts: [], account: null, pendingAccount: null, opened: false, chats: [], chat: null,
   rows: [], offset: 0, total: 0, months: [], selecting: false, selected: new Set(), selectedRows: new Map(),
   exportChats: new Set(), exportScope: null, exportFilter: 'all', rosterFilter: 'all',
-  busy: false, stopped: false, download: null, log: [], logPaused: false};
+  busy: false, extracting: false, stopped: false, download: null, log: [], logPaused: false};
 let messageFilter = {query: '', since: '', until: '', kind: ''};
 let toastTimer;
 let wizardScreen='intro', wizardActive=true, snsLoaded=false, snsMounted=false, logsPaused=false, logsRows=[], tourIndex=-1;
@@ -26,7 +26,7 @@ async function run(task) {
 }
 function syncButtons() {
   document.querySelectorAll('button,input,select').forEach(el => {if(!el.closest('#sns-page'))el.disabled = state.busy || state.stopped;});
-  if (state.busy || state.stopped) { if (state.download) $('e-cancel').disabled = false; return; }
+  if (state.busy || state.stopped) { if(state.extracting)$('ob-cancel').disabled=false; if (state.download) $('e-cancel').disabled = false; return; }
   for (const id of ['c-refresh','close-data']) $(id).disabled = !state.opened;
   for (const id of ['c-msg-search','c-msg-q','c-since','c-until','c-select']) $(id).disabled = !state.chat;
   $('c-export').disabled = !state.chat || !state.total || (state.selecting && !state.selected.size);
@@ -102,9 +102,34 @@ function clearData() {
   $('c-timeline-list').replaceChildren(node('div', 'tl-empty', '打开会话后可按月份跳转'));
   renderChats(); renderExport(); renderAccount(); renderSettings(); updateSelection();
 }
-async function extract(index) {
+async function waitExtraction() {
+  state.extracting=true;$('ob-cancel').hidden=false;$('ob-cancel').textContent='停止本次提取';syncButtons();
+  try {
+    for (;;) {
+      const res=await api('/api/open/progress',undefined,AbortSignal.timeout(15000));
+      const progress=await res.json();
+      $('ob-log').hidden=false;
+      $('ob-log').textContent=progress.logs.join('\n')+'\n已用时 '+progress.elapsed+' 秒';
+      $('ob-log').scrollTop=$('ob-log').scrollHeight;
+      $('ob-status').textContent=progress.message;
+      if(progress.state==='done')return progress.result;
+      if(progress.state!=='running')throw new Error(progress.message);
+      await new Promise(resolve=>setTimeout(resolve,700));
+    }
+  } catch(error) {
+    if(error.name==='TimeoutError'||error.name==='TypeError')throw new Error('进度连接中断。后台可能仍在读取，请刷新页面查看当前阶段，避免重复启动。');
+    throw error;
+  } finally {state.extracting=false;$('ob-cancel').hidden=true;}
+}
+$('ob-cancel').onclick=async()=>{
+  $('ob-cancel').disabled=true;
+  try{await json('/api/open/cancel',{});$('ob-cancel').textContent='正在停止…';}
+  catch(error){toast(error.message);$('ob-cancel').disabled=false;}
+};
+async function extract(index, resume=false) {
   clearData(); $('ob-status').textContent = '正在提取并读取，请保持微信登录…';
-  const result = await json('/api/open', {account: index, consent: true});
+  if(!resume)await json('/api/open/start', {account: index, consent: true});
+  const result = await waitExtraction();
   state.account = index; state.opened = true; state.chats = await json('/api/chats');$('toast').hidden=true;
   if(!wizardActive)$('account-modal').hidden=true;renderAccount();renderChats();renderExport();renderSettings();
   if(!wizardActive&&!$('sns-page').hidden)await mountSns();
@@ -244,18 +269,21 @@ function showWizardScreen(screen){
   $('ob-title').textContent='选择微信号';
   $('ob-extract-account').textContent='请保持本人微信登录。当前选择：'+(state.accounts.find(a=>a.id===state.pendingAccount)?.name||'未选择账号');
 }
+async function wizardExtractionTask(resume=false){
+  showWizardScreen('extract');$('ob-progress').hidden=false;$('ob-log').hidden=false;$('ob-log').textContent='准备读取账号数据…';$('ob-result').textContent='';$('ob-run').hidden=false;$('ob-finish').hidden=true;
+  try{await extract(state.pendingAccount,resume);$('ob-result').textContent='提取完成，可以查看聊天与朋友圈。';$('ob-run').hidden=true;$('ob-finish').hidden=false;if(!wizardActive){$('account-modal').hidden=true;route();}}
+  catch(error){$('ob-result').textContent=error.message;throw error;}
+  finally{$('ob-progress').hidden=true;}
+}
 async function runWizardExtraction(){
   if(!$('ob-consent').checked||state.pendingAccount===null)return;
-  showWizardScreen('extract');$('ob-progress').hidden=false;$('ob-log').hidden=false;$('ob-log').textContent='准备读取账号数据…';$('ob-result').textContent='';$('ob-run').hidden=false;$('ob-finish').hidden=true;
-  await run(async()=>{try{await extract(state.pendingAccount);$('ob-log').textContent+='\n账号数据读取完成。';$('ob-result').textContent='提取完成，可以查看聊天与朋友圈。';$('ob-run').hidden=true;$('ob-finish').hidden=false;if(!wizardActive){$('account-modal').hidden=true;route();}}
-   catch(error){$('ob-log').textContent+='\n提取未完成，请检查微信登录与目录后重试。';$('ob-result').textContent=error.message;throw error;}
-   finally{$('ob-progress').hidden=true;}});
+  await run(()=>wizardExtractionTask());
 }
 function finishWizard(page='chat'){$('account-modal').hidden=true;wizardActive=false;location.hash='#/'+page;route();syncButtons();}
 $('side-wizard').onclick=()=>showAccountModal(state.account,true);
 $('ob-start').onclick=()=>showWizardScreen('accounts');$('ob-back-intro').onclick=()=>showWizardScreen('intro');
 $('ob-to-extract').onclick=()=>{if($('ob-consent').checked&&state.pendingAccount!==null){$('ob-result').textContent='';$('ob-log').hidden=true;$('ob-progress').hidden=true;$('ob-run').hidden=false;$('ob-finish').hidden=true;showWizardScreen('extract');}};
-$('ob-back-account').onclick=()=>showWizardScreen('accounts');$('ob-run').onclick=runWizardExtraction;
+$('ob-back-account').onclick=()=>showWizardScreen('accounts');$('ob-run').onclick=()=>runWizardExtraction();
 $('ob-finish').onclick=()=>{if(wizardActive)showWizardScreen('next');else finishWizard();};$('ob-enter').onclick=()=>finishWizard();
 $('ob-skip').onclick=()=>finishWizard('settings');$('ob-extract-skip').onclick=()=>finishWizard('logs');
 document.querySelectorAll('[data-wizard-go]').forEach(b=>b.onclick=()=>finishWizard(b.dataset.wizardGo));
@@ -285,4 +313,4 @@ setInterval(()=>{if(!$('logs-page').hidden&&!state.busy&&!state.stopped)refreshL
 const tourSteps=[['#acc-card','选择账号','从这里切换本人的微信账号。'],['#side-wizard','运行向导','重新确认、选号、提取并打开数据。'],['#menu a[data-page=chat]','聊天查看','查找会话、筛选消息、复制或导出所选记录。'],['#menu a[data-page=sns]','朋友圈','浏览动态、互动与媒体，按发布者和日期筛选并导出。'],['#menu a[data-page=export]','导出','选择会话、日期与格式，下载文件或ZIP。'],['#menu a[data-page=logs]','运行日志','查看操作阶段、搜索、复制与下载。'],['#menu a[data-page=settings]','设置','管理账号、主题与运行向导。']];
 function showTour(index){document.querySelectorAll('.tour-target').forEach(n=>n.classList.remove('tour-target'));$('tour-panel')?.remove();tourIndex=index;if(index<0||index>=tourSteps.length)return;const [selector,title,text]=tourSteps[index],target=document.querySelector(selector);target?.classList.add('tour-target');target?.scrollIntoView({block:'nearest'});const panel=node('div','tour-panel');panel.id='tour-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-label','使用导览');panel.append(node('b','',title),node('p','',text));const actions=node('div','ob-actions');for(const [label,next] of [['上一步',index-1],[index===tourSteps.length-1?'完成':'下一步',index+1],['关闭',-1]]){const b=node('button','btn btn-sm',label);b.onclick=()=>showTour(next);actions.append(b);}panel.append(actions);document.body.append(panel);}
 $('side-tour').onclick=()=>showTour(0);
-route();run(async()=>{state.accounts=await json('/api/accounts');if(!state.accounts.length)await refreshAccounts();const current=await json('/api/state');state.account=current.account??state.accounts[0]?.id??null;state.opened=current.opened;if(state.opened)state.chats=await json('/api/chats');renderAccount();renderChats();renderExport();if(!state.opened){state.pendingAccount=state.account;wizardActive=true;$('account-modal').hidden=false;renderAccountChoices();showWizardScreen('intro');}});
+route();run(async()=>{state.accounts=await json('/api/accounts');if(!state.accounts.length)await refreshAccounts();const current=await json('/api/state');current.extraction=await json('/api/open/progress');state.account=current.account??state.accounts[0]?.id??null;state.opened=current.opened;if(state.opened)state.chats=await json('/api/chats');renderAccount();renderChats();renderExport();if(!state.opened){state.pendingAccount=state.account;wizardActive=true;$('account-modal').hidden=false;renderAccountChoices();showWizardScreen('intro');if(current.extraction?.state==='running'){state.pendingAccount=current.extraction.account;$('ob-consent').checked=true;await wizardExtractionTask(true);}}});

@@ -161,7 +161,7 @@ class Win4Source(Source):
         return False
 
     # ------------------------------------------------------------------ 打开
-    def open(self) -> None:
+    def open(self, progress=None, checkpoint=None) -> None:
         storage = self.root / "db_storage"
         if not storage.is_dir():
             raise DiscoveryError(f"{self.root} 下没有 db_storage，可能不是 PC 微信 4.x 的数据目录")
@@ -173,14 +173,27 @@ class Win4Source(Source):
                 raise KeyError_("缺少 message_0.db 的密钥")
             if not verify_key(first, first_key, WIN4):
                 raise DecryptError("密钥校验失败：无法解密 message_0.db 第一页，请确认密钥属于该账号")
-        for path in self._db_paths():
+        paths = self._db_paths()
+        for number, path in enumerate(paths, 1):
+            if checkpoint:
+                checkpoint()
+            if progress:
+                progress("database", number, len(paths))
             key = self._key_for(path)
             if key is None:
                 self.load_errors.append(f"{path.name}: 没有对应密钥，已跳过")
                 continue
             try:
-                raw = decrypt_database(path, key, WIN4)
+                def pages(done, total):
+                    if done % 256 == 0 or done == total:
+                        if checkpoint:
+                            checkpoint()
+                        if progress:
+                            progress("pages", done, total)
+                raw = decrypt_database(path, key, WIN4, progress=pages if checkpoint or progress else None)
             except Exception as exc:  # 单个库损坏不影响其他库
+                if checkpoint:
+                    checkpoint()
                 if path.name == "message_0.db":
                     raise
                 self.load_errors.append(f"{path.name}: {exc}")
@@ -192,9 +205,19 @@ class Win4Source(Source):
                 continue
             self._conns[self._db_key(path)] = conn
             self._db_sizes[path.name] = len(raw)
+        if checkpoint:
+            checkpoint()
+        if progress:
+            progress("index")
         self._index_messages()
         self._load_name2id()
+        if checkpoint:
+            checkpoint()
+        if progress:
+            progress("contacts")
         self._load_contacts()
+        if checkpoint:
+            checkpoint()
 
     def close(self) -> None:
         for conn in self._conns.values():

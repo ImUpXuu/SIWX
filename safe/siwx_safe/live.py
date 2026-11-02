@@ -1,7 +1,8 @@
 """Explicit-current-user adapter over unchanged wexport Windows 4.x code.
 
-No changes to extraction algorithms, injection, privilege adjustment, key cache,
-process termination, whole-disk search, image-key scan, or network access.
+Cryptographic extraction rules unchanged; bounded scan reads, stage progress and
+cooperative cancellation. No injection, privilege adjustment, key cache, process
+termination, whole-disk search, image-key scan, or network access.
 """
 from __future__ import annotations
 
@@ -10,6 +11,8 @@ from collections import deque
 import os
 from pathlib import Path
 import sys
+import threading
+import time as clock
 
 from .documents import MAX_MESSAGES
 from .vendor.wexport.sources.win4 import Win4Source
@@ -134,23 +137,91 @@ def own_wechat_pids(process_api=None):
     return found
 
 
-def open_account(account):
+class ReadProgress:
+    """Only fixed stage text/counters and numeric choice ID; no paths, PIDs or keys."""
+    def __init__(self, timeout=900, reporter=None):
+        self.lock = threading.RLock()
+        self.cancelled = threading.Event()
+        self.timeout = timeout
+        self.reporter = reporter
+        self.last_report = ("", 0)
+        self.started = None
+        self.state, self.message = "idle", "等待提取。"
+        self.lines = deque(maxlen=100)
+        self.result = None
+        self.account = None
+
+    def begin(self, account=None):
+        with self.lock:
+            self.cancelled.clear()
+            self.account = account
+            self.started = clock.monotonic()
+            self.state, self.result = "running", None
+            self.lines.clear()
+            self.update("正在检查本人微信登录状态…")
+
+    def check(self):
+        if self.cancelled.is_set():
+            raise ValueError("已停止本次提取，可以重新选择账号后重试。")
+        if self.started is not None and clock.monotonic() - self.started > self.timeout:
+            raise ValueError("本次读取超过15分钟，已停止；请查看最后阶段，确认微信与数据目录后重试。")
+
+    def update(self, message):
+        self.check()
+        with self.lock:
+            if self.message != message or not self.lines:
+                self.message = message
+                self.lines.append(message)
+                prefix = message.split("（", 1)[0]
+                now = clock.monotonic()
+                if self.reporter and (prefix != self.last_report[0] or now - self.last_report[1] >= 2):
+                    self.reporter(message)
+                    self.last_report = (prefix, now)
+
+    def database(self, stage, done=0, total=0):
+        messages = {"database": "正在解密数据库", "pages": "正在解密数据库页面",
+                    "index": "正在整理聊天索引…", "contacts": "正在读取联系人…"}
+        self.update(messages[stage] + (f"（{done}/{total}）" if total else ""))
+
+    def finish(self, state, message, result=None):
+        with self.lock:
+            self.state, self.message, self.result = state, message, result
+            self.lines.append(message)
+
+    def snapshot(self):
+        with self.lock:
+            return {"state": self.state, "message": self.message, "logs": list(self.lines),
+                    "elapsed": int(clock.monotonic() - self.started) if self.started is not None else 0,
+                    "result": self.result, "account": self.account}
+
+
+def open_account(account, progress=None):
     if sys.platform != "win32":
         raise ValueError("本人已登录微信自动提取目前仅支持Windows微信4.x。")
+    progress = progress or ReadProgress()
+    if progress.started is None:
+        progress.begin()
+    progress.check()
     pids = own_wechat_pids()
     if not pids:
         raise ValueError("未找到本人运行的微信，请登录Windows微信4.x后重试。")
     # Use the original extractor unchanged, with an explicit current-user PID set.
     from .vendor.wexport.win.wcdb_keys import extract_keys
-    keys = extract_keys(account.root, pids=pids)
+    progress.update("正在读取本人微信进程中的数据库配置…")
+    keys = extract_keys(account.root, pids=pids, checkpoint=progress.check,
+                        stage=progress.update, progress=lambda done, total: progress.update(f"正在校验数据库（{done}/{total}）"))
     if not keys:
         raise ValueError("未提取到当前账号密钥。请在本人微信中打开一段聊天后重试；若被安全软件阻止，请保留检测信息。")
-    source = Win4Source(account, keys)
+    source = None
     try:
-        source.open()
+        progress.check()
+        source = Win4Source(account, keys)
+        source.open(progress=progress.database, checkpoint=progress.check)
+        progress.check()
     except BaseException:
-        source.close()
-        source._keys.clear()
+        if source is not None:
+            source.close()
+            source._keys.clear()
         raise
     finally:
         keys.clear()
@@ -171,12 +242,19 @@ class Engine:
         self.source = None
         self.account_index = None
         self.moments = None
+        self.events_lock = threading.Lock()
         self.events = deque(maxlen=500)
+        self.read_progress = ReadProgress(reporter=lambda message: self.event("info", message))
         self.event("info", "程序已启动，等待选择账号。")
 
     def event(self, level, message):
-        self.events.append({"time": datetime.now().isoformat(sep=" ", timespec="seconds"),
-                            "level": level, "message": message})
+        with self.events_lock:
+            self.events.append({"time": datetime.now().isoformat(sep=" ", timespec="seconds"),
+                                "level": level, "message": message})
+
+    def events_snapshot(self):
+        with self.events_lock:
+            return list(self.events)
 
     def account_list(self):
         return [{"id": i, "name": a.label} for i, a in enumerate(self.accounts)]
@@ -213,24 +291,40 @@ class Engine:
         self.event("info", "已添加微信数据目录。")
         return {"added": added, "accounts": self.account_list()}
 
-    def open(self, index, consent):
+    def validate_open(self, index, consent):
         if consent is not True:
             raise ValueError("请先确认仅处理本人有权访问的微信数据。")
         if type(index) is not int or not 0 <= index < len(self.accounts):
             raise ValueError("请选择列表中的账号。")
+
+    def open(self, index, consent, prepared=False):
+        self.validate_open(index, consent)
+        if not prepared:
+            self.read_progress.begin(index)
         # Close old decrypted data before beginning a new extraction attempt.
         self.close()
         self.event("info", "开始提取并读取账号数据库。")
         try:
-            self.source = self.opener(self.accounts[index])
+            if self.opener is open_account:
+                self.source = self.opener(self.accounts[index], self.read_progress)
+            else:
+                self.source = self.opener(self.accounts[index])
+            self.read_progress.check()
+            self.account_index = index
+            from .sns_live import Moments
+            self.moments = Moments(self.source)
+            self.event("warn" if self.source.load_errors else "info", "部分数据库未能读取，已打开可用数据。" if self.source.load_errors else "账号数据已打开。")
+            result = {"opened": True, "warnings": len(self.source.load_errors)}
+            self.read_progress.finish("done", "账号数据读取完成。", result)
+            return result
         except Exception:
+            self.close()
             self.event("error", "提取未完成，请检查微信登录状态与数据目录后重试。")
+            message = "已停止本次提取，可以重新选择账号后重试。" if self.read_progress.cancelled.is_set() else "提取未完成，请确认本人微信已登录、数据目录可读，或查看安全软件检测信息后重试。"
+            if self.read_progress.started is not None and clock.monotonic() - self.read_progress.started > self.read_progress.timeout:
+                message = "本次读取超过15分钟，已停止；请查看最后阶段，确认微信与数据目录后重试。"
+            self.read_progress.finish("cancelled" if self.read_progress.cancelled.is_set() else "error", message)
             raise
-        self.account_index = index
-        from .sns_live import Moments
-        self.moments = Moments(self.source)
-        self.event("warn" if self.source.load_errors else "info", "部分数据库未能读取，已打开可用数据。" if self.source.load_errors else "账号数据已打开。")
-        return {"opened": True, "warnings": len(self.source.load_errors)}
 
     def close(self):
         if self.moments is not None:

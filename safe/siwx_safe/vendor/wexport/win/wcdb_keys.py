@@ -13,7 +13,7 @@ import struct
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from ..crypto.sqlcipher import WIN4, verify_key
+from ..crypto.sqlcipher import WIN4, verify_key, read_shared_range
 from .memory import ProcessMemory, find_all
 from .processes import find_pids
 
@@ -31,25 +31,34 @@ def _xor(buf: bytes) -> bytes:
     return bytes(v ^ CONFIG_XOR_MASK[i % len(CONFIG_XOR_MASK)] for i, v in enumerate(buf))
 
 
-def _search(pm: ProcessMemory, needle: bytes) -> Iterator[int]:
+def _search(pm: ProcessMemory, needle: bytes, checkpoint=None) -> Iterator[int]:
+    # Keep native addresses and cross-chunk matches; never concatenate unreadable gaps.
     for region in pm.regions():
-        data = pm.read_chunked(region.base, region.size)
-        if not data:
-            continue
-        for offset in find_all(data, needle):
-            yield region.base + offset
+        tail = b""
+        for offset in range(0, region.size, 4 << 20):
+            if checkpoint:
+                checkpoint()
+            size = min(4 << 20, region.size - offset)
+            data = pm.read(region.base + offset, size)
+            if not data:
+                tail = b""
+                continue
+            block = tail + data
+            for match in find_all(block, needle):
+                yield region.base + offset - len(tail) + match
+            tail = block[-(len(needle) - 1):] if len(needle) > 1 and len(data) == size else b""
 
 
-def _candidates_from_pid(pid: int) -> list[bytes]:
+def _candidates_from_pid(pid: int, checkpoint=None) -> list[bytes]:
     out: list[bytes] = []
     seen: set[bytes] = set()
     with ProcessMemory(pid) as pm:
-        needles = list(_search(pm, CONFIG_CIPHER_NAME))
+        needles = list(_search(pm, CONFIG_CIPHER_NAME, checkpoint))
         if not needles:
             return out
         for addr in needles:
             pair = struct.pack("<QQ", addr, len(CONFIG_CIPHER_NAME))
-            for qaddr in _search(pm, pair):
+            for qaddr in _search(pm, pair, checkpoint):
                 node = pm.read(qaddr - 0x10, 0x50)
                 if not node or len(node) < 0x40:
                     continue
@@ -87,7 +96,7 @@ def _candidates_from_pid(pid: int) -> list[bytes]:
 
 
 def collect_candidates(
-    pids: Sequence[int] | None = None, progress=None
+    pids: Sequence[int] | None = None, progress=None, checkpoint=None
 ) -> list[bytes]:
     """扫描微信进程内存，返回所有候选的 32 字节密钥。"""
     if pids is None:
@@ -97,21 +106,23 @@ def collect_candidates(
         if progress:
             progress(pid)
         try:
-            found.extend(_candidates_from_pid(pid))
+            found.extend(_candidates_from_pid(pid, checkpoint))
         except OSError:
             continue
     return list(dict.fromkeys(found))
 
 
-def db_files(root: Path) -> dict[str, Path]:
+def db_files(root: Path, checkpoint=None) -> dict[str, Path]:
     """列出账号目录下所有可校验的加密库（相对 db_storage 的 posix 路径）。"""
     storage = root / "db_storage" if (root / "db_storage").is_dir() else root
     result: dict[str, Path] = {}
     for path in sorted(storage.rglob("*.db")):
+        if checkpoint:
+            checkpoint()
         if not path.is_file():
             continue
         try:
-            head = path.read_bytes()[:16]
+            head = read_shared_range(path, 0, 16)
         except OSError:
             continue
         if len(head) < 16:
@@ -126,13 +137,16 @@ def match_keys(
     root: Path,
     candidates: Iterable[bytes],
     progress=None,
+    checkpoint=None,
 ) -> dict[str, bytes]:
     """把候选密钥按页 1 校验分配到各库。返回 {相对路径: 32 字节密钥}。"""
-    files = db_files(root)
+    files = db_files(root, checkpoint)
     cand_list = list(candidates)
     matched: dict[str, bytes] = {}
     for i, (rel, path) in enumerate(files.items(), 1):
         for cand in cand_list:
+            if checkpoint:
+                checkpoint()
             try:
                 if verify_key(path, cand, WIN4):
                     matched[rel] = cand
@@ -148,12 +162,16 @@ def extract_keys(
     root: Path,
     pids: Sequence[int] | None = None,
     progress=None,
+    checkpoint=None,
+    stage=None,
 ) -> dict[str, bytes]:
     """一步到位：扫内存取候选 + 逐库校验。"""
-    candidates = collect_candidates(pids)
+    candidates = collect_candidates(pids, checkpoint=checkpoint)
     if not candidates:
         return {}
-    return match_keys(root, candidates, progress=progress)
+    if stage:
+        stage("正在校验数据库密钥…")
+    return match_keys(root, candidates, progress=progress, checkpoint=checkpoint)
 
 
 def format_keys(keys: dict[str, bytes]) -> str:
