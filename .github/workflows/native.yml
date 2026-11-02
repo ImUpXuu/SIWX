@@ -1,0 +1,54 @@
+name: Build original SIWX native edition
+on:
+  push:
+    branches: ['codex/lite-task-verify-*']
+    paths: ['native/**', 'siwx/**', '.github/workflows/native.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  PYTHONUTF8: '1'
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Original runtime and build dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt -r requirements-build.txt
+      - name: Original upstream regression suite in isolated home
+        run: python native/test_suite.py --upstream
+      - name: Generate recorded subtractive edition
+        run: python native/prepare.py
+      - name: Check original edition JavaScript modules
+        shell: powershell
+        run: |
+          Get-ChildItem native/_build/siwx/ui -Filter *.js -Recurse | Where-Object { $_.FullName -notmatch '[\\/]vendor[\\/]' } | ForEach-Object {
+            $check = Join-Path $env:RUNNER_TEMP 'siwx-module-check.mjs'
+            Copy-Item $_.FullName $check -Force
+            node --check $check
+            if ($LASTEXITCODE -ne 0) { throw "JS failed: $($_.Name)" }
+          }
+      - name: Original backend acceptance with synthetic SQLite
+        run: python native/test_suite.py
+      - name: Build original runtime directory distribution
+        run: |
+          python -m PyInstaller --noconfirm --clean native/native.spec
+          ./dist/siwx-lite/siwx-lite.exe --help
+          ./dist/siwx-lite/siwx-lite.exe --version
+          Copy-Item native/README.md dist/siwx-lite/README.txt
+          Copy-Item LICENSE dist/siwx-lite/LICENSE.txt
+          Copy-Item native-module-manifest.json dist/siwx-lite/module-manifest.json
+          python native/source_archive.py dist/siwx-lite/SOURCE.zip
+          Get-ChildItem dist/siwx-lite -File -Recurse | ForEach-Object {
+            $relative = $_.FullName.Substring((Resolve-Path dist/siwx-lite).Path.Length + 1)
+            "$( (Get-FileHash $_.FullName -Algorithm SHA256).Hash )  $relative"
+          } | Set-Content -Encoding utf8 dist/siwx-lite/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: siwx-native-windows-x64
+          path: dist/siwx-lite/
+          if-no-files-found: error
+          retention-days: 14

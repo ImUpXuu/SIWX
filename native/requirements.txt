@@ -1,0 +1,2 @@
+# Original runtime dependencies; build-only compiler is separately pinned in CI.
+-r ../requirements.txt
