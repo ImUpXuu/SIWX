@@ -233,6 +233,14 @@ try {
             $fakeTasks += $badTask
         }
         function Get-ScheduledTask { param($TaskName, $ErrorAction) $fakeTasks }
+        $savedFakeTasks = @($fakeTasks)
+        $originalTask = $validTask | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+        $metaOriginal = $originalTask.Description | ConvertFrom-Json
+        $metaOriginal.Kind = 'SiwxConsoleBackground'
+        $originalTask.Description = $metaOriginal | ConvertTo-Json
+        $fakeTasks = @($originalTask)
+        if (@(Get-SiwxBackgroundTasks $testSid).Count -ne 1) { throw 'Original background task not recognized' }
+        $fakeTasks = $savedFakeTasks
         $managed = @(Get-SiwxBackgroundTasks $testSid)
         if ($managed.Count -ne 1 -or $managed[0].Task.TaskName -ne $validTask.TaskName) {
             throw 'Background manager accepted a foreign or malformed task.'

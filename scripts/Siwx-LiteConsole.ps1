@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 # One-command Windows entry; no Python installation required.
-# Task357: persistent export history; trusted previous-release port cleanup, loopback only.
+# Task358: persistent export history; trusted previous-release port cleanup, loopback only.
 & {
     # ASCII source keeps Chinese prompts intact in Windows PowerShell 5.1 and irm/iex.
     function ConvertFrom-ConsoleText([string]$Text) {
@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.18\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.19\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -122,11 +122,11 @@
         $legacyExePath = $null
         $installBase = Join-Path $env:SystemRoot 'SIWX'
         New-SiwxInstallDirectory $installBase
-        $installPath = Join-Path $installBase 'lite-1.6.2-c7521c3'
+        $installPath = Join-Path $installBase 'lite-1.7.0-e6a1ead'
         $exePath = Join-Path $installPath 'siwx-lite.exe'
-        $expectedZipHash = '9ce750587c43d5e0a08f85c027fa322d75cbbc5780972899b8ef24ee71a3fe33'
-        $manifestHash = 'fff449928272036982e9814e232e1279529011f678d7009604701c77767a5c46'
-        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-native-1.6.2-c7521c3-windows-x64.zip'
+        $expectedZipHash = '9f339b17f5548dfc8316800f89cfb772a234c4f98ee6ea02981818e9652e377e'
+        $manifestHash = '543d6e1507b5f28a94b2902a0853ba55d00604b1506b0b6b78c8e503f6198e1e'
+        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-native-1.7.0-e6a1ead-windows-x64.zip'
         [Net.ServicePointManager]::SecurityProtocol = $previousTls -bor [Net.SecurityProtocolType]::Tls12
         function Assert-SiwxPlainPath([string]$Path) {
             $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -217,7 +217,7 @@
         $preferredPort = 8787
         Write-Host (ConvertFrom-ConsoleText "\u7a0b\u5e8f\u4f4d\u7f6e\uff1a$exePath")
         Write-Host (ConvertFrom-ConsoleText "\u8fd0\u884c\u53ca\u8f93\u51fa\u76ee\u5f55\uff1a$rootPath")
-        Write-Host 'Lite 1.6.2 / 127.0.0.1 / no IP, Host, Origin, token or password checks.'
+        Write-Host 'Lite 1.7.0 / 127.0.0.1 / no IP, Host, Origin, token or password checks.'
         $bridgeDirectory = Join-Path "$env:SystemRoot\Temp" ('SiwxBridge-' + [Guid]::NewGuid().ToString('N'))
         New-SiwxPrivateDirectory $bridgeDirectory $sid
 
@@ -267,6 +267,7 @@
                 'lite-1.5.2-4f20738' = 'a96f7e62b768c1b544546d9aa7c71139f15cf19b9266f4743ef168b606d61cd2'
                 'lite-1.6.0-9419f05' = 'bd9ed72c17903dc344b20b880f28828df8797a21febec5dae470c52d5573a688'
                 'lite-1.6.1-c7e7a9b' = '94026daba377efb0b03e68a791e240f382b4f11487ac2acc4aadbec026e80e10'
+                'lite-1.6.2-c7521c3' = 'fff449928272036982e9814e232e1279529011f678d7009604701c77767a5c46'
             }
             try {
                 $base = Join-Path $env:SystemRoot 'SIWX'
@@ -283,6 +284,31 @@
                     Assert-SiwxInstallAcl $file.FullName
                 }
                 return $true
+            } catch { return $false }
+        }
+
+        function Test-SiwxOriginalInstall([string]$CandidatePath, [string]$UserSid) {
+            try {
+                $base = Join-Path $env:SystemRoot 'SIWX'
+                $installed = Join-Path $base 'siwx-v5.2.0.exe'
+                $legacy = if ($rootPath) { Join-Path $rootPath 'siwx-v5.2.0.exe' } else { $null }
+                if ([StringComparer]::OrdinalIgnoreCase.Equals($CandidatePath, $installed)) {
+                    Assert-SiwxInstallAcl $base
+                    Assert-SiwxInstallAcl $CandidatePath
+                } elseif ($legacy -and [StringComparer]::OrdinalIgnoreCase.Equals($CandidatePath, $legacy)) {
+                    # Legacy user-private executable: permit only SYSTEM/admin/selected user writers.
+                    $allowed = @('S-1-5-18', 'S-1-5-32-544', $UserSid)
+                    foreach ($path in @($rootPath, $CandidatePath)) {
+                        Assert-SiwxPlainPath $path
+                        $acl = Get-Acl -LiteralPath $path
+                        if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $allowed) { return $false }
+                        foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+                            if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $allowed) { return $false }
+                        }
+                    }
+                } else { return $false }
+                Assert-SiwxPlainPath $CandidatePath
+                return (Get-FileHash -LiteralPath $CandidatePath -Algorithm SHA256).Hash -eq 'dcecef343256f8d5c7335da82ea6a0311a0b1b2261a8a7dc763ba7bb7fba8dc6'
             } catch { return $false }
         }
 
@@ -303,15 +329,22 @@
         }
 
         function Test-SiwxProcessRecord($Record, [string]$ExePath, [string]$UserSid, [int]$SessionId, [ValidateRange(8787, 8887)][int]$Port = 8787) {
-            if (-not $Record -or -not $Record.Created -or $Record.Name -ine 'siwx-lite.exe' -or
+            if (-not $Record -or -not $Record.Created -or $Record.Name -notin @('siwx-lite.exe','siwx-v5.2.0.exe') -or
                 $Record.Sid -ne $UserSid -or $Record.Session -ne $SessionId) { return $false }
-            if (-not (Test-SiwxTrustedInstall $Record.Path $ExePath)) { return $false }
+            $original = $Record.Name -ieq 'siwx-v5.2.0.exe'
+            if ($original) {
+                if (-not (Test-SiwxOriginalInstall $Record.Path $UserSid)) { return $false }
+            } elseif (-not (Test-SiwxTrustedInstall $Record.Path $ExePath)) { return $false }
             $pathPattern = [regex]::Escape($Record.Path)
             $bindPattern = '127\.0\.0\.1'
             if (-not [StringComparer]::OrdinalIgnoreCase.Equals($Record.Path, $ExePath)) {
                 $bindPattern = '(?:127\.0\.0\.1|0\.0\.0\.0)'
             }
-            $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+--host\s+' + $bindPattern + '\s+--port\s+' + $Port + '\s+--no-open(?:\s+--data\s+"[^"%\r\n]+")?\s*$'
+            if ($original) {
+                $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+serve\s+--host\s+(?:127\.0\.0\.1|0\.0\.0\.0)\s+--port\s+' + $Port + '\s+--no-open(?:\s+--trust-lan)?\s*$'
+            } else {
+                $pattern = '^(?:"' + $pathPattern + '"|' + $pathPattern + ')\s+--host\s+' + $bindPattern + '\s+--port\s+' + $Port + '\s+--no-open(?:\s+--data\s+"[^"%\r\n]+")?\s*$'
+            }
             return $Record.Command -imatch $pattern
         }
 
@@ -349,10 +382,11 @@
                         Write-Host ((ConvertFrom-ConsoleText "$Port\u7aef\u53e3\u5360\u7528PID={0}\uff1a\u65e0\u6cd5\u786e\u8ba4\u662f\u5f53\u524d\u7528\u6237\u7684SIWX\uff0c\u5df2\u4fdd\u7559\u3002") -f $processId)
                         return $false
                     }
+                    Write-Host ('Verified SIWX listener: PID=' + $record.Id + ' EXE=' + $record.Name + ' port=' + $Port)
                     $records[$record.Id] = $record
                     # PyInstaller one-file has an identical parent supervising the listening child.
                     $parent = Get-SiwxProcessRecord $record.ParentId
-                    if ($parent -and $parent.Name -ieq 'siwx-lite.exe') {
+                    if ($parent -and $parent.Name -in @('siwx-lite.exe','siwx-v5.2.0.exe')) {
                         if (-not (Test-SiwxProcessRecord $parent $ExePath $UserSid $SessionId $Port) -or
                             $parent.Created -gt $record.Created) {
                             throw (ConvertFrom-ConsoleText '\u65e0\u6cd5\u786e\u8ba4SIWX\u7236\u8fdb\u7a0b\u8eab\u4efd\uff0c\u672a\u7ed3\u675f\u4efb\u4f55\u8fdb\u7a0b\u3002')
@@ -398,7 +432,7 @@
             foreach ($task in @(Get-ScheduledTask -TaskName 'SiwxBackground-*' -ErrorAction SilentlyContinue)) {
                 try {
                     $meta = $task.Description | ConvertFrom-Json -ErrorAction Stop
-                    if ($meta.Kind -ne 'SiwxLiteOriginal344' -or $meta.UserSid -ne $UserSid) { continue }
+                    if ($meta.Kind -notin @('SiwxLiteOriginal344','SiwxConsoleBackground') -or $meta.UserSid -ne $UserSid) { continue }
                     $principalSid = $task.Principal.UserId
                     if ($principalSid -notmatch '^S-1-') {
                         $principalSid = (New-Object Security.Principal.NTAccount($principalSid)).Translate(
@@ -429,7 +463,7 @@
                         $port = [int]$meta.Port
                     }
                     [pscustomobject]@{
-                        Task = $task; LogPath = $log; Port = $port
+                        Task = $task; LogPath = $log; Port = $port; Edition = $meta.Kind
                     }
                 } catch { continue }
             }
@@ -676,10 +710,17 @@ try {
             }
             if ($nextCommand -eq '0') { break }
             if ($nextCommand -eq '16') {
-                $probe = Get-SiwxPortProbe $preferredPort
-                Write-Host ('Port ' + $preferredPort + ' TCP reachable=' + $probe.TcpReachable)
-                if (Test-SiwxPort $preferredPort) { $null = Stop-SiwxPortOwner $exePath $sid ([int]$sessions[0]) $preferredPort }
-                else { Write-Host 'The preferred port is available.' }
+                $ports = @($preferredPort) + @(Get-SiwxListeningPorts | Where-Object { $_ -ne $preferredPort })
+                foreach ($port in $ports) {
+                    $probe = Get-SiwxPortProbe $port
+                    Write-Host ('Port ' + $port + ' TCP reachable=' + $probe.TcpReachable)
+                    foreach ($connection in @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
+                        $owner = Get-SiwxProcessRecord $connection.OwningProcess
+                        if ($owner) { Write-Host ('Listener PID=' + $owner.Id + ' EXE=' + $owner.Name) }
+                    }
+                    if (Test-SiwxPort $port) { $null = Stop-SiwxPortOwner $exePath $sid ([int]$sessions[0]) $port }
+                    else { Write-Host 'Port available.' }
+                }
                 $nextCommand = $null; continue
             }
             if ($nextCommand -eq '14') {
@@ -722,6 +763,7 @@ try {
                 if ($backgroundTasks.Count -eq 0) { Write-Host (ConvertFrom-ConsoleText '\u8be5\u7528\u6237\u6ca1\u6709\u672c\u811a\u672c\u7ba1\u7406\u7684\u540e\u53f0\u4efb\u52a1\u3002') }
                 for ($index = 0; $index -lt $backgroundTasks.Count; $index++) {
                     $record = $backgroundTasks[$index]
+                    Write-Host ('Edition: ' + $record.Edition)
                     Write-Host ((ConvertFrom-ConsoleText "[{0}] {1}  \u72b6\u6001={2}") -f ($index + 1), $record.Task.TaskName, $record.Task.State)
                     Write-Host (ConvertFrom-ConsoleText "\u7f51\u5740\uff1ahttp://127.0.0.1:$($record.Port)/\uff08\u4ec5\u5728\u5bf9\u5e94\u670d\u52a1\u8fd0\u884c\u65f6\u6709\u6548\uff09")
                     Write-Host (ConvertFrom-ConsoleText "\u65e5\u5fd7\uff1a$($record.LogPath)")

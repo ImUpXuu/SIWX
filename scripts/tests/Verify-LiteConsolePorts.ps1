@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $PSScriptRoot) 'Siwx-LiteConsole.ps1'),[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Console parse error'}
-foreach($name in @('ConvertFrom-ConsoleText','Test-SiwxTrustedInstall','Get-SiwxPortProbe','Test-SiwxProcessRecord','Open-SiwxProcessHandle','Stop-SiwxPortOwner')){
+foreach($name in @('ConvertFrom-ConsoleText','Test-SiwxTrustedInstall','Test-SiwxOriginalInstall','Get-SiwxPortProbe','Test-SiwxProcessRecord','Open-SiwxProcessHandle','Stop-SiwxPortOwner')){
     $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
     . ([ScriptBlock]::Create($node.Extent.Text))
 }
@@ -84,6 +84,13 @@ Reset-Fixture
 $script:listeners=@()
 if(-not (Stop-SiwxPortOwner $exe $sid $sessionId) -or $script:killed.Count){throw 'Empty port changed processes'}
 Write-Output 'PASS: exact path/name/SID/session/command/create-time identity; PID reuse; parent-first cleanup; mixed/foreign listeners refused; all-handles-before-stop; orphan/no-listener cases'
+# Original parent and listening child both require exact original validation before stopping.
+function Test-SiwxOriginalInstall {param($CandidatePath,$UserSid) $CandidatePath -eq 'C:\Tools\siwx-v5.2.0.exe'}
+Reset-Fixture
+foreach($r in @($script:child,$script:parent)){$r.Name='siwx-v5.2.0.exe';$r.Path='C:\Tools\siwx-v5.2.0.exe';$r.Command='"C:\Tools\siwx-v5.2.0.exe" serve --host 127.0.0.1 --port 8787 --no-open --trust-lan'}
+if(-not (Stop-SiwxPortOwner $exe $sid $sessionId) -or ($script:killed -join ',') -ne '100,101'){throw 'Original parent/child cleanup failed'}
+$node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-SiwxOriginalInstall'},$true)
+. ([ScriptBlock]::Create($node.Extent.Text))
 # Dynamic ports retain exact command validation, including fallback-port parents.
 $dynamic=New-Fixture;$dynamic.Command=$dynamic.Command.Replace('8787','8789')
 if(-not (Test-SiwxProcessRecord $dynamic $exe $sid $sessionId 8789) -or
@@ -175,3 +182,44 @@ $socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $freePort)
 try {$socket.Start();if(-not (Get-SiwxPortProbe $freePort).TcpReachable){throw 'Real listening socket unreachable'}}finally{$socket.Stop()}
 if((Get-SiwxPortProbe $freePort).TcpReachable){throw 'Closed socket reachable'}
 Write-Output 'PASS: pinned known release/location/manifest/ACL, reject tamper/forged path; real TCP connect/closed diagnostic'
+
+# Original5.2.0 uses serve and a distinct EXE. Exact pinned identity is still mandatory.
+$savedSystemRoot=$env:SystemRoot
+$originalRoot=Join-Path ([IO.Path]::GetTempPath()) ('siwx-original-test-'+[guid]::NewGuid().ToString('N'))
+try {
+ $env:SystemRoot=$originalRoot;$rootPath=Join-Path $originalRoot 'profile'
+ $originalExe=Join-Path (Join-Path $originalRoot 'SIWX') 'siwx-v5.2.0.exe'
+ function Get-FileHash {param($LiteralPath,$Algorithm) [pscustomobject]@{Hash=$script:originalHash}}
+ $script:originalHash='dcecef343256f8d5c7335da82ea6a0311a0b1b2261a8a7dc763ba7bb7fba8dc6'
+ $original=New-Fixture;$original.Name='siwx-v5.2.0.exe';$original.Path=$originalExe
+ foreach($hostAddress in @('127.0.0.1','0.0.0.0')){
+  foreach($suffix in @('',' --trust-lan')){
+   $original.Command='"'+$originalExe+'" serve --host '+$hostAddress+' --port 8789 --no-open'+$suffix
+   if(-not (Test-SiwxProcessRecord $original $exe $sid $sessionId 8789)){throw 'Valid original serve listener rejected'}
+  }
+ }
+ $script:originalHash='0'*64
+ if(Test-SiwxProcessRecord $original $exe $sid $sessionId 8789){throw 'Tampered original EXE accepted'}
+ $script:originalHash='dcecef343256f8d5c7335da82ea6a0311a0b1b2261a8a7dc763ba7bb7fba8dc6'
+ # Legacy selected-user private location permits no unrelated ACL principal.
+ $script:legacyOwner=$sid;$script:legacyAllowed=$sid
+ $script:legacyAcl=[pscustomobject]@{}
+ $script:legacyAcl|Add-Member ScriptMethod GetOwner {param($Type) [pscustomobject]@{Value=$script:legacyOwner}}
+ $script:legacyAcl|Add-Member ScriptMethod GetAccessRules {param($Explicit,$Inherited,$Type) @([pscustomobject]@{AccessControlType='Allow';IdentityReference=[pscustomobject]@{Value=$script:legacyAllowed}})}
+ function Get-Acl {param($LiteralPath) $script:legacyAcl}
+ $legacyPath=Join-Path $rootPath 'siwx-v5.2.0.exe'
+ if(-not (Test-SiwxOriginalInstall $legacyPath $sid)){throw 'Verified private legacy location rejected'}
+ $script:legacyAllowed='S-1-1-0'
+ if(Test-SiwxOriginalInstall $legacyPath $sid){throw 'Foreign legacy ACL accepted'}
+ $script:legacyAllowed=$sid;$script:legacyOwner='S-1-5-21-1-1002'
+ if(Test-SiwxOriginalInstall $legacyPath $sid){throw 'Foreign legacy owner accepted'}
+ Remove-Item function:Get-Acl
+ $original.Command+=' --unexpected'
+ if(Test-SiwxProcessRecord $original $exe $sid $sessionId 8789){throw 'Unexpected original command accepted'}
+ $original.Command='"'+$originalExe+'" serve --host 127.0.0.1 --port 8789 --no-open'
+ $original.Sid='S-1-5-21-1-1002'
+ if(Test-SiwxProcessRecord $original $exe $sid $sessionId 8789){throw 'Foreign original SID accepted'}
+ $original.Sid=$sid;$original.Path=Join-Path $originalRoot 'foreign/siwx-v5.2.0.exe'
+ if(Test-SiwxProcessRecord $original $exe $sid $sessionId 8789){throw 'Foreign original location accepted'}
+}finally{$env:SystemRoot=$savedSystemRoot;Remove-Item function:Get-FileHash}
+Write-Output 'PASS: original5.2.0 serve/pinned EXE/host variants/trust-lan/dynamic port; reject tamper/foreignSID/unknown command and location'

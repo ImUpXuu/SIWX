@@ -1,4 +1,4 @@
-# 原版 SIWX 与精简版使用独立脚本（2026-11-02，任务357）
+# 原版 SIWX 与精简版使用独立脚本（2026-11-02，任务358）
 
 用户澄清：原脚本继续启动原版程序，新修改的程序使用新脚本。任务344将原入口
 切换到Lite属于误解，已恢复；以下两个入口分开维护。
@@ -6,7 +6,7 @@
 | 版本 | 源脚本 | 程序 | 下载入口 |
 |---|---|---|---|
 | 原版 | `Siwx-Console.ps1` v1.7 | 原 SIWX 5.2.0 EXE | `siwx.ps1?v=cn321` |
-| 精简版 | `Siwx-LiteConsole.ps1` v1.18 | 原生 1.6.2 目录包 | `siwx-lite.ps1?v=357` |
+| 精简版 | `Siwx-LiteConsole.ps1` v1.19 | 原生 1.7.0 目录包 | `siwx-lite.ps1?v=358` |
 
 原来的命令保持原版：
 
@@ -17,11 +17,11 @@ irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn321' | iex
 新修改的精简程序使用：
 
 ```powershell
-irm 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite.ps1?v=357' | iex
+irm 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite.ps1?v=358' | iex
 ```
 
-新版1.6.2直接使用原SIWX网页与后端，保留四步运行向导、使用导览、设置、运行日志和朋友圈浏览/媒体/导出：账号卡/聊天气泡/时间轴/筛选/多选复制/独立导出页面；
-移除已取消功能及GitHub/无用介绍外链。程序仅127.0.0.1监听，应用无客户端鉴权，新脚本v1.18固定新包。
+新版1.7.0直接使用原SIWX网页与后端，保留四步运行向导、使用导览、设置、运行日志和朋友圈浏览/媒体/导出：账号卡/聊天气泡/时间轴/筛选/多选复制/独立导出页面；
+移除已取消功能及GitHub/无用介绍外链。程序仅127.0.0.1监听，应用无客户端鉴权，新脚本v1.19固定新包。
 
 两者都沿用原WScript隐藏启动→CMD→本人已登录桌面用户→日志回传方式；
 在原SYSTEM/管理员PowerShell运行，选择微信所在的本人桌面用户。
@@ -33,7 +33,7 @@ irm 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite.ps1?v=357' | iex
 进程，否则在8787–8887换空闲端口。本机访问回环地址；同一电脑上的反代/穿透客户端连接127.0.0.1实际端口，不能用其他机器直接连电脑局域网IP。
 精简程序没有IP/Host/Origin/Sec-Fetch-Site白名单或token/密码/Cookie鉴权；
 不自动修改外部反代认证。JSON类型/大小/路径与本地进程归属校验保留。
-新版安装`%SystemRoot%\SIWX\lite-1.6.2-c7521c3`，固定原Windows云构建ZIP、
+新版安装`%SystemRoot%\SIWX\lite-1.7.0-e6a1ead`，固定原Windows云构建ZIP、
 内部清单与全部文件SHA，先stage验证再移动；已有版本不覆盖。旧5.2.0 EXE、数据和旧包保留。
 `Start-SiwxLite.ps1`为任务342历史源，独立新分发入口现对应`Siwx-LiteConsole.ps1`。
 
@@ -186,8 +186,10 @@ NAS可编辑配置：/vol1/@appdata/1Panel/1panel/www/conf.d/wx.sxnn.de.conf 与
 生效：0退出旧菜单，再`irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn321' | iex`，管理员/SYSTEM运行，显示v1.7和程序实际路径，首次下载校验官方EXE。不关闭安全策略、不保证解决原9020。完整PowerShell隔离回归和旧新路径识别通过；Windows ACL实际设置/普通用户启动需用户重新运行验证，本机macOS不能替代Windows ACL验收。Dufs仅两个脚本替换，EXE分发原件不变。回退ops/install321-20261101/before旧两脚本及Git撤销，旧EXE/数据保留，不自动删除系统目录。小备份全部保留无裁剪。
 
 
-任务357：导出页“已导出文件”从本机持久exports读取，刷新/重启/升级保留，支持搜索/分页/下载；删除原文件后不再显示。菜单16探测首选端口TCP，再经固定安装位置、全文件SHA、ACL、用户SID/会话/精确命令/创建时间/原句柄核验才能停止进程。自动启动沿用同样判断。未知占用不结束，继续寻找8787–8887备用端口。不是通过同进程名或网页标题判定；不修改反代或防火墙。
+任务358：导出页“已导出文件”从本机持久exports读取，刷新/重启/升级保留，支持搜索/分页/下载；删除原文件后不再显示。菜单16探测首选端口TCP，再经固定安装位置、全文件SHA、ACL、用户SID/会话/精确命令/创建时间/原句柄核验才能停止进程。自动启动沿用同样判断。未知占用不结束，继续寻找8787–8887备用端口。不是通过同进程名或网页标题判定；不修改反代或防火墙。
 
-1.6.2/v1.18补充：已导出文件请求沿用当前页面的同源反代认证凭据，兼容已有Basic登录；应用本身不加密码或白名单。1.6.0/v1.16已发布包作为前轮恢复点保留，新版本重新下载到独立目录。
+1.7.0/v1.19补充：已导出文件请求沿用当前页面的同源反代认证凭据，兼容已有Basic登录；应用本身不加密码或白名单。1.6.0/v1.16已发布包作为前轮恢复点保留，新版本重新下载到独立目录。
 
-1.6.2/v1.18：导出日志不再被历史卡挤压，默认48vh至少320px，可展开、拖高和纵向滚动；当前导出结果及历史文件新增复制目录路径，复制的是软件运行电脑上的实际绝对目录。原导出模块/日志暂停与复制保留。1.6.1/v1.17旧包及468ab脚本作为前版恢复点保留。
+1.7.0/v1.19：导出日志不再被历史卡挤压，默认48vh至少320px，可展开、拖高和纵向滚动；当前导出结果及历史文件新增复制目录路径，复制的是软件运行电脑上的实际绝对目录。原导出模块/日志暂停与复制保留。1.6.1/v1.17旧包及468ab脚本作为前版恢复点保留。
+
+1.7.0/v1.19: import missing original output/cache into native without overwriting existing files; SQLite read-only consistent snapshots include WAL. Original files remain intact. Original and native exports are listed directly with source labels, including duplicate filenames. Import progress appears on the export page; refresh the account card when complete. Original5.2.0 serve commands, fixed verified EXE paths/hash, selected-user legacy ACL and original background-task metadata are recognized. Menu16 scans8787-8887, displays PID/EXE and releases only validated SIWX listeners. Keep original launcher and original data untouched. Previous1.6.2/v1.18/b764 is retained for rollback.
