@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 # One-command Windows entry; no Python installation required.
-# Task348: original relay with setup/settings/logs and retained Moments 1.4.0.
+# Task349: account discovery refresh; original relay and retained Moments 1.4.1.
 & {
     # ASCII source keeps Chinese prompts intact in Windows PowerShell 5.1 and irm/iex.
     function ConvertFrom-ConsoleText([string]$Text) {
@@ -24,7 +24,7 @@
         Import-Module ScheduledTasks
         $scriptHost = "$env:SystemRoot\System32\wscript.exe"
         if (-not (Test-Path -LiteralPath $scriptHost -PathType Leaf)) { throw (ConvertFrom-ConsoleText 'Windows \u811a\u672c\u5bbf\u4e3b\u4e0d\u53ef\u7528\u3002') }
-        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.11\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
+        Write-Host (ConvertFrom-ConsoleText 'SIWX \u4e2d\u6587\u63a7\u5236\u53f0 v1.12\uff1a\u4ee5\u9009\u5b9a\u7684\u5df2\u767b\u5f55\u684c\u9762\u7528\u6237\u8fd0\u884c\uff0c\u4e0d\u81ea\u52a8\u6253\u5f00\u6d4f\u89c8\u5668\u3002')
         $suggestedUser = (Get-CimInstance Win32_ComputerSystem).UserName
         $userId = Read-Host (ConvertFrom-ConsoleText "\u76ee\u6807 Windows \u7528\u6237\uff08\u57df\u540d\\u7528\u6237\u540d\uff09\uff0c\u56de\u8f66\u4f7f\u7528 [$suggestedUser]")
         if (-not $userId) { $userId = $suggestedUser }
@@ -122,11 +122,11 @@
         $legacyExePath = $null
         $installBase = Join-Path $env:SystemRoot 'SIWX'
         New-SiwxInstallDirectory $installBase
-        $installPath = Join-Path $installBase 'lite-1.4.0-61618f2'
+        $installPath = Join-Path $installBase 'lite-1.4.1-12d71ae'
         $exePath = Join-Path $installPath 'siwx-lite.exe'
-        $expectedZipHash = '3497e910050e48c32bdd53598ef8f93e726927f4e5e66b1d67a2e8a61c5c0411'
-        $manifestHash = '0685253d45806b183f450559b87cd19209b8136b56c9313b4a44e9c6ddbfccea'
-        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite-1.4.0-61618f2-windows-x64.zip'
+        $expectedZipHash = '9311087ad00478552c806ceceb548bb21d937feee9156ad6bf498f8b0ba3c372'
+        $manifestHash = '69720eaa52e899f5d11f5df938174d6340b60fcef602cc4f7a253418b9831f7a'
+        $downloadUrl = 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite-1.4.1-12d71ae-windows-x64.zip'
         [Net.ServicePointManager]::SecurityProtocol = $previousTls -bor [Net.SecurityProtocolType]::Tls12
         function Assert-SiwxPlainPath([string]$Path) {
             $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -217,7 +217,7 @@
         $preferredPort = 8787
         Write-Host (ConvertFrom-ConsoleText "\u7a0b\u5e8f\u4f4d\u7f6e\uff1a$exePath")
         Write-Host (ConvertFrom-ConsoleText "\u8fd0\u884c\u53ca\u8f93\u51fa\u76ee\u5f55\uff1a$rootPath")
-        Write-Host 'Lite 1.4.0 / 0.0.0.0 / no IP, Host, Origin, token or password checks.'
+        Write-Host 'Lite 1.4.1 / 0.0.0.0 / no IP, Host, Origin, token or password checks.'
         $bridgeDirectory = Join-Path "$env:SystemRoot\Temp" ('SiwxBridge-' + [Guid]::NewGuid().ToString('N'))
         New-SiwxPrivateDirectory $bridgeDirectory $sid
 
