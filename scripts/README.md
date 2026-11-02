@@ -6,7 +6,7 @@
 | 版本 | 源脚本 | 程序 | 下载入口 |
 |---|---|---|---|
 | 原版 | `Siwx-Console.ps1` v1.7 | 原 SIWX 5.2.0 EXE | `siwx.ps1?v=cn321` |
-| 精简版 | `Siwx-LiteConsole.ps1` v1.8 | Lite 1.2.1 目录包 | `siwx-lite.ps1?v=346` |
+| 精简版 | `Siwx-LiteConsole.ps1` v1.9 | Lite 1.3.0 目录包 | `siwx-lite.ps1?v=347` |
 
 原来的命令保持原版：
 
@@ -17,8 +17,11 @@ irm 'http://139.196.47.109:9939/AAAAAAAA/siwx.ps1?v=cn321' | iex
 新修改的精简程序使用：
 
 ```powershell
-irm 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite.ps1?v=346' | iex
+irm 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite.ps1?v=347' | iex
 ```
+
+新版1.3.0网页恢复原SIWX布局：账号卡/聊天气泡/时间轴/筛选/多选复制/独立导出页面；
+移除已取消功能及GitHub/无用介绍外链。程序保0.0.0.0无鉴权，新脚本v1.9固定新包。
 
 两者都沿用原WScript隐藏启动→CMD→本人已登录桌面用户→日志回传方式；
 在原SYSTEM/管理员PowerShell运行，选择微信所在的本人桌面用户。
@@ -30,7 +33,7 @@ irm 'http://139.196.47.109:9939/AAAAAAAA/siwx-lite.ps1?v=346' | iex
 进程，否则在8787–8887换空闲端口。使用实际IP/既有映射域名，端口变化手动同步映射。
 精简程序没有IP/Host/Origin/Sec-Fetch-Site白名单或token/密码/Cookie鉴权；
 不自动修改外部反代认证。JSON类型/大小/路径与本地进程归属校验保留。
-新版安装`%SystemRoot%\SIWX\lite-1.2.1-56e6d05`，固定原Windows云构建ZIP、
+新版安装`%SystemRoot%\SIWX\lite-1.3.0-7780803`，固定原Windows云构建ZIP、
 内部清单与全部文件SHA，先stage验证再移动；已有版本不覆盖。旧5.2.0 EXE、数据和旧包保留。
 `Start-SiwxLite.ps1`为任务342历史源，独立新分发入口现对应`Siwx-LiteConsole.ps1`。
 

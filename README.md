@@ -1,6 +1,7 @@
-> **当前精简版（任务344，1.2.1）**：沿用原SIWX脚本的 WScript/CMD 会话链路，
-> 独立 `siwx-lite.ps1?v=346` 入口调用新目录包；原 `siwx.ps1?v=cn321` 保持原SIWX5.2.0。
+> **当前版本（任务347，1.3.0）**：沿用原SIWX脚本的 WScript/CMD 会话链路，
+> 独立 `siwx-lite.ps1?v=347` 入口调用新目录包；原 `siwx.ps1?v=cn321` 保持原SIWX5.2.0。
 > 两入口说明见 [脚本说明](scripts/README.md)。
+> 网页恢复原SIWX操作布局，仅保留提取/聊天/导出，去除取消功能及GitHub/无用信息。
 > 程序移除IP/Host/Origin/Sec-Fetch-Site来源门禁；新版脚本源为 `Siwx-LiteConsole.ps1`，原版源为 `Siwx-Console.ps1`。
 > 无桌面窗口、不自动打开浏览器，默认监听 `0.0.0.0:8787`。
 > 按用户明确选择不设令牌或密码，可连接端口的设备均可提取、查看、导出和停止。
