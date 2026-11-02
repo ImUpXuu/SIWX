@@ -7,7 +7,7 @@ import ast, hashlib, json, re, shutil, subprocess
 ROOT=Path(__file__).resolve().parent
 SOURCE=ROOT.parent/'siwx'
 BUILD=ROOT/'_build'
-REMOVED_MODULES={'api_stats','api_backup','api_mcp','api_update','mcp_server','backup','media_backup','auto_update'}
+REMOVED_MODULES={'api_stats','api_backup','api_mcp','api_update','mcp_server','backup','auto_update'}
 
 def sha(data):return hashlib.sha256(data).hexdigest()
 def remove_nodes(text,predicate):
@@ -30,6 +30,8 @@ def prepare():
  BUILD.mkdir();(BUILD/'GENERATED').write_text('SIWX native generated copy\n')
  shutil.copytree(SOURCE,BUILD/'siwx',ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
  ui=BUILD/'siwx/ui'
+ # Upstream5.3 export attachments reuse only these filesystem helpers.
+ p=BUILD/'siwx/media_backup.py';s=p.read_text();s=remove_nodes(s,lambda n:isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name not in {'_account_root','_part_path','_atomic_copyfile'});p.write_text(s)
  for name in REMOVED_MODULES:
   p=BUILD/'siwx'/name
   if p.is_dir():shutil.rmtree(p)
