@@ -11,6 +11,7 @@ logs/
 blobs.txt
 *.spec.bak
 .DS_Store
+.siwx-lite-test-*/
 
 # 运行时状态与本地产物
 auto_sync.json
