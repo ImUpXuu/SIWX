@@ -1,4 +1,5 @@
 (function(){
+let generation=0;
 /* 朋友圈页（Vue 3 全局构建版，无构建链）。
  *
  * 架构：
@@ -1237,6 +1238,7 @@ return function render(_ctx, _cache) {
 
     /* ── 列表加载 ── */
     async load(reset) {
+      const activeGeneration=generation;
       if (!store.account) return;
       if (store.loading) {
         // 加载中用户又改了筛选：记下来，本轮结束后补跑最后一次，不再静默吞掉
@@ -1257,6 +1259,7 @@ return function render(_ctx, _cache) {
       if (store.end) qs.set('end', String(store.end));
       try {
         const d = await fetchJSON(`/api/sns/timeline?${qs}`);
+        if(activeGeneration!==generation)return;
         const rows = d.timeline || [];
         store.timeline = reset ? rows : store.timeline.concat(rows);
         store.before = d.next_before_tid || null;
@@ -1265,6 +1268,7 @@ return function render(_ctx, _cache) {
         if (reset) store.emptyText = e.message;
         else toast(e.message);
       } finally {
+        if(activeGeneration!==generation)return;
         store.loading = false;
         if (store._pendingLoad) {
           const rerun = store._pendingLoad;
@@ -1318,6 +1322,7 @@ return function render(_ctx, _cache) {
 /* ══ 生命周期 ═════════════════════════════════════════════════ */
 
 async function init(view) {
+  const activeGeneration=++generation;
   store.timeline=[]; store.friends=[]; store.friendsLoaded=false; store.friendsLoading=false; store.account=''; store.notice=''; store.hasMore=false; store.before=null; store.loading=false; store.exportState='idle'; store.exportResult=null; store.modal.visible=false; store.lightbox.visible=false;
   // 全局事件：点外面关弹层 / Esc 关弹层与灯箱（「···」菜单由 widgets.openMenu
   // 自带点外/Esc 收起，不再走 store 互斥）
@@ -1377,6 +1382,7 @@ async function init(view) {
     store.emptyText = e.message;
     return;
   }
+  if(activeGeneration!==generation)return;
   vm.preloadMeAvatar();
   store.timeline = [];
   store.before = null;
@@ -1397,6 +1403,7 @@ async function init(view) {
 let vm = null;
 
 function destroy() {
+  generation++;
   if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
   if (_io) { _io.disconnect(); _io = null; }
   if (_docClick) { document.removeEventListener('click', _docClick); _docClick = null; }
