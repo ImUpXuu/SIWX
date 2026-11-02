@@ -52,6 +52,9 @@ ALLOW_WXID = {
 ALLOW_CHATROOM = {"123456789@chatroom", "111111@chatroom", "123456@chatroom"}
 ALLOW_PHONE = {"13800138000", "13900000000"}
 ALLOW_HEX64 = {
+    # Task356 public native release ZIP and full distribution manifest.
+    "0b3b5d94b696370a3b42b46f5b99e4695744317f019beb19968e79495eb9e5bc",
+    "bd9ed72c17903dc344b20b880f28828df8797a21febec5dae470c52d5573a688",
     # Public task352 loopback-only native edition ZIP and manifest.
     "2c914f24cff85a91731be3356495e39cd48852e55b18c659ae15c1941e7c6c6e",
     "a96f7e62b768c1b544546d9aa7c71139f15cf19b9266f4743ef168b606d61cd2",

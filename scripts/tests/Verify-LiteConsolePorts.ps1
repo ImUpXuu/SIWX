@@ -3,11 +3,12 @@ $ErrorActionPreference = 'Stop'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $PSScriptRoot) 'Siwx-LiteConsole.ps1'),[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Console parse error'}
-foreach($name in @('ConvertFrom-ConsoleText','Test-SiwxProcessRecord','Open-SiwxProcessHandle','Stop-SiwxPortOwner')){
+foreach($name in @('ConvertFrom-ConsoleText','Test-SiwxTrustedInstall','Get-SiwxPortProbe','Test-SiwxProcessRecord','Open-SiwxProcessHandle','Stop-SiwxPortOwner')){
     $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
     . ([ScriptBlock]::Create($node.Extent.Text))
 }
 if(-not $ast.Extent.Text.Contains('[Net.IPAddress]::Loopback') -or $ast.Extent.Text.Contains('[Net.IPAddress]::Any')){throw 'Port probe must bind only loopback'}
+function Get-SiwxPortProbe {param($Port=8787) [pscustomobject]@{Port=$Port;TcpReachable=$true}}
 $exe='C:\Tools\siwx-lite.exe';$sid='S-1-5-21-1-1001';$sessionId=2
 function New-Fixture {
     [pscustomobject]@{Id=101;ParentId=100;Name='siwx-lite.exe';Path=$exe;Sid=$sid;Session=$sessionId;
@@ -138,3 +139,39 @@ $failed=$false
 try{$null=Select-SiwxPort $exe $sid $sessionId}catch{$failed=$true}
 if(-not $failed -or $script:attempted.Count -ne 101){throw 'Exhausted port range accepted'}
 Write-Output 'PASS: real socket bind/release; dynamic command identity; fallback cleanup; free/owned/foreign/default/preferred/exhausted selection'
+
+# Socket liveness is only a diagnostic: foreign same-name listeners remain refused.
+Write-Output 'PASS: TCP reachability never bypasses executable/SID/session/CMD/create-time identity'
+# Known previous releases require exact protected location, pinned manifest and all-file ACL.
+$oldSystemRoot=$env:SystemRoot
+$fixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('siwx-port-test-'+[guid]::NewGuid().ToString('N'))
+try {
+ $env:SystemRoot=$fixtureRoot
+ $oldDir=Join-Path (Join-Path $fixtureRoot 'SIWX') 'lite-1.5.2-4f20738'
+ $null=New-Item -ItemType Directory -Path $oldDir -Force
+ $oldExe=Join-Path $oldDir 'siwx-lite.exe';Set-Content -LiteralPath $oldExe -Value 'synthetic'
+ $script:manifestChecked=0;$script:badManifest=$false;$script:badAcl=$false
+ function Assert-SiwxPlainPath {param($Path)}
+ function Assert-SiwxInstallAcl {param($Path) if($script:badAcl){throw 'Synthetic ACL mismatch'}}
+ function Assert-SiwxDistribution {param($Path,$Hash)
+  if($Path -ne $oldDir -or $Hash -ne 'a96f7e62b768c1b544546d9aa7c71139f15cf19b9266f4743ef168b606d61cd2' -or $script:badManifest){throw 'Synthetic manifest mismatch'}
+  $script:manifestChecked++
+ }
+ if(-not (Test-SiwxTrustedInstall $oldExe $exe) -or $script:manifestChecked -ne 1){throw 'Known verified release rejected'}
+ $oldRecord=New-Fixture;$oldRecord.Path=$oldExe;$oldRecord.Command='"'+$oldExe+'" --host 0.0.0.0 --port 8787 --no-open'
+ if(-not (Test-SiwxProcessRecord $oldRecord $exe $sid $sessionId)){throw 'Verified old bind cleanup rejected'}
+ $script:badManifest=$true
+ if(Test-SiwxProcessRecord $oldRecord $exe $sid $sessionId){throw 'Tampered release accepted'}
+ $script:badManifest=$false;$script:badAcl=$true
+ if(Test-SiwxTrustedInstall $oldExe $exe){throw 'Unsafe old ACL accepted'}
+ $script:badAcl=$false
+ if(Test-SiwxTrustedInstall ($oldExe.Replace('lite-1.5.2-4f20738','lite-9.9.9-forged')) $exe){throw 'Unknown release accepted'}
+ if(Test-SiwxTrustedInstall (Join-Path $fixtureRoot 'siwx-lite.exe') $exe){throw 'Foreign same-name path accepted'}
+} finally {$env:SystemRoot=$oldSystemRoot;Remove-Item -LiteralPath $fixtureRoot -Recurse -Force}
+# Real diagnostic probe: succeeds only while the isolated loopback listener exists.
+$node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-SiwxPortProbe'},$true)
+. ([ScriptBlock]::Create($node.Extent.Text))
+$socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $freePort)
+try {$socket.Start();if(-not (Get-SiwxPortProbe $freePort).TcpReachable){throw 'Real listening socket unreachable'}}finally{$socket.Stop()}
+if((Get-SiwxPortProbe $freePort).TcpReachable){throw 'Closed socket reachable'}
+Write-Output 'PASS: pinned known release/location/manifest/ACL, reject tamper/forged path; real TCP connect/closed diagnostic'
