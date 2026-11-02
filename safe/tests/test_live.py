@@ -1,6 +1,7 @@
 import hashlib
 import http.client
 import json
+import zipfile
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -210,6 +211,60 @@ class WebTests(unittest.TestCase):
         self.assertEqual(200, self.request("/api/stop", {})[0])
         self.thread.join(timeout=3)
         self.assertFalse(self.thread.is_alive())
+
+    def test_original_layout_assets_and_removed_navigation(self):
+        status, _, data = self.request("/")
+        self.assertEqual(200, status)
+        page = data.decode()
+        for marker in ('class="shell"', 'id="acc-card"', 'id="c-sessions"', 'id="c-msgs"', 'id="e-sessions"', 'id="e-run"'):
+            self.assertIn(marker, page)
+        for marker in ('data-page="stats"', 'data-page="backup"', 'data-page="mcp"', 'id="c-stats"', 'github.com', 'wexport', '精简版'):
+            self.assertNotIn(marker, page)
+        for asset in ("app.css", "chat.css", "export.css", "shared.css", "style.css", "app.js"):
+            self.assertEqual(200, self.request("/" + asset + "?v=test")[0])
+        self.assertEqual(404, self.request("/../app.css")[0])
+
+    def test_open_state_and_selected_export_validation(self):
+        self.assertEqual({"opened": False, "account": None}, json.loads(self.request("/api/state")[2]))
+        self.request("/api/open", {"account": 0, "consent": True})
+        self.assertEqual({"opened": True, "account": 0}, json.loads(self.request("/api/state")[2]))
+        data = json.loads(self.request("/api/messages", {"chat": "user_example", "kind": "text"})[2])
+        self.assertEqual(0, data["messages"][0]["id"])
+        self.assertFalse(data["messages"][0]["isSender"])
+        self.assertEqual(0, data["months"][0]["offset"])
+        status, _, data = self.request("/api/export", {"chat": "user_example", "format": "json", "ids": [0]})
+        self.assertEqual(200, status)
+        self.assertEqual(1, len(json.loads(data)["messages"]))
+        status, _, data = self.request("/api/export", {"chat": "user_example", "format": "json", "ids": [0], "pack": "zip"})
+        self.assertEqual(200, status)
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertEqual(1, len(json.loads(archive.read("conversation-001.json"))["messages"]))
+        for ids in ([], [True], [-1], [1], [0, 0], "0"):
+            self.assertEqual(400, self.request("/api/export", {"chat": "user_example", "ids": ids})[0])
+        self.assertEqual(400, self.request("/api/messages", {"chat": "user_example", "kind": "invalid"})[0])
+        self.assertEqual(0, json.loads(self.request("/api/messages", {"chat": "user_example", "kind": "image"})[2])["total"])
+        self.request("/api/close", {})
+        self.assertEqual({"opened": False, "account": None}, json.loads(self.request("/api/state")[2]))
+
+    def test_batch_zip_and_atomic_invalid_selection(self):
+        class MultiSource(FakeSource):
+            def conversations(self):
+                return [Conversation("user_example", "合成联系人"), Conversation("group_example", "合成群聊", is_group=True)]
+        self.server.engine.opener = lambda _: MultiSource()
+        self.request("/api/open", {"account": 0, "consent": True})
+        chats = json.loads(self.request("/api/chats")[2])
+        self.assertEqual(["chat", "group"], [c["kind"] for c in chats])
+        status, headers, data = self.request("/api/export", {"chats": ["user_example", "group_example"], "format": "json"})
+        self.assertEqual(200, status)
+        self.assertEqual("application/zip", headers["Content-Type"])
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            self.assertEqual(["conversation-001.json", "conversation-002.json"], archive.namelist())
+            self.assertEqual("合成群聊", json.loads(archive.read("conversation-002.json"))["session"]["displayName"])
+        for selection in ([], ["user_example", "user_example"], [True], ["user_example", "missing"], "user_example"):
+            status, headers, data = self.request("/api/export", {"chats": selection})
+            self.assertEqual(400, status)
+            self.assertNotIn("Content-Disposition", headers)
+        self.assertEqual(400, self.request("/api/export", {"chats": ["user_example"], "format": "exe"})[0])
 
 
 class LauncherTests(unittest.TestCase):

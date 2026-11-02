@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import io
 from pathlib import Path
 import threading
+import zipfile
 
 
 def interface_hosts():
@@ -26,7 +28,8 @@ from .documents import FORMATS, render
 STATIC = Path(__file__).with_name("live_ui")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
-          "/style.css": ("style.css", "text/css; charset=utf-8")}
+          **{"/" + name: (name, "text/css; charset=utf-8") for name in
+             ("app.css", "style.css", "chat.css", "export.css", "shared.css")}}
 
 
 class LocalServer(HTTPServer):
@@ -79,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; "
-                         "style-src 'self'; connect-src 'self'; base-uri 'none'; "
+                         "style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; "
                          "frame-ancestors 'none'; form-action 'none'")
         if attachment:
             self.send_header("Content-Disposition", 'attachment; filename="' + attachment + '"')
@@ -93,11 +96,15 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(value, ensure_ascii=False).encode())
 
     def do_GET(self):
-        if self.path in ASSETS:
-            filename, mime = ASSETS[self.path]
+        path = self.path.split("?", 1)[0]
+        if path in ASSETS:
+            filename, mime = ASSETS[path]
             self._send(200, (STATIC / filename).read_bytes(), mime)
         elif self.path == "/api/accounts":
             self._json(200, self.server.engine.account_list())
+        elif self.path == "/api/state":
+            engine = self.server.engine
+            self._json(200, {"opened": engine.source is not None, "account": engine.account_index})
         elif self.path == "/api/chats":
             try:
                 self._json(200, self.server.engine.chats())
@@ -113,7 +120,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get("Transfer-Encoding"):
                 raise ValueError("不接受分块请求。")
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= 4096:
+            if not 0 < length <= 65536:
                 raise ValueError("请求大小不正确。")
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict):
@@ -121,21 +128,59 @@ class Handler(BaseHTTPRequestHandler):
             engine = self.server.engine
             if self.path == "/api/open":
                 self._json(200, engine.open(body.get("account"), body.get("consent")))
+            elif self.path == "/api/export" and "chats" in body:
+                chats = body["chats"]
+                if not isinstance(chats, list) or not 1 <= len(chats) <= 100 or any(not isinstance(c, str) for c in chats) or len(set(chats)) != len(chats):
+                    raise ValueError("请选择1至100个不同的会话。")
+                fmt = body.get("format", "html")
+                if fmt not in FORMATS:
+                    raise ValueError("不支持的导出格式。")
+                output, count, size = io.BytesIO(), 0, 0
+                with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for index, chat in enumerate(chats, 1):
+                        document = engine.document(chat, body.get("query", ""), body.get("since", ""), body.get("until", ""), body.get("kind", ""))
+                        count += len(document["messages"])
+                        if count > 100_000:
+                            raise ValueError("所选消息合计超过十万条，请缩小日期或会话范围。")
+                        data = render(document, fmt).encode()
+                        size += len(data)
+                        if size > 64 * 1024 * 1024:
+                            raise ValueError("导出内容超过64 MiB，请分批导出。")
+                        archive.writestr("conversation-" + str(index).zfill(3) + "." + fmt, data)
+                self._send(200, output.getvalue(), "application/zip", "chat-exports.zip")
             elif self.path in ("/api/messages", "/api/export"):
                 document = engine.document(body.get("chat"), body.get("query", ""),
-                                           body.get("since", ""), body.get("until", ""))
+                                           body.get("since", ""), body.get("until", ""), body.get("kind", ""))
                 if self.path == "/api/export":
+                    if "ids" in body:
+                        ids = body["ids"]
+                        if not isinstance(ids, list) or not ids or any(type(i) is not int or i < 0 or i >= len(document["messages"]) for i in ids) or len(set(ids)) != len(ids):
+                            raise ValueError("所选消息已变化，请重新选择。")
+                        selected = set(ids)
+                        document["messages"] = [row for row in document["messages"] if row["id"] in selected]
                     fmt = body.get("format", "html")
                     if fmt not in FORMATS:
                         raise ValueError("不支持的导出格式。")
-                    self._send(200, render(document, fmt).encode(),
-                               "application/octet-stream", "chat-export." + fmt)
+                    data = render(document, fmt).encode()
+                    if body.get("pack") == "zip":
+                        output = io.BytesIO()
+                        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+                            archive.writestr("conversation-001." + fmt, data)
+                        self._send(200, output.getvalue(), "application/zip", "chat-exports.zip")
+                    else:
+                        self._send(200, data, "application/octet-stream", "chat-export." + fmt)
                 else:
                     offset = body.get("offset", 0)
                     if type(offset) is not int or not 0 <= offset <= 100_000:
                         raise ValueError("页码不正确。")
                     rows = document["messages"]
-                    self._json(200, {"messages": rows[offset:offset + 200], "total": len(rows), "offset": offset})
+                    months = {}
+                    for index, row in enumerate(rows):
+                        month = row["createTime"][:7]
+                        if month not in months:
+                            months[month] = index
+                    self._json(200, {"messages": rows[offset:offset + 200], "total": len(rows), "offset": offset,
+                                     "months": [{"month": month, "offset": index} for month, index in months.items()]})
             elif self.path == "/api/close":
                 engine.close()
                 self._json(200, {"closed": True})

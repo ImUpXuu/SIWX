@@ -105,6 +105,7 @@ class Engine:
     def __init__(self, accounts, opener=open_account):
         self.accounts, self.opener = list(accounts), opener
         self.source = None
+        self.account_index = None
 
     def account_list(self):
         return [{"id": i, "name": a.label} for i, a in enumerate(self.accounts)]
@@ -117,6 +118,7 @@ class Engine:
         # Close old decrypted data before beginning a new extraction attempt.
         self.close()
         self.source = self.opener(self.accounts[index])
+        self.account_index = index
         return {"opened": True, "warnings": len(self.source.load_errors)}
 
     def close(self):
@@ -127,19 +129,24 @@ class Engine:
                 if hasattr(self.source, "_keys"):
                     self.source._keys.clear()
                 self.source = None
+                self.account_index = None
 
     def chats(self):
         if self.source is None:
             raise ValueError("请先选择账号并提取。")
-        return [{"id": c.username, "name": c.display_name or c.username}
+        return [{"id": c.username, "name": c.display_name or c.username,
+                 "kind": "group" if c.is_group else ("official" if c.username.startswith("gh_") else "chat"),
+                 "lastTime": c.last_time, "count": c.message_count}
                 for c in self.source.conversations()]
 
-    def document(self, chat, query="", since="", until=""):
+    def document(self, chat, query="", since="", until="", kind=""):
         chats = {c["id"]: c["name"] for c in self.chats()}
         if not isinstance(chat, str) or chat not in chats:
             raise ValueError("请选择已提取账号中的会话。")
         if not isinstance(query, str) or len(query) > 500:
             raise ValueError("搜索关键词过长。")
+        if kind not in ("", "text", "image", "video", "voice", "sticker", "link", "record", "system", "other"):
+            raise ValueError("消息类型不正确。")
         start, end = _date(since), _date(until, True)
         if start is not None and end is not None and start > end:
             raise ValueError("开始日期不能晚于结束日期。")
@@ -160,10 +167,16 @@ class Engine:
                 timestamp = str(m.timestamp)
             record = {"createTime": timestamp, "senderDisplayName": m.sender_name or m.sender or "未知",
                       "typeName": m.subtype or "other", "content": text}
+            category = {"file": "link", "app": "link", "emoji": "sticker", "merge": "record"}.get(record["typeName"], record["typeName"])
+            if kind and category != kind:
+                continue
             if query.casefold() not in " ".join(record.values()).casefold():
                 continue
+            record["isSender"] = bool(m.is_sender)
             rows.append(record)
             if len(rows) > MAX_MESSAGES:
                 raise ValueError("匹配消息超过十万条，请选择更小的日期范围；本次未导出。")
         rows.sort(key=lambda m: m["createTime"])
+        for index, record in enumerate(rows):
+            record["id"] = index
         return {"session": {"displayName": chats[chat]}, "messages": rows}

@@ -1,0 +1,180 @@
+/* 导出页 —— 左侧多选会话列表 + 右侧配置/日志，全部走全局设计 token。
+   选中态用 accent-soft（不再黑白反色）；本页自带 .e-empty/.e-loading
+   （公共底座在 shared.css，行高差异留本页；页面 CSS 按需加载不能跨页引用）。 */
+@import url('./shared.css');
+.export-wrap {
+  display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 18px;
+  height: calc(100vh - 56px); min-height: 520px;
+  align-items: stretch;
+}
+.e-list {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--card);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  overflow: hidden; box-shadow: var(--shadow-sm);
+}
+.e-top { padding: 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+#e-search { width: 100%; }
+/* 快捷筛选 chips（本页自带，页面 CSS 按需加载不能跨页引用；.chip 的
+   字号/配色/形状底座在 shared.css，这里只留自己的留白、底色与弱强调态） */
+.e-filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  background: var(--card); padding: 3px 10px; line-height: 18px;
+}
+.chip:hover { color: var(--text); border-color: var(--accent-line); }
+.chip.on { color: var(--accent-fg); border-color: var(--accent-line); background: var(--accent-soft); font-weight: 700; }
+.e-selall {
+  font-size: 12px; color: var(--muted); cursor: pointer;
+  display: flex; align-items: center; gap: 8px; user-select: none;
+  min-height: 30px;
+}
+.e-selall input { accent-color: var(--accent); }
+#e-sessions { flex: 1; overflow-y: auto; }
+/* 空态/加载提示的公共底座在 shared.css，本页只留行高差异 */
+.e-empty, .e-loading { line-height: 1.8; }
+.e-sess {
+  position: relative;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 12px 12px 92px;
+  min-height: 66px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--card);
+  transition: background .12s ease;
+}
+.e-sess input[type=checkbox] {
+  position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+  width: 15px; height: 15px; accent-color: var(--accent);
+}
+/* 会话头像：尺寸/配色与聊天页 .sess .ava 同收在 shared.css，这里只留锚定坐标 */
+.e-sess .ava { position: absolute; left: 42px; top: 13px; }
+.e-body { min-width: 0; flex: 1; }
+/* 聊天页多选范围提示条 */
+.e-range-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 12.5px; line-height: 1.6;
+  border: 1px dashed var(--accent-line); border-radius: var(--radius-sm);
+  background: var(--accent-soft); color: var(--accent-fg);
+  padding: 9px 12px; margin-bottom: 14px;
+}
+.e-range-banner b { font-weight: 700; }
+.e-range-banner .mini-btn { flex: none; }
+.e-sess .name {
+  display: block; font-size: 13px; font-weight: 700; color: var(--text);
+  line-height: 18px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  padding-right: 86px;
+}
+.e-sess .prev {
+  display: block; font-size: 12px; color: var(--muted);
+  line-height: 16px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  padding-right: 60px;
+}
+/* 会话行类型标签 + 排除标记 */
+.e-sess .kind-tag {
+  position: absolute; right: 12px; bottom: 10px;
+  font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
+  background: var(--card);
+}
+.e-sess.is-excl .name { text-decoration: line-through; opacity: .55; }
+.e-sess .excl-tag {
+  margin-left: 6px; font-size: 10.5px; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 999px; padding: 0 6px;
+  text-decoration: none; opacity: 1; vertical-align: 1px;
+}
+/* 公众号折叠分组头（与聊天页 .sess-group 同交互） */
+.e-sess.e-grp { background: var(--card-alt); }
+.e-sess.e-grp:hover { background: var(--card-alt); }
+.e-sess.e-grp .name::before { content: '▸ '; color: var(--muted); }
+.e-sess.e-grp.open .name::before { content: '▾ '; }
+.e-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; overflow-y: auto; }
+.f-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.f-grid2 label { font-size: 12px; color: var(--muted); font-weight: 700; display: flex; flex-direction: column; gap: 6px; }
+.f-checks { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
+.f-chk { font-size: 13px; cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px; }
+.f-chk input { width: 15px; height: 15px; accent-color: var(--accent); }
+.g-nav { margin-top: 16px; }
+/* 日志卡溢出修复：flex:1 + 固定 min-height 在 overflow-y 容器内会把卡片
+   撑破圆角边框——收缩下限交给 .console 的 min-height 承担，卡片本身允许
+   收缩（台账 §二-1，2026-10-17 实机截图复现）。溢出从 hidden 改为纵向
+   可滚：#e-result 跟在 console 之后，长结果/矮窗口曾被无滚动条地裁掉，
+   「打开目录」等底部操作够不着（审计 §3.4）。 */
+.e-logcard { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; display: flex; flex-direction: column; }
+/* console 尺寸与 MCP 页同一套，收在 shared.css */
+.e-log-actions { display: flex; gap: 8px; }
+/* 进度条文字行 */
+.e-prog-text {
+  margin-top: 8px; font-size: 12.5px; color: var(--muted);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+/* 进度行：文字 + 取消按钮两端对齐 */
+.e-prog-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.e-prog-row .e-prog-text { flex: 1; min-width: 0; }
+#e-result { margin-top: 12px; }
+.res-row { font-size: 13px; font-weight: 700; padding: 6px 0; }
+.res-ok { color: var(--accent-fg); }
+.res-part { color: var(--warn); }
+.res-err { color: var(--danger); }
+.res-meta { font-size: 12px; color: var(--muted); padding: 3px 0; word-break: break-word; }
+.res-meta a { color: var(--text); text-decoration: underline; }
+.res-meta a:hover { color: var(--accent-fg); }
+.res-meta.res-err { color: var(--danger); }
+.res-actions { padding: 8px 0; display: flex; gap: 12px; flex-wrap: wrap; }
+.res-actions .btn { text-decoration: none; font-size: 13px; min-height: 32px; padding: 5px 12px; }
+.res-logs-detail { margin-top: 10px; font-size: 12px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
+.res-logs-detail summary { cursor: pointer; color: var(--text); font-weight: 700; }
+.res-logs-detail.res-failed summary { color: var(--danger); }
+.res-logs-detail .log-line { padding: 2px 0; }
+/* 导出名单模态框：遮罩/标题栏骨架与聊天页统计弹窗同一套，收在 shared.css
+   （页面 CSS 按需加载，本页只留卡片与内容区差异） */
+.e-modal-card {
+  width: min(560px, 96vw); max-height: min(680px, 88vh);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-md);
+}
+.e-modal-toolbar {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 12px 16px; border-bottom: 1px solid var(--line-soft);
+}
+#e-roster-re { width: 100%; }
+#e-roster-hint.bad { color: var(--danger); }
+/* 名单工具行：筛选 chips + 搜索 + 重置手动勾选 */
+.e-roster-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.e-roster-tools #e-roster-search { flex: 1; min-width: 140px; }
+.e-roster-chips { display: flex; gap: 6px; }
+.e-modal-body { flex: 1; min-height: 120px; overflow-y: auto; }
+.e-rost {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 16px; border-bottom: 1px solid var(--line-soft);
+  font-size: 13px; line-height: 18px; cursor: pointer; user-select: none;
+}
+.e-rost input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+.e-rost .nm { font-weight: 700; color: var(--text); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.e-rost .uid { font-size: 12px; color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.e-rost .kind {
+  flex: none; font-size: 10.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
+}
+.e-rost .tag { margin-left: auto; flex: none; font-size: 11px; color: var(--danger); }
+.e-rost .tag.back { color: var(--accent-fg); }
+.e-rost.excl .nm, .e-rost.excl .uid { text-decoration: line-through; opacity: .45; }
+.copy-err { color: var(--text); font-size: 12px; text-decoration: underline; margin-left: 6px; }
+.e-modal-foot {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; border-top: 1px solid var(--line);
+}
+.e-modal-foot .hint { margin-right: auto; }
+.e-modal-foot .btn { min-height: 32px; padding: 5px 14px; font-size: 13px; }
+@media (max-width: 900px) {
+  .export-wrap { grid-template-columns: 1fr; height: auto; min-height: 0; }
+  .e-list { max-height: 42vh; }
+  .e-side { overflow: visible; }
+}
+@media (max-width: 560px) {
+  .f-grid2 { grid-template-columns: 1fr; }
+  .f-checks { flex-direction: column; gap: 10px; }
+  .e-sess { padding-right: 10px; }
+  .e-sess .tm { position: static; font-size: 11px; margin-left: auto; }
+  .e-sess .name, .e-sess .prev { padding-right: 0; }
+}

@@ -1,0 +1,66 @@
+/* pages/shared.css —— 内置页面间「逐字重复」的规则块（审计 §5.4/§5.6 的收敛层）。
+ *
+ * 引入方式：需要的页面 CSS 在文件头 @import url('./shared.css')（页面 HTML 是
+ * 无 <head> 的片段、由 app.js ensureCss 注入样式，@import 是零壳层改动的引入
+ * 途径）。@import 必须先于其它规则，页面自己的规则排在它后面，同特异性时
+ * 页面规则胜出——页面差异靠这一层叠覆盖，本文件只放多页逐字相同的声明。
+ *
+ * 纪律：不在这里做任何新的视觉决定；两页有差异的属性（哪怕只差一个行高）
+ * 留在各自页面。 */
+
+
+/* ── 模态框骨架：聊天页统计弹窗（.c-modal*）与导出页名单弹窗（.e-modal*）
+      同一套结构；卡片宽度/内容布局两页不同，留在各自页面 ── */
+.c-modal, .e-modal {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .32);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50; padding: 20px;
+}
+.c-modal-head, .e-modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--line);
+}
+.c-modal-head b, .e-modal-head b { font-size: 16px; color: var(--text); }
+
+
+/* ── 会话行头像：聊天页 .sess 与导出页 .e-sess 完全同一套（export.css 原
+      注释即如此声明）；只差锚定坐标（left），定位留在页面。铺满头像框的
+      img 规则连聊天页消息头像（.m-ava img）也是同一份 ── */
+.sess .ava, .e-sess .ava {
+  width: 38px; height: 38px; border-radius: var(--radius-sm);
+  background: var(--card-alt); color: var(--text); border: 1px solid var(--line);
+  font-size: 13px; font-weight: 700;
+  text-align: center; line-height: 36px;
+  overflow: hidden;
+}
+.sess.sel .ava, .e-sess.sel .ava { background: var(--card); border-color: var(--accent-line); }
+.sess .ava img, .e-sess .ava img, .m-ava img {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover;
+}
+
+/* ── 会话行公共状态与右缘时间戳（两页的行结构不同：聊天页绝对定位、
+      导出页 flex，这里只收逐字相同的部分）── */
+.sess:hover, .e-sess:hover { background: var(--card-alt); }
+.sess.sel, .e-sess.sel { background: var(--accent-soft); }
+.sess.sel .name, .e-sess.sel .name { color: var(--accent-fg); }
+.sess .tm, .e-sess .tm { position: absolute; right: 12px; top: 12px; font-size: 11px; color: var(--muted); }
+
+
+/* ── 空态/加载提示：聊天页与导出页同一套（仅行高 1.7/1.8 之差留在页面）── */
+.c-empty, .c-loading, .e-empty, .e-loading {
+  padding: 22px 14px; text-align: center; color: var(--muted); font-size: 13px;
+}
+.c-empty .btn, .e-empty .btn { margin-top: 10px; }
+
+
+/* ── 运行日志 console 尺寸：导出页与 MCP 页同一套（外层卡片两页不同）── */
+.e-logcard .console, .mcp-logcard .console { flex: 1; min-height: 130px; max-height: 360px; }
+
+
+/* ── 筛选 chips 公共底座：字号/配色/形状逐字相同；hover 与选中态两页
+      有意不同（chat 用 --accent 强调、export 用 --accent-line 弱强调，
+      test_fix_b5_ui 钉住了 chat 的对比度口径），留在各自页面 ── */
+.chip {
+  font-size: 12px; color: var(--muted); cursor: pointer; user-select: none;
+  border: 1px solid var(--line); border-radius: 999px;
+}
