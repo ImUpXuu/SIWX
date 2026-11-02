@@ -59,6 +59,12 @@ def main(argv=None):
  return 0
 
 if __name__=='__main__':
+ # Original entry normalizes console streams before importing rich/CLI/runtime.
+ # Frozen Python ignores PYTHONUTF8; the relay reads UTF-8 log bytes explicitly.
+ for stream in (sys.stdout,sys.stderr):
+  try:
+   if stream is not None:stream.reconfigure(encoding='utf-8',errors='replace')
+  except (AttributeError,OSError,ValueError):pass
  from multiprocessing import freeze_support
  freeze_support()
  if len(sys.argv)>1 and sys.argv[1]=='--wxgf-worker':
