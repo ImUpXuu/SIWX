@@ -57,5 +57,5 @@ class NativeTests(unittest.TestCase):
   self.assertEqual(404,self.client.post('/api/mcp/config',json={},headers={'Origin':'null','Sec-Fetch-Site':'cross-site'}).status_code)
   from siwx import paths
   self.assertEqual(self.home,paths.app_root());self.assertEqual(self.home/'data',paths.data_dir());self.assertEqual(self.home/'output',paths.out_root())
-  self.assertEqual('1.5.0',self.client.get('/api/native/version').json['version'])
+  self.assertEqual('1.5.1',self.client.get('/api/native/version').json['version'])
 if __name__=='__main__':unittest.main()

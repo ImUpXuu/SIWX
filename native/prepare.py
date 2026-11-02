@@ -49,7 +49,16 @@ def prepare():
  p.write_text(s)
  p=BUILD/'siwx/api_chat.py';s=p.read_text();s=remove_nodes(s,lambda n:isinstance(n,ast.FunctionDef) and n.name=='conversation_stats');p.write_text(s)
  # Same-user scope is maintained; this is not an HTTP allowlist.
- p=BUILD/'siwx/discover.py';s=p.read_text();s=once(s,'for proc in psutil.process_iter(["pid", "name", "memory_info"]):','owner = psutil.Process().username()\n    for proc in psutil.process_iter(["pid", "name", "memory_info", "username"]):');s=once(s,'if name in [n.lower() for n in target_names]:','if name in [n.lower() for n in target_names] and (proc.info.get("username") or "").casefold() == owner.casefold():');p.write_text(s)
+ p=BUILD/'siwx/discover.py';s=p.read_text();s=once(s,"def find_wechat_data_dirs():",'''def _is_accessible_dir(path):
+    try:
+        return path.is_dir()
+    except OSError:
+        # An offline/mapped/inaccessible candidate must not abort all discovery.
+        _slog.detailed("discover", "跳过不可访问的扫描目录，继续检测其他位置。", ring=False)
+        return False
+
+
+def find_wechat_data_dirs():''');s=once(s,"if drive.is_dir():","if _is_accessible_dir(drive):");s=once(s,"                if users_dir.is_dir():","                if _is_accessible_dir(users_dir):");s=once(s,'for proc in psutil.process_iter(["pid", "name", "memory_info"]):','owner = psutil.Process().username()\n    for proc in psutil.process_iter(["pid", "name", "memory_info", "username"]):');s=once(s,'if name in [n.lower() for n in target_names]:','if name in [n.lower() for n in target_names] and (proc.info.get("username") or "").casefold() == owner.casefold():');p.write_text(s)
  p=BUILD/'siwx/env_info.py';s=p.read_text();s=once(s,'from siwx.auto_update import is_frozen\n        frozen = bool(is_frozen())','import sys\n        frozen = bool(getattr(sys, "frozen", False))');p.write_text(s)
  p=ui/'index.html';s=p.read_text()
  for name in ['stats','backup','mcp']:s=re.sub(r'^.*<a href="#/'+name+r'".*\n','',s,flags=re.M)
@@ -87,7 +96,7 @@ def prepare():
   assert (SOURCE/name).read_bytes()==(BUILD/'siwx'/name).read_bytes(),name
  try:source_ref=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,stderr=subprocess.DEVNULL).decode().strip()
  except subprocess.CalledProcessError:source_ref=(ROOT.parent/'SOURCE-REVISION.txt').read_text().strip()
- manifest={'version':'1.5.0','base':'SIWX5.2.0','source_ref':source_ref,'changed':changes,'files':files,'removed':sorted(REMOVED_MODULES),'retained':'Original upstream chat/messages/media/export/SNS/setup/settings/logs and extract/decrypt/cache; no safe/adapter imports'}
+ manifest={'version':'1.5.1','base':'SIWX5.2.0','source_ref':source_ref,'changed':changes,'files':files,'removed':sorted(REMOVED_MODULES),'retained':'Original upstream chat/messages/media/export/SNS/setup/settings/logs and extract/decrypt/cache; no safe/adapter imports'}
  (BUILD/'native-source-manifest.json').write_text(json.dumps(manifest,indent=2))
  return manifest
 if __name__=='__main__':
