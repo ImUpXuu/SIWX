@@ -1,8 +1,9 @@
 <!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SIWX × wexport · 精简版</title><link rel="stylesheet" href="/style.css">
-<body><header><div><h1>微信记录 · 精简版</h1><p>本人微信提取 · 本机网页 · 导出</p></div><button id="stop">退出并停止</button></header>
+<body><header><div><h1>微信记录 · 精简版</h1><p>命令行启动 · 网页控制 · 导出</p></div><button id="stop">退出并停止</button></header>
 <main>
+<p class="notice">当前网页不设登录或令牌。能连接此端口的设备均可提取、查看、导出和停止程序。</p>
 <section><h2>1　选择与提取</h2><p>请保持本人 Windows 微信4.x登录。提取会读取本人微信进程，安全软件仍可能提示。</p>
 <div class="controls"><select id="account" aria-label="微信账号"></select><button id="open">提取并打开</button><button id="close">关闭当前数据</button></div>
 <label><input id="consent" type="checkbox">我确认仅处理本人有权访问的微信数据</label>
@@ -13,4 +14,4 @@
 <div class="controls"><button id="prev">上一页</button><button id="next">下一页</button><span id="page"></span></div></section>
 <section><h2>3　导出</h2><p>导出当前会话与筛选结果。仅导出文本；图片、语音和附件显示类型占位。</p>
 <div class="controls"><select id="format" aria-label="导出格式"><option>html</option><option>md</option><option>txt</option><option>csv</option><option>json</option></select><button id="export">下载导出文件</button></div></section>
-</main><footer>不含聊天统计、加密备份、MCP、插件、自动更新和远程访问。关闭网页不会自动停止，请点“退出并停止”。</footer><script src="/app.js"></script></body></html>
+</main><footer>不含聊天统计、加密备份、MCP、插件或自动更新。关闭网页不会自动停止，请点“退出并停止”，或在终端按Ctrl+C。</footer><script src="/app.js"></script></body></html>

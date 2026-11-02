@@ -1,12 +1,30 @@
-"""Foreground IPv4-loopback server; per-launch authentication on every API."""
+"""Foreground IPv4 Web controls, deliberately unauthenticated by user choice.
+
+Host/Origin checks prevent some browser cross-origin requests, not network
+clients. Every client able to reach the port can read data and use controls.
+"""
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 from pathlib import Path
-import secrets
 import threading
 from urllib.parse import urlsplit
+
+
+def interface_hosts():
+    """Only numeric IPs assigned to this computer, plus loopback names."""
+    hosts = {"127.0.0.1", "localhost"}
+    try:
+        import psutil
+        import socket
+        for addresses in psutil.net_if_addrs().values():
+            for address in addresses:
+                if address.family == socket.AF_INET:
+                    hosts.add(address.address)
+    except (ImportError, OSError):
+        pass
+    return hosts
 
 from .documents import FORMATS, render
 
@@ -19,9 +37,12 @@ ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
 class LocalServer(HTTPServer):
     allow_reuse_address = False
 
-    def __init__(self, engine, port=0):
-        self.engine, self.token = engine, secrets.token_urlsafe(32)
-        super().__init__(("127.0.0.1", port), Handler)
+    def __init__(self, engine, port=0, host="127.0.0.1"):
+        if host not in ("127.0.0.1", "0.0.0.0"):
+            raise ValueError("监听地址只能是127.0.0.1或0.0.0.0。")
+        self.engine = engine
+        self.hosts = interface_hosts() if host == "0.0.0.0" else {"127.0.0.1", "localhost"}
+        super().__init__((host, port), Handler)
 
     @property
     def origin(self):
@@ -29,7 +50,12 @@ class LocalServer(HTTPServer):
 
     @property
     def url(self):
-        return self.origin + "/#" + self.token
+        return self.origin + "/"
+
+    @property
+    def urls(self):
+        return ["http://" + host + ":" + str(self.server_port) + "/"
+                for host in sorted(self.hosts) if host != "localhost"]
 
     def server_close(self):
         try:
@@ -72,22 +98,26 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(value, ensure_ascii=False).encode())
 
     def _guard(self):
-        expected = urlsplit(self.server.origin).netloc
-        if self.headers.get("Host") != expected:
-            self._json(403, {"error": "仅允许本机地址访问。"})
+        request_host = self.headers.get("Host", "")
+        try:
+            parsed = urlsplit("http://" + request_host)
+            valid = (parsed.hostname in self.server.hosts and parsed.port == self.server.server_port
+                     and not parsed.username and not parsed.password and not parsed.path
+                     and not parsed.query and not parsed.fragment)
+        except ValueError:
+            valid = False
+        if not valid:
+            self._json(403, {"error": "请使用程序列出的本机或网络IP网址。"})
             return False
         origin = self.headers.get("Origin")
-        if origin is not None and origin != self.server.origin:
+        if origin is not None and origin != "http://" + request_host:
             self._json(403, {"error": "跨来源请求已拒绝。"})
             return False
         if self.headers.get("Sec-Fetch-Site", "none") not in ("same-origin", "none"):
             self._json(403, {"error": "跨站请求已拒绝。"})
             return False
-        if self.path.startswith("/api/"):
-            supplied = self.headers.get("Authorization", "")
-            if not secrets.compare_digest(supplied.encode(), ("Bearer " + self.server.token).encode()):
-                self._json(401, {"error": "请使用本次启动的完整网址。"})
-                return False
+        # No token, password, cookie or other authentication by explicit request.
+        # These browser-origin guards are not access control for network clients.
         return True
 
     def do_GET(self):

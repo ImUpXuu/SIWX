@@ -1,11 +1,9 @@
 'use strict';
-const token=location.hash.slice(1);
-history.replaceState(null,'',location.pathname);
 const $=id=>document.getElementById(id);
 let offset=0,total=0,busy=false,stopped=false;
 function message(text){$('status').textContent=text;}
 async function api(path,body){
- const res=await fetch(path,{method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',credentials:'omit'});
+ const res=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',credentials:'omit'});
  if(!res.ok){const data=await res.json();throw new Error(data.error||'请求未完成');}
  return res;
 }
@@ -26,4 +24,4 @@ $('next').onclick=()=>run(async()=>{if(offset+200<total){offset+=200;await show(
 $('close').onclick=()=>run(async()=>{await api('/api/close',{});clearData();message('当前数据已关闭。');});
 $('stop').onclick=()=>run(async()=>{await api('/api/stop',{});stopped=true;clearData();message('程序已停止，可关闭此网页。');});
 $('export').onclick=()=>run(async()=>{message('正在生成导出…');const fmt=$('format').value,res=await api('/api/export',{...request(),format:fmt}),url=URL.createObjectURL(await res.blob()),a=document.createElement('a');a.href=url;a.download='chat-export.'+fmt;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);message('已生成文件，请在浏览器下载中查看。');});
-run(async()=>{if(!token)throw new Error('请从程序窗口复制本次启动的完整网址。');const accounts=await(await api('/api/accounts')).json();options('account',accounts);$('empty').hidden=accounts.length>0;});
+run(async()=>{const accounts=await(await api('/api/accounts')).json();options('account',accounts);$('empty').hidden=accounts.length>0;});

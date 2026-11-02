@@ -7,9 +7,13 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
+import contextlib
+import io
 
 from siwx_safe.live import Engine, discover_accounts, own_wechat_pids
 from siwx_safe.local_web import LocalServer
+from siwx_safe.live_app import main
 from siwx_safe.vendor.wexport.crypto.aes import AesCbc
 from siwx_safe.vendor.wexport.model import Account, Conversation, Message
 from siwx_safe.vendor.wexport.sources.win4 import Win4Source
@@ -129,11 +133,9 @@ class WebTests(unittest.TestCase):
         self.thread.join(timeout=3)
         self.server.server_close()
 
-    def request(self, path, body=None, token=True, extra=None):
+    def request(self, path, body=None, extra=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
         headers = {"Content-Type": "application/json"}
-        if token:
-            headers["Authorization"] = "Bearer " + self.server.token
         headers.update(extra or {})
         conn.request("GET" if body is None else "POST", path,
                      None if body is None else json.dumps(body), headers=headers)
@@ -142,8 +144,11 @@ class WebTests(unittest.TestCase):
         conn.close()
         return status, response_headers, data
 
-    def test_auth_host_origin_and_path_guards(self):
-        self.assertEqual(401, self.request("/api/accounts", token=False)[0])
+    def test_anonymous_access_with_host_origin_and_path_guards(self):
+        self.assertEqual(200, self.request("/api/accounts")[0])
+        self.assertEqual(200, self.request("/api/accounts", extra={"Authorization": "irrelevant"})[0])
+        self.assertNotIn("#", self.server.url)
+        self.assertFalse(hasattr(self.server, "token"))
         self.assertEqual(403, self.request("/api/accounts", extra={"Host": "example.invalid"})[0])
         self.assertEqual(403, self.request("/api/open", {}, extra={"Origin": "https://example.invalid"})[0])
         self.assertEqual(403, self.request("/api/accounts", extra={"Sec-Fetch-Site": "cross-site"})[0])
@@ -180,12 +185,48 @@ class WebTests(unittest.TestCase):
         self.assertNotIn(b"private-path", data)
         self.assertNotIn(b"Traceback", data)
 
-    def test_per_launch_token_and_stop(self):
-        other = LocalServer(Engine([]))
+    def test_all_interface_bind_and_anonymous_stop(self):
+        # Synthetic empty engine only; no real WeChat data exposed by this bind.
+        other = LocalServer(Engine([]), host="0.0.0.0")
         try:
-            self.assertNotEqual(other.token, self.server.token)
+            self.assertEqual("0.0.0.0", other.server_address[0])
+            self.assertIn("127.0.0.1", other.hosts)
+            self.assertTrue(all("#" not in url for url in other.urls))
         finally:
             other.server_close()
         self.assertEqual(200, self.request("/api/stop", {})[0])
         self.thread.join(timeout=3)
         self.assertFalse(self.thread.is_alive())
+
+
+class LauncherTests(unittest.TestCase):
+    def test_cli_defaults_and_no_automatic_browser(self):
+        calls = []
+        class FakeServer:
+            server_port = 8787
+            urls = ["http://127.0.0.1:8787/"]
+            def __init__(self, engine, port, host):
+                calls.append((port, host))
+            def serve_forever(self):
+                raise KeyboardInterrupt
+            def server_close(self):
+                calls.append("closed")
+        out = io.StringIO()
+        with patch("siwx_safe.live_app.sys.platform", "win32"), \
+             patch("siwx_safe.live_app.discover_accounts", return_value=[]), \
+             patch("siwx_safe.live_app.LocalServer", FakeServer), contextlib.redirect_stdout(out):
+            self.assertEqual(0, main([]))
+        self.assertEqual([(8787, "0.0.0.0"), "closed"], calls)
+        self.assertIn("不使用令牌或密码", out.getvalue())
+        self.assertIn("不自动打开浏览器", out.getvalue())
+
+    def test_explicit_loopback_and_port_not_silently_changed(self):
+        with patch("siwx_safe.live_app.sys.platform", "win32"), \
+             patch("siwx_safe.live_app.discover_accounts", return_value=[]), \
+             patch("siwx_safe.live_app.LocalServer", side_effect=OSError("port in use")) as server, \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as result:
+                main(["--host", "127.0.0.1", "--port", "9000"])
+        self.assertEqual(1, result.exception.code)
+        self.assertEqual(1, server.call_count)
+        self.assertEqual((9000, "127.0.0.1"), server.call_args.args[1:])

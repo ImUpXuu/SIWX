@@ -29,8 +29,8 @@ for name, source, *_ in list(a.pure) + list(a.binaries):
         raise RuntimeError("Module outside the isolated edition: " + name)
 Path("live-module-manifest.json").write_text(json.dumps({
     "pure": sorted(e[0] for e in a.pure), "binaries": sorted(e[0] for e in a.binaries),
-    "capabilities": ["existing read-only current-user WeChat 4.x extraction", "token-authenticated loopback Web", "text exports"],
-    "removed": ["chat statistics", "encrypted backup", "MCP", "injection", "deep scan", "background installation", "remote bind", "auto update"]
+    "capabilities": ["existing read-only current-user WeChat 4.x extraction", "command-line launch", "anonymous browser controls on 0.0.0.0:8787 by default", "text exports"],
+    "removed": ["chat statistics", "encrypted backup", "MCP", "injection", "deep scan", "background installation", "automatic browser launch", "token authentication", "auto update"]
 }, indent=2), encoding="utf-8")
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="siwx-lite",
