@@ -20,6 +20,7 @@
 """
 import hashlib
 import hmac
+import os
 import platform
 import struct
 import subprocess
@@ -250,7 +251,6 @@ class MultiAccountGateTest(unittest.TestCase):
              mock.patch.object(self.mod, "_ATTEMPTED", False), \
              mock.patch.object(self.mod, "_account_is_live", return_value=False), \
              mock.patch.object(self.mod, "_resolve_binary", return_value=Path("/bin/true")), \
-             mock.patch.object(self.mod, "_DEFAULT_LOG", str(Path(td) / "hook.log")), \
              mock.patch.object(self.mod, "_has_user_systemd", return_value=False), \
              mock.patch("siwx.linux_hook.elfhook.find_hook_offset", return_value=0x10), \
              mock.patch.object(self.mod, "_build_shim", return_value=Path("/fake/wxhook.so")), \
@@ -346,6 +346,65 @@ class ShimBuildTest(unittest.TestCase):
                                      capture_output=True, text=True).stdout
                 for sym in ("sigaction", "__libc_sigaction", "__sigaction"):
                     self.assertIn(sym, out, f"shim 未导出 {sym}")
+
+
+class HookLogFileSecurityTest(unittest.TestCase):
+    """P2-7：钩子日志落盘位置与权限。
+
+    历史实现把含 `data=<64 hex>` passphrase 明文的日志写到固定路径
+    /tmp/siwx_linux_hook.log：默认 umask 下常是 0644，多用户主机上其他用户
+    在捕获窗口（最长 180s）内可读；进程被 kill 时 finally 不执行，文件永久
+    残留。修复后用 tempfile.mkstemp（0600 + 随机路径）创建、读毕即删、
+    finally 兜底幂等清理。Windows 上无法验证 POSIX 权限位，模式断言只在
+    POSIX 平台生效（本仓库在 Windows 开发，mkstemp 调用本身两边都跑）。
+    """
+
+    def setUp(self):
+        from siwx.strategies import linux_hook
+        self.mod = linux_hook
+
+    def _mk_no_override(self):
+        """在清掉 WXS_HOOK_LOG 的环境里取日志路径（测试间互不污染）。"""
+        env = {k: v for k, v in os.environ.items() if k != self.mod._LOG_ENV}
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.mod._make_hook_log_path()
+
+    def test_hook_log_path_is_random_and_0600(self):
+        p1 = self._mk_no_override()
+        p2 = self._mk_no_override()
+        try:
+            self.assertTrue(p1.is_file(), "mkstemp 必须真创建文件（shim 只追加）")
+            self.assertNotEqual(str(p1), str(p2), "路径必须随机，不许复用固定名")
+            self.assertNotEqual(str(p1), "/tmp/siwx_linux_hook.log",
+                                "不许再写固定路径")
+            if platform.system() != "Windows":
+                self.assertEqual(p1.stat().st_mode & 0o777, 0o600,
+                                 "含 passphrase 明文的日志必须 0600")
+        finally:
+            p1.unlink(missing_ok=True)
+            p2.unlink(missing_ok=True)
+
+    def test_env_override_still_wins(self):
+        """显式 WXS_HOOK_LOG 排障通道保留：沿用指定路径、不越俎代庖建文件。"""
+        with tempfile.TemporaryDirectory() as td:
+            override = Path(td) / "override.log"
+            with mock.patch.dict(os.environ, {self.mod._LOG_ENV: str(override)}):
+                p = self.mod._make_hook_log_path()
+            self.assertEqual(p, override)
+            self.assertFalse(override.exists(), "override 分支不应创建文件")
+
+    def test_cleanup_hook_log_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "hook.log"
+            p.write_text("hit-raw a=1 b=20 data=" + "ab" * 32, encoding="utf-8")
+            self.mod._cleanup_hook_log(p)
+            self.assertFalse(p.exists())
+            self.mod._cleanup_hook_log(p)   # 文件已没了：不许抛
+            self.mod._cleanup_hook_log(None)  # 兜底路径传 None：不许抛
+
+    def test_no_fixed_default_log_constant(self):
+        """回归钉子：模块不许再持有固定路径默认值（_DEFAULT_LOG 已移除）。"""
+        self.assertFalse(hasattr(self.mod, "_DEFAULT_LOG"))
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ ALLOW_WXID = {
     "wxid_clean", "wxid_contact", "wxid_contact_1234", "wxid_demo",
     "wxid_demo_1234", "wxid_demo_a", "wxid_demo_b", "wxid_demo_b_1234",
     "wxid_demo_c", "wxid_demo_d", "wxid_empty", "wxid_example_01",
-    "wxid_example_01_d29b", "wxid_friend", "wxid_friends",
+    "wxid_example_01_d29b", "wxid_friend", "wxid_friend_01", "wxid_friends",
     "wxid_from_cache_path", "wxid_full", "wxid_manual", "wxid_mcp_detail",
     "wxid_mcp_test", "wxid_me_123456", "wxid_missing",
     "wxid_never_backed_up", "wxid_no_msg", "wxid_nobody",

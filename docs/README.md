@@ -1,6 +1,6 @@
 # stories-in-wx 文档中心
 
-> **版本**: v5.2.0 | **日期**: 2026-10-31 | **平台**: Windows / macOS / Linux (依赖 DPAPI / 微信进程读取 / LLDB / INT3 进程内钩子)
+> **版本**: v5.3.0 | **日期**: 2026-10-31 | **平台**: Windows / macOS / Linux (依赖 DPAPI / 微信进程读取 / LLDB / INT3 进程内钩子)
 
 ## 一句话定位
 
@@ -77,7 +77,8 @@ python run.py doctor
 | [module-html-template.md](./module-html-template.md) | `html_template.py` | HTML 导出模板（交互式查看器） |
 
 > `voice.py`（SILK→WAV 转码）、`export_stream.py`（流式消息解析）、`stats.py`（聊天统计）、
-> `logger.py`（双模式日志 + 脱敏导出）、`env_info.py`（环境信息）、`auto_update.py`（自动更新）
+> `logger.py`（双模式日志 + 脱敏导出）、`console_glyphs.py`（控制台装饰字符编码兜底）、
+> `env_info.py`（环境信息）、`auto_update.py`（自动更新）
 > 的接口说明见 [api-reference.md](./api-reference.md) 与 [cli-commands.md](./cli-commands.md)。
 
 ### 接口与运维

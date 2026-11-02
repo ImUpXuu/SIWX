@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 MASK = 0xFFFFFFFFFFFFFFFF
-ISAAC64_GOLDEN = 0x9e3779b97f4a7c13   # ⚠️ c13，不是 c15
+ISAAC64_GOLDEN = 0x9e3779b97f4a7c13   # ▲️ c13，不是 c15
 _WORDS = 256                          # ISAAC64 每轮输出 256 个 64 位字
 
 # 官方零种子测试向量（用于自检）

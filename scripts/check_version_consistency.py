@@ -58,6 +58,14 @@ def collect() -> dict:
 
 
 def main() -> int:
+    # Windows cp936 控制台/管道下 print("✓") 会抛 UnicodeEncodeError，
+    # 导致检查通过也以非 0 退出（CI/hook 以退出码消费时绿色被误判为红色）。
+    # 统一切到 UTF-8；errors="replace" 兜底任何残余不可编码字符。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser(description="检查五处版本号是否一致")
     ap.add_argument("--expect", help="期望版本（可带 v 前缀，如 v5.0.11）")
     args = ap.parse_args()

@@ -24,9 +24,11 @@ def cmd_keys_extract(args) -> int:
     # 登录期密钥捕获窗口留给目标账号。
     db_dir = getattr(args, "db_dir", None)
     if db_dir and not Path(db_dir).is_dir():
-        msg = f"✗ --db-dir 目录不存在: {db_dir}"
+        msg = f"× --db-dir 目录不存在: {db_dir}"
         if getattr(args, "json", False):
-            print(msg, file=sys.stderr)
+            # --json 是给脚本消费的：stderr 不取装饰字符（GBK 控制台上会变 `?`），
+            # 用可前缀匹配的英文 error: 形式
+            print(f"error: --db-dir not a directory: {db_dir}", file=sys.stderr)
         else:
             tui.log(msg)
         return 1
@@ -42,7 +44,7 @@ def cmd_keys_extract(args) -> int:
     reports = extract.extract_all(log=tui.log, use_cache=not args.no_cache,
                                   dirs=dirs)
     if not reports:
-        tui.log("✗ 未找到微信数据目录，请确认本机登录过微信")
+        tui.log("× 未找到微信数据目录，请确认本机登录过微信")
         return 1
     for r in reports:
         tui.step(f"账号 {r['wxid']}")
@@ -60,19 +62,18 @@ def cmd_keys_list(_args) -> int:
         return 0
     tui.step(f"密钥库 · {len(store)} 条 · DPAPI 加密")
     tui.log(f"路径: {keystore.store_path()}")
-    t = tui.salt_table  # 复用表格组件的样式基调
     from rich.table import Table
     from rich import box
-    table = Table(box=box.SIMPLE, header_style="bold")
+    table = Table(box=tui.box_or_ascii(box.SIMPLE), header_style="bold")
     table.add_column("salt", style="dim")
     table.add_column("来源", style="cyan")
     table.add_column("更新时间")
     table.add_column("密钥", style="dim")
     for salt, rec in sorted(store.items()):
-        table.add_row(salt[:16] + "…", rec.get("strategy", "-"),
+        table.add_row(tui.glyph(salt[:16] + "…"), rec.get("strategy", "-"),
                       str(rec.get("updated", "-")),
                       extract.mask_key(rec.get("key", "")))
-    tui.console.print(table)
+    tui.print_line(table)
     return 0
 
 
@@ -80,7 +81,7 @@ def cmd_decrypt(args) -> int:
     tui.banner()
     dirs = _resolve_dirs(args.db_dir)
     if not dirs:
-        tui.log("✗ 未找到微信数据目录")
+        tui.log("× 未找到微信数据目录")
         return 1
     out_root = args.out or str(_paths.out_root())
     code = 0
@@ -118,7 +119,7 @@ def cmd_auto(args) -> int:
         if dec is not None and dec["ok"] == 0 and dec.get("cached", 0) == 0:
             table_ok = False
     if table_ok:
-        tui.log("✔ 全自动流水线完成")
+        tui.log("√ 全自动流水线完成")
         return 0
     tui.log("部分账号未完成 — 未登录账号的密钥不在微信内存中，切换登录后重跑即可")
     return 2
@@ -174,7 +175,7 @@ def cmd_backup(args) -> int:
         p1 = getpass.getpass("备份密码（至少 8 位）: ")
         p2 = getpass.getpass("再输入一遍: ")
         if p1 != p2:
-            tui.log("✗ 两次密码不一致")
+            tui.log("× 两次密码不一致")
             return 1
         password = p1
 
@@ -183,7 +184,7 @@ def cmd_backup(args) -> int:
         try:
             types = [int(x) for x in args.types.split(",") if x.strip()]
         except ValueError:
-            tui.log("✗ --types 需要逗号分隔的整数（如 1,3,34）")
+            tui.log("× --types 需要逗号分隔的整数（如 1,3,34）")
             return 1
 
     def _ts(val, label):
@@ -194,7 +195,7 @@ def cmd_backup(args) -> int:
                 return int(_dt.strptime(val, fmt).timestamp())
             except ValueError:
                 continue
-        tui.log(f"✗ {label} 时间格式应为 YYYY-MM-DD[ HH:MM[:SS]]: {val}")
+        tui.log(f"× {label} 时间格式应为 YYYY-MM-DD[ HH:MM[:SS]]: {val}")
         raise SystemExit(1)
 
     try:
@@ -224,18 +225,18 @@ def cmd_backup(args) -> int:
             log=tui.log,
             progress=lambda pct, msg: tui.log(f"[{pct:>3}%] {msg}"))
     except bk.BackupAborted as e:
-        tui.log(f"✗ {e}")
+        tui.log(f"× {e}")
         return 1
     except Exception as e:  # noqa: BLE001 — CLI 边界：给用户看完整错误类型
-        tui.log(f"✗ 备份失败: {type(e).__name__}: {e}")
+        tui.log(f"× 备份失败: {type(e).__name__}: {e}")
         return 1
-    tui.log(f"✓ 备份完成: {rep['path']} ({rep['size'] / 1048576:.1f} MB, "
+    tui.log(f"√ 备份完成: {rep['path']} ({rep['size'] / 1048576:.1f} MB, "
             f"{rep['files']} 个文件)")
     st = rep.get("stats") or {}
     if st.get("chats_count") is not None:
         tui.log(f"  会话 {st['chats_count']} 个, 消息 {st.get('messages', 0)} 条")
     if rep.get("wal"):
-        tui.log(f"  ⚠ 残留 {len(rep['wal'])} 个非空 -wal，最新消息可能未包含")
+        tui.log(f"  ▲ 残留 {len(rep['wal'])} 个非空 -wal，最新消息可能未包含")
     return 0
 
 

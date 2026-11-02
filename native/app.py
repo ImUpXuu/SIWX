@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse, json, os, platform, sys
 
-VERSION='1.7.0'
+VERSION='1.7.1'
 BASE=Path(__file__).resolve().parent
 if not getattr(sys,'frozen',False):sys.path.insert(0,str(BASE/'_build'))
 
@@ -28,14 +28,14 @@ def make_app():
   from flask import send_from_directory
   return send_from_directory(server.UI_DIR,'export-history.js',max_age=0)
  @server.app.get('/api/native/version')
- def native_version():return {'version':VERSION,'base':'5.2.0','edition':'original pages and backend'}
+ def native_version():return {'version':VERSION,'base':'5.3.0','edition':'original pages and backend'}
  # Defense against plugin reintroductions; feature removal, not caller authentication.
  @server.app.get('/api/native/source')
  def native_source():
   from flask import abort,send_file
   path=(Path(sys.executable).resolve().parent if getattr(sys,'frozen',False) else BASE)/'SOURCE.zip'
   if not path.is_file():abort(404)
-  return send_file(path,as_attachment=True,download_name='SIWX-1.7.0-source.zip')
+  return send_file(path,as_attachment=True,download_name='SIWX-1.7.1-source.zip')
  @server.app.before_request
  def removed_features():
   from flask import abort,request
@@ -45,7 +45,7 @@ def make_app():
 
 def main(argv=None):
  parser=argparse.ArgumentParser(description='SIWX native edition: original pages and backend, selected features removed.')
- parser.add_argument('--version',action='version',version='SIWX '+VERSION+' (original SIWX 5.2.0)')
+ parser.add_argument('--version',action='version',version='SIWX '+VERSION+' (original SIWX 5.3.0)')
  parser.add_argument('command',nargs='?',choices=['probe'])
  parser.add_argument('--host',choices=['127.0.0.1'],default='127.0.0.1')
  parser.add_argument('--port',type=int,default=8787)
@@ -53,7 +53,7 @@ def main(argv=None):
  parser.add_argument('--data',type=Path)
  args=parser.parse_args(argv)
  if args.command=='probe':
-  print(json.dumps({'version':VERSION,'platform':platform.system(),'edition':'original SIWX 5.2.0','host':args.host}));return 0
+  print(json.dumps({'version':VERSION,'platform':platform.system(),'edition':'original SIWX 5.3.0','host':args.host}));return 0
  if not 1<=args.port<=65535:parser.error('port out of range')
  if sys.platform=='win32':
   import psutil

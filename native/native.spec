@@ -21,7 +21,7 @@ for name,source,*_ in a.pure:
   if not path.is_relative_to((BUILD/"siwx").resolve()):raise RuntimeError("Wrong upstream copy: "+name)
   source_sha256[name]=hashlib.sha256(path.read_bytes()).hexdigest()
  if name.startswith(('siwx_safe','wexport')) or name in {'siwx.api_stats','siwx.api_backup','siwx.api_mcp','siwx.api_update','siwx.mcp_server','siwx.backup','siwx.media_backup','siwx.auto_update'}:raise RuntimeError('Removed module: '+name)
-Path('native-module-manifest.json').write_text(json.dumps({'pure':sorted(e[0] for e in a.pure),'binaries':sorted(e[0] for e in a.binaries),'edition':'Original SIWX 5.2.0 modules; no adapter','source_sha256':source_sha256, 'native_source_sha256':native_source_sha256, 'removed':['statistics','backup','MCP','online update','client authentication']},indent=2))
+Path('native-module-manifest.json').write_text(json.dumps({'pure':sorted(e[0] for e in a.pure),'binaries':sorted(e[0] for e in a.binaries),'edition':'Original SIWX 5.3.0 modules; no adapter','source_sha256':source_sha256, 'native_source_sha256':native_source_sha256, 'removed':['statistics','backup','MCP','online update','client authentication']},indent=2))
 pyz=PYZ(a.pure)
 exe=EXE(pyz,a.scripts,[],exclude_binaries=True,name='siwx-lite',console=True,strip=False,upx=False,uac_admin=False)
 coll=COLLECT(exe,a.binaries,a.datas,strip=False,upx=False,name='siwx-lite')

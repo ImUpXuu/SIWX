@@ -379,7 +379,7 @@ def _run_job(mode: str, db_dir=None, out_dir=None, no_cache=False, workers=None,
         # 同名账号告警：多个 db_dir 映射到同一 output/<wxid>/ 时，后跑的会覆盖
         # 先跑的产物。这里只提示，不阻断（用户可能确实想重新解密某一副本）。
         for c in find_account_conflicts(dirs):
-            _log(f"[job] ⚠ 账号 {c['wxid']} 发现 {len(c['dirs'])} 个副本目录，"
+            _log(f"[job] ▲ 账号 {c['wxid']} 发现 {len(c['dirs'])} 个副本目录，"
                  f"它们共用同一输出目录，解密会互相覆盖：")
             for i, d in enumerate(c["dirs"], 1):
                 _log(f"[job]      {i}. {d}")
@@ -1157,14 +1157,20 @@ def api_log_export():
 
 @app.get("/api/job")
 def api_job():
-    """返回当前任务状态（供前端轮询）。progress 为结构化进度，日志归日志。"""
+    """返回当前任务状态（供前端轮询）。progress 为结构化进度，日志归日志。
+
+    P2-8：logs 出口统一过 desensitize_msg（与 /api/logs 同口径）——任务轨里
+    有 out_root 绝对路径、wxid、sns 关键词等，`--trust-lan` 下原样返回即
+    局域网可读。入队前的脱敏挡不住所有写入点（异常 handler、错误分支直接
+    append 原文），所以出口脱敏是最后防线；缓冲区保留原文，本地文件轨
+    （export desensitize=0）不受影响。重建列表返回，不原地改共享条目。"""
     with _lock:
         return jsonify({
             "running": _job["running"],
             "done": _job["done"],
             "ok": _job["ok"],
             "mode": _job["mode"],
-            "logs": _job["logs"],
+            "logs": [_desensitize_item(item) for item in _job["logs"]],
             "report": _job["report"],
             "error": _job["error"],
             "export_dir": _job.get("export_dir"),
@@ -1280,9 +1286,14 @@ def api_media_backup_cancel():
 
 @app.get("/api/media/backup/status")
 def api_media_backup_status():
-    """返回全量媒体备份任务状态（供前端轮询）。"""
+    """返回全量媒体备份任务状态（供前端轮询）。
+
+    P2-8：与 /api/job 同理，logs 出口脱敏（备份日志含账号目录绝对路径与
+    wxid）。_backup_job 的 logs 是纯字符串列表，直接过 desensitize_msg。"""
     with _backup_lock:
-        return jsonify(_backup_job)
+        job = dict(_backup_job)
+        job["logs"] = [log.desensitize_msg(str(m)) for m in _backup_job["logs"]]
+    return jsonify(job)
 
 
 @app.post("/api/media/backup/open")
@@ -1416,7 +1427,7 @@ def run_server(host="127.0.0.1", port=8787, open_browser=True,
                 if _job["running"]:
                     d["job"] = f"{_job['mode']}…"
                 elif _job["done"]:
-                    d["job"] = "✓完成" if _job["ok"] else "✗失败"
+                    d["job"] = "√完成" if _job["ok"] else "×失败"
                 else:
                     d["job"] = "空闲"
             status_fail["n"] = 0

@@ -22,6 +22,8 @@ let rStage = null;              // 恢复：analyze 返回的 stage_id
 let rPollTimer = null;
 let rTargetPack = null;         // 恢复：分析的包路径
 let rPendingApply = null;       // 等待 kill 确认的恢复请求体
+let pollFailStreak = 0;         // 轮询连续失败计数：后端挂掉时终局报错，不无限吞错
+let rPollFailStreak = 0;
 const avaFailed = new Set();
 
 function rTarget() {
@@ -154,16 +156,18 @@ function showKillDialog(pids) {
 }
 
 function hideKillDialog() {
+  // 只收弹窗，不清 pendingPayload/rPendingApply——确认回调（b-kill-yes）随后
+  // 还要靠它们带上原请求体与 allowKill:true 重发；由 startBackup/
+  // startRestoreApply 取走后自行清理。在这里清空会让重发退化成无 allowKill
+  // 的首次请求 → 后端再回 needKill → 弹窗重现（备份死循环 / 恢复静默无反应）。
   el('b-kill-mask').classList.add('hidden');
-  pendingPayload = null;
-  rPendingApply = null;
 }
 
 async function startBackup(allowKill) {
   const payload = allowKill && pendingPayload
     ? { ...pendingPayload, allowKill: true }
-    : buildPayload(false);
-  if (allowKill) pendingPayload = null;
+    : buildPayload(allowKill);
+  pendingPayload = null;   // 取走即清：成功/失败都不留旧请求体
   try {
     const r = await fetchJSON('/api/backup/start', {
       method: 'POST',
@@ -236,11 +240,21 @@ async function poll() {
       el('b-pw2').value = '';
       loadPacks();
     }
-  } catch (e) { /* 轮询失败下轮重试 */ }
+    pollFailStreak = 0;
+  } catch (e) {
+    // 服务端重启/挂掉：连续失败就停下来给出错误态，进度条不再永久冻结
+    if (++pollFailStreak >= 5) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      if (!gone()) el('b-result').innerHTML =
+        `<div class="b-fail">✗ 与后端失去联系（${esc(e.message)}），已停止轮询，请刷新重试</div>`;
+    }
+  }
 }
 
 function startPolling() {
   clearInterval(pollTimer);
+  pollFailStreak = 0;
   pollTimer = setInterval(poll, 900);
   poll();
 }
@@ -394,6 +408,7 @@ async function startRestoreApply(allowKill) {
   const body = rPendingApply
     ? { ...rPendingApply, allowKill: true }
     : { stage_id: rStage, target: rTarget(), chats: rSelectedChats() };
+  rPendingApply = null;   // 取走即清；needKill 时下面会重新放回
   try {
     const r = await fetchJSON('/api/backup/restore/apply', {
       method: 'POST',
@@ -401,13 +416,11 @@ async function startRestoreApply(allowKill) {
       body: JSON.stringify(body),
     });
     if (r.needKill) { rPendingApply = body; return; }
-    rPendingApply = null;
     el('r-apply-card').classList.remove('hidden');
     el('r-log').innerHTML = '';
     el('r-result').innerHTML = '';
     startRestorePolling();
   } catch (e) {
-    rPendingApply = null;
     toast(`恢复启动失败：${e.message}`, true);
   }
 }
@@ -498,11 +511,21 @@ async function rPoll() {
         el('r-result').innerHTML = `<div class="b-fail">✗ ${esc(st.error || '恢复失败')}</div>`;
       }
     }
-  } catch (e) { /* 下轮重试 */ }
+    rPollFailStreak = 0;
+  } catch (e) {
+    // 服务端重启/挂掉：连续失败就停下来给出错误态，进度条不再永久冻结
+    if (++rPollFailStreak >= 5) {
+      clearInterval(rPollTimer);
+      rPollTimer = null;
+      if (!gone()) el('r-result').innerHTML =
+        `<div class="b-fail">✗ 与后端失去联系（${esc(e.message)}），已停止轮询，请刷新重试</div>`;
+    }
+  }
 }
 
 function startRestorePolling() {
   clearInterval(rPollTimer);
+  rPollFailStreak = 0;
   rPollTimer = setInterval(rPoll, 900);
   rPoll();
 }

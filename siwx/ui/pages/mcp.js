@@ -4,6 +4,7 @@ const { esc, fetchJSON, toast } = window.SX;
 function el(id) { return document.getElementById(id); }
 
 let pollTimer = null;
+let destroyed = false;   // 存活哨兵：首次拉取的 await 窗口内切页时，拦截定时器建立与 DOM 回写
 
 async function load() {
   try {
@@ -93,18 +94,24 @@ async function pollLogs() {
     if (stick) box.scrollTop = box.scrollHeight;
   };
   const fetchLogs = async () => {
-    if (document.hidden) return;             // 后台标签页暂停轮询
+    if (destroyed || document.hidden) return;   // 已销毁或后台标签页：暂停轮询
     try {
       const d = await fetchJSON('/api/mcp/logs?limit=200');
+      if (destroyed) return;                    // 拉取期间已销毁：丢弃响应，不写已脱离 DOM 的节点
       render(d.logs || []);
       el('m-log-meta').textContent = `日志文件: ${d.path || ''} · 共 ${d.total || 0} 行（最近）`;
     } catch (e) {
+      if (destroyed) return;
       box.innerHTML = `<div class="log-line">获取日志失败: ${esc(e.message)}</div>`;
     }
   };
   await fetchLogs();
+  if (destroyed) return;                       // 首次拉取期间已切页：不再建立定时器
   pollTimer = setInterval(fetchLogs, 2000);
 }
 
-export async function init() { await load(); }
-export function destroy() { if (pollTimer) clearInterval(pollTimer); }
+export async function init() { destroyed = false; await load(); }
+export function destroy() {
+  destroyed = true;
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}

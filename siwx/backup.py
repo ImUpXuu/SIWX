@@ -45,6 +45,15 @@ MSG_COLUMNS = [
 ]
 
 
+def _dedup_sid(row, sid_i):
+    """消息行 server_id 去重键（与 siwx/restore.py 同一口径）：
+    仅 server_id>0 参与去重；0/NULL（系统类/未同步消息）返回 None，
+    调用方必须放行——0 值在库中大量并存，按裸值去重会把同会话
+    除首条外的 0 值消息全部静默塌缩。"""
+    sid = row[sid_i]
+    return sid if sid is not None and sid > 0 else None
+
+
 class BackupAborted(Exception):
     """用户未授权/前置条件不满足，备份主动中止。"""
 
@@ -203,7 +212,7 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
     if chats:
         missing = [c for c in chats if c not in table_loc]
         if missing:
-            log(f"[backup] ⚠ {len(missing)} 个会话在本机没有消息表，已跳过")
+            log(f"[backup] ▲ {len(missing)} 个会话在本机没有消息表，已跳过")
     if not table_loc:
         raise BackupAborted("没有任何可备份的会话（检查联系人勾选/时间窗）")
 
@@ -266,7 +275,7 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
         sid = MSG_COLUMNS.index("server_id")
         for chat, locs in table_loc.items():
             total_rows = 0
-            seen_sids = set()   # 跨分片 server_id 去重兜底
+            seen_sids = set()   # 跨分片 server_id 去重兜底（仅 >0 参与）
             for sp, tbl in locs:
                 sc = sqlite3.connect(str(sp))
                 try:
@@ -279,11 +288,15 @@ def build_selective_plain(msg_shards, session_db, contact_db, chats,
                     for row in sc.execute(
                             f"SELECT {', '.join(MSG_COLUMNS)} "
                             f"FROM [{tbl}]{where}", params):
-                        row_sid = row[sid]
-                        if row_sid in seen_sids:
-                            stats["dup_skipped"] = stats.get("dup_skipped", 0) + 1
-                            continue
-                        seen_sids.add(row_sid)
+                        row_sid = _dedup_sid(row, sid)
+                        if row_sid is not None:
+                            if row_sid in seen_sids:
+                                stats["dup_skipped"] = \
+                                    stats.get("dup_skipped", 0) + 1
+                                continue
+                            seen_sids.add(row_sid)
+                        # server_id 0/NULL（系统/未同步消息）不去重：
+                        # 同会话多条 0 值全量保留，防止塌缩成一条
                         vals = [v for k, v in zip(MSG_COLUMNS, row)
                                 if k != "local_id"]
                         new_id, _u = _sender_id(sc, shard_cache, row[src_si])
@@ -429,7 +442,7 @@ def _resolve_account(account, store, log=print) -> tuple:
             # 与正身（当前微信在写、密钥齐全）并存时三者都指向正身
             ranked.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
             wxid, db_dir = account, ranked[0][3]
-            log(f"[backup] ⚠ 账号有 {len(hits)} 个数据目录（同名多副本），"
+            log(f"[backup] ▲ 账号有 {len(hits)} 个数据目录（同名多副本），"
                 f"已选密钥覆盖最高的: {db_dir}")
     else:
         best = None
@@ -508,13 +521,13 @@ def run_backup(password: str, mode: str = "full",
             raise BackupAborted(
                 f"提取后仍缺 {len(missing)}/{len(entries)} 个库——缺少的库可能"
                 "是新建/未落库，稍后重试；详情见上方提取日志。")
-        log(f"[backup] ✓ 密钥已补齐（+{rep['verified']}）")
+        log(f"[backup] √ 密钥已补齐（+{rep['verified']}）")
 
     prog(4, "检查微信进程…")
     stop = stop_wechat(confirm_kill, log)
     wals = wal_residuals(db_dir)
     if wals:
-        log(f"[backup] ⚠ 残留 {len(wals)} 个非空 -wal（强制退出未 checkpoint），"
+        log(f"[backup] ▲ 残留 {len(wals)} 个非空 -wal（强制退出未 checkpoint），"
             "最新消息可能未包含：" + ", ".join(wals[:3]) +
             ("…" if len(wals) > 3 else ""))
 
@@ -597,7 +610,7 @@ def run_backup(password: str, mode: str = "full",
             _paths.exports_root() / f"siwx_backup_{mode}_{stamp}.siwxpack")
         prog(70, "写入加密包…")
         rep = write_pack(out_path, password, payload, meta, progress=prog)
-        log(f"[backup] ✓ 完成: {rep['path']} "
+        log(f"[backup] √ 完成: {rep['path']} "
             f"({rep['size'] / 1048576:.1f} MB, {rep['files']} 个文件)")
         return {**rep, "mode": mode, "account": wxid, "stats": stats,
                 "stop": stop, "wal": wals}

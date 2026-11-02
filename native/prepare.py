@@ -100,7 +100,7 @@ def find_wechat_data_dirs():''');s=once(s,"if drive.is_dir():","if _is_accessibl
  files['ui/export-history.js']=sha(extra.read_bytes());changes['ui/export-history.js']={'source_sha256':None,'edition_sha256':files['ui/export-history.js']}
  try:source_ref=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,stderr=subprocess.DEVNULL).decode().strip()
  except subprocess.CalledProcessError:source_ref=(ROOT.parent/'SOURCE-REVISION.txt').read_text().strip()
- manifest={'version':'1.7.0','base':'SIWX5.2.0','source_ref':source_ref,'changed':changes,'files':files,'removed':sorted(REMOVED_MODULES),'retained':'Original upstream chat/messages/media/export/SNS/setup/settings/logs and extract/decrypt/cache; no safe/adapter imports'}
+ manifest={'version':'1.7.1','base':'SIWX5.3.0','source_ref':source_ref,'changed':changes,'files':files,'removed':sorted(REMOVED_MODULES),'retained':'Original upstream chat/messages/media/export/SNS/setup/settings/logs and extract/decrypt/cache; no safe/adapter imports'}
  (BUILD/'native-source-manifest.json').write_text(json.dumps(manifest,indent=2))
  return manifest
 if __name__=='__main__':

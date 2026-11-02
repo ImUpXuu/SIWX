@@ -9,10 +9,11 @@ echo.
 
 set REPO=ImUpXuu/SIWX
 set RAW=https://raw.gh.1s.fan/%REPO%/main
+set GH_RAW=https://raw.githubusercontent.com/%REPO%/main
 
 REM ── 1. 获取远程版本信息 ──────────────────────
 echo [1/5] 检查新版本...
-curl -fsSL "%RAW%/version.json" > "%TEMP%\siwx_version.json" 2>nul
+call :fetch_version_json "%TEMP%\siwx_version.json"
 if errorlevel 1 (
     echo [错误] 无法获取版本信息，请检查网络连接
     pause
@@ -37,7 +38,13 @@ echo       下载完成: %DEST%
 
 REM ── 3. 校验 SHA-256 ────────────────────────────
 echo [3/5] 校验文件完整性...
-curl -fsSL "%RAW%/version.json" | python -c "import json,sys; d=json.load(sys.stdin); print(d.get('sha256',''))" > "%TEMP%\siwx_sha_url.txt"
+call :fetch_version_json "%TEMP%\siwx_version.json"
+if errorlevel 1 (
+    echo [错误] 无法获取版本信息，请检查网络连接
+    pause
+    exit /b 1
+)
+python -c "import json; d=json.load(open(r'%TEMP%\siwx_version.json','r',encoding='utf-8')); print(d.get('sha256',''))" > "%TEMP%\siwx_sha_url.txt"
 set /p SHA_URL=<"%TEMP%\siwx_sha_url.txt"
 curl -fsSL "%SHA_URL%" -o "%TEMP%\siwx_sha256.txt" 2>nul
 for /f "tokens=1" %%h in ('certutil -hashfile "%DEST%" SHA256 ^| findstr /v "hash"') do set DL_HASH=%%h
@@ -81,4 +88,15 @@ echo   更新完成！正在启动 stories-in-wx...
 echo ============================================
 start "" "%~dp0..\stories-in-wx.exe" serve
 timeout /t 3 /nobreak >nul
+exit /b 0
+
+REM ── 子程序：取 version.json（镜像失败回退官方 raw，与 siwx/auto_update.py VERSION_URLS 对齐）──
+:fetch_version_json
+set "SIWX_VJSON_OUT=%~1"
+curl -fsSL --connect-timeout 10 -m 30 "%RAW%/version.json" -o "%SIWX_VJSON_OUT%" 2>nul
+if not errorlevel 1 goto :fetch_version_json_ok
+echo       镜像源不可用，回退官方源 raw.githubusercontent.com ...
+curl -fsSL --connect-timeout 10 -m 30 "%GH_RAW%/version.json" -o "%SIWX_VJSON_OUT%" 2>nul
+if errorlevel 1 exit /b 1
+:fetch_version_json_ok
 exit /b 0

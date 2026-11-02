@@ -47,7 +47,6 @@ PBKDF2_DKLEN = 32
 PBKDF2_DIGEST = "sha512"
 
 _LOG_ENV = "WXS_HOOK_LOG"
-_DEFAULT_LOG = "/tmp/siwx_linux_hook.log"
 
 # 启动器把微信拉起来需要的宽限期：这之前没看到进程属正常（dde-am → transient unit）。
 _LAUNCH_GRACE = 20.0
@@ -57,6 +56,38 @@ _LAUNCH_GRACE = 20.0
 _ATTEMPTED = False
 
 _CANDIDATE_RE = re.compile(r"a=([0-9a-f]+) b=([0-9a-f]+) data=([0-9a-f]{64})")
+
+
+def _make_hook_log_path() -> Path:
+    """创建钩子日志文件：mkstemp 保证 0600 权限 + 随机路径。
+
+    日志内容含 `data=<64 hex>` passphrase（捕获窗口的设计使然），旧实现写
+    固定路径 /tmp/siwx_linux_hook.log：默认 umask 下常是 0644，多用户主机
+    上其他用户在捕获窗口（最长 180s）内可读；进程被 kill 时 finally 不执行，
+    文件永久残留。mkstemp 在 POSIX 上以 0600 创建且路径不可预测，同时消除
+    固定路径被其他用户预置（squatting/symlink）的面。
+
+    显式设置 WXS_HOOK_LOG 仍可覆盖路径（排障用）——此时沿用调用方指定的
+    文件，权限由调用方自负。
+    """
+    override = os.environ.get(_LOG_ENV)
+    if override:
+        return Path(override)
+    fd, name = tempfile.mkstemp(prefix="siwx-hook-", suffix=".log")
+    # 立即关掉 Python 侧的 fd：shim 会以 O_WRONLY|O_APPEND|O_CREAT 自己打开
+    #（文件已存在则不会重建，0600 权限保留），进程内持有第二个 fd 没有意义。
+    os.close(fd)
+    return Path(name)
+
+
+def _cleanup_hook_log(path: Path | None) -> None:
+    """删除钩子日志（幂等、吞 OSError——finally 兜底不许抛新异常）。"""
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _resolve_binary() -> Path | None:
@@ -341,7 +372,7 @@ def extract(ctx) -> int:
     log(f"[linux_hook] hook 偏移: 0x{hook_off:x}")
 
     workdir = Path(tempfile.mkdtemp(prefix="siwx-hook-"))
-    log_path = Path(os.environ.get(_LOG_ENV, _DEFAULT_LOG))
+    log_path = _make_hook_log_path()
     use_systemd = _has_user_systemd()
     prev_preload = _user_env("LD_PRELOAD") if use_systemd else None
     env_set = False
@@ -352,8 +383,14 @@ def extract(ctx) -> int:
             return 0
 
         _stop_wechat(binary, log)
+        # mkstemp 分支的日志是全新空文件；显式 override 分支可能残留上一轮
+        # 的候选。截断而非删除：删除后到 shim 重新打开之间，固定路径可能被
+        # 其他用户抢占重建（squatting），截断保住了 inode 与权限。
         if log_path.exists():
-            log_path.unlink()
+            try:
+                log_path.write_text("", encoding="utf-8")
+            except OSError:
+                pass
 
         if use_systemd:
             # 把 shim 放进用户管理器环境，DDE 新建的瞬态单元会继承
@@ -371,6 +408,9 @@ def extract(ctx) -> int:
         timeout = float(os.environ.get("WXS_HOOK_TIMEOUT", "180"))
         candidates = _wait_for_candidates(
             log_path, timeout, log, alive=lambda: bool(_wechat_pids(binary)))
+        # 读毕即删：含 passphrase 明文的落盘窗口压缩到捕获期间本身，
+        # 派生校验阶段与 finally 只是异常路径的兜底
+        _cleanup_hook_log(log_path)
         if not candidates:
             log("[linux_hook] 未捕获到候选 passphrase（未登录 / 超时 / 需要扫码）")
             return 0
@@ -391,11 +431,7 @@ def extract(ctx) -> int:
             _unset_user_env(_LOG_ENV)
             log("[linux_hook] 已还原 systemd 用户环境")
         shutil.rmtree(workdir, ignore_errors=True)
-        try:
-            if log_path.exists():
-                log_path.unlink()
-        except OSError:
-            pass
+        _cleanup_hook_log(log_path)
 
     found = len(key_map) - entry
     if found:

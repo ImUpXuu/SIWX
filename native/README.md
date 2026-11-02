@@ -1,6 +1,6 @@
 # SIWX 原生功能删减版
 
-以仓库中的原 SIWX 5.2.0 页面和后端为基准，直接保留原生聊天、消息媒体、朋友圈、导出、首启向导、设置、日志与提取解密缓存。不再使用 `safe/` 的页面或数据适配器。新版版本为1.7.0，原版脚本和5.2.0原始分发入口保持独立。
+以仓库中的原 SIWX 5.3.0 页面和后端为基准，直接保留原生聊天、消息媒体、朋友圈、导出、首启向导、设置、日志与提取解密缓存。不再使用 `safe/` 的页面或数据适配器。新版版本为1.7.1，原版脚本和5.2.0原始分发入口保持独立。
 
 `python native/prepare.py` 生成 `_build/siwx`；原 `siwx/` 不改动。`native-source-manifest.json` 逐文件记录原SHA、生成SHA及删除。密码算法、提取、导出、朋友圈、媒体与向导文件与源文件逐字节相同；聊天页只去统计按钮、弹层和处理代码，其余会话/分页消息/富文本/媒体逻辑保持原生。移除聊天统计、备份、MCP、在线更新和推广信息。许可证与原作者法律条款保留。插件机制保留，但不能重新注册移除功能的URL。
 
@@ -52,3 +52,6 @@ or selected user's private legacy path, original serve commands and background-t
 metadata. Exact hash/path/SID/session/command/creation-time/original handles are checked.
 Unknown builds, locations and other programs are retained. Menu16 scans8787-8887;
 the new service still binds127.0.0.1 only. The original launcher remains unchanged.
+
+
+1.7.1：基线升级官方v5.3.0（25545f6），保留原生页面功能删减/缓存兼容/双源导出/日志高度/路径复制/127监听。合入附件与转发语音导出增强、媒体/消息缓存预算优化、朋友圈卡片链接scheme校验和任务日志出口脱敏。备份/MCP/更新等已取消功能不重新开放，原cn321仍5.2.0原件独立不动。

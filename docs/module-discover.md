@@ -121,4 +121,8 @@ wxid = wxid_of("C:/.../wxid_abc/db_storage")
 
 - 多实例并存时（不同盘符），全部发现并处理
 - 未登录账号的目录可能不存在或为空
-- 进程发现依赖 psutil，需要 `pip install psutil`
+- 进程发现依赖 psutil，需要 `pip install -r requirements.txt`（`run.py` 会在导入
+  CLI 前预检并指名当前解释器）；psutil 缺失时 `find_wechat_pids()` **不报错而是
+  返回空列表并告警一次**（语义等同于“微信未运行”），因为密钥提取必须读进程内存，
+  没得降级；但必须把真实原因留进日志，否则下游只会报“未检测到微信进程，请先启动
+  微信”，把缺依赖误判成用户操作问题
