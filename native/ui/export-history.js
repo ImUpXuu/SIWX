@@ -28,6 +28,14 @@
   let offset=0,query='',busy=false,lastKey='',mounted=null;
   const el=(tag,cls,text)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(text!==undefined)n.textContent=text;return n;};
   function size(bytes){return bytes>=1048576?(bytes/1048576).toFixed(1)+' MB':bytes>=1024?(bytes/1024).toFixed(1)+' KB':bytes+' B';}
+  async function compatibility(){
+    let status=document.getElementById('native-compat-status');
+    if(!status){const host=document.querySelector('.export-wrap .e-side');if(!host)return;status=el('p','dim');status.id='native-compat-status';host.prepend(status);}
+    try{const response=await fetch('/api/native/compatibility',{cache:'no-store'});if(!response.ok)return;const data=await response.json();
+      const text=data.running?'正在兼容原版数据：已补入 '+data.copied+' 个文件，请稍候，完成后刷新账号列表。':data.copied||data.keys_added||data.paths_added||data.failed?'原版兼容完成：补入 '+data.copied+' 个文件，保留修改版已有文件 '+data.existing+' 个。'+(data.failed?' '+data.failed+' 项暂未读取成功，可重启后重试。':''):'';
+      if(status.textContent!==text)status.textContent=text;status.hidden=!text;
+    }catch(error){}
+  }
   async function load(force=false){
     const card=document.getElementById('e-history');if(!card||busy)return;
     busy=true;const result=card.querySelector('[data-history-list]');
@@ -42,7 +50,7 @@
       for(const file of data.files){
         const row=el('div');row.style.display='flex';row.style.padding='12px 0';row.style.borderBottom='1px solid var(--line)';row.style.fontSize='13px';row.style.alignItems='start';row.style.gap='12px';
         const meta=el('div');meta.style.minWidth='0';meta.style.flex='1';meta.style.overflowWrap='anywhere';
-        meta.append(el('b','',file.name),el('div','dim',file.path),el('div','dim',file.format+' · '+size(file.bytes)+' · '+file.modified.replace('T',' ')));
+        meta.append(el('b','',file.name),el('div','dim',file.path),el('div','dim',file.source_label+' · '+file.format+' · '+size(file.bytes)+' · '+file.modified.replace('T',' ')));
         const link=el('a','btn','下载');link.href=file.download;link.setAttribute('download','');const actions=el('div');actions.style.display='flex';actions.style.gap='8px';actions.style.flexWrap='wrap';const copy=el('button','btn','复制目录路径');copy.type='button';copy.dataset.historyCopyDir='';copy.onclick=()=>copyDirectory(file.directory);actions.append(link,copy);row.append(meta,actions);result.append(row);
       }
       card.querySelector('[data-history-count]').textContent='共 '+data.total+' 个文件'+(data.truncated?'（目录过大，已限制扫描范围）':'');
@@ -55,15 +63,15 @@
     const host=document.querySelector('.export-wrap .e-side');if(!host||document.getElementById('e-history'))return;
     offset=0;query='';lastKey='';
     const card=el('section','card');card.id='e-history';const head=el('div','card-head'),count=el('span','hint');count.dataset.historyCount='';
-    head.append(el('h2','','已导出文件'),count);card.append(head,el('p','dim','导出文件保存在本机磁盘，刷新、重启或更新软件后仍可查看；删除原文件后列表会同步更新。'));
+    head.append(el('h2','','已导出文件'),count);card.append(head,el('p','dim','导出文件保存在本机磁盘，同时展示原版与修改版文件，刷新或重启后仍可查看；删除原文件后列表会同步更新。'));
     const controls=el('div'),search=el('input');search.type='search';search.placeholder='按文件名或目录搜索';search.setAttribute('aria-label','搜索已导出文件');search.style.minWidth='0';search.style.flex='1';
     const refresh=el('button','btn','刷新列表');refresh.type='button';refresh.id='e-history-refresh';
     const list=el('div');list.dataset.historyList='';list.style.maxHeight='420px';list.style.overflow='auto';
     const nav=el('div'),prev=el('button','btn','上一页'),next=el('button','btn','下一页'),page=el('span','dim');prev.type=next.type='button';prev.dataset.historyPrev='';next.dataset.historyNext='';page.dataset.historyPage='';
     let timer;search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>{query=search.value.trim();offset=0;load(true);},250);});refresh.onclick=()=>load(true);prev.onclick=()=>{offset=Math.max(0,offset-30);load(true);};next.onclick=()=>{offset+=30;load(true);};
-    for(const bar of [controls,nav]){bar.style.display='flex';bar.style.alignItems='center';bar.style.gap='8px';bar.style.flexWrap='wrap';bar.style.marginTop='12px';}controls.append(search,refresh);nav.append(prev,page,next);card.append(controls,list,nav);host.append(card);mounted=card;load(true);
+    for(const bar of [controls,nav]){bar.style.display='flex';bar.style.alignItems='center';bar.style.gap='8px';bar.style.flexWrap='wrap';bar.style.marginTop='12px';}controls.append(search,refresh);nav.append(prev,page,next);card.append(controls,list,nav);host.append(card);mounted=card;load(true);compatibility();
   }
   const observer=new MutationObserver(()=>{mount();enhanceResults();});observer.observe(document.getElementById('view'),{childList:true,subtree:true});mount();enhanceResults();
-  setInterval(()=>{if(mounted?.isConnected&&!document.hidden)load();},3000);
+  setInterval(()=>{if(mounted?.isConnected&&!document.hidden){load();compatibility();}},3000);
   window.addEventListener('focus',()=>load());
 })();

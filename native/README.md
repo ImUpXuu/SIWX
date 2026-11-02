@@ -1,6 +1,6 @@
 # SIWX 原生功能删减版
 
-以仓库中的原 SIWX 5.2.0 页面和后端为基准，直接保留原生聊天、消息媒体、朋友圈、导出、首启向导、设置、日志与提取解密缓存。不再使用 `safe/` 的页面或数据适配器。新版版本为1.6.2，原版脚本和5.2.0原始分发入口保持独立。
+以仓库中的原 SIWX 5.2.0 页面和后端为基准，直接保留原生聊天、消息媒体、朋友圈、导出、首启向导、设置、日志与提取解密缓存。不再使用 `safe/` 的页面或数据适配器。新版版本为1.7.0，原版脚本和5.2.0原始分发入口保持独立。
 
 `python native/prepare.py` 生成 `_build/siwx`；原 `siwx/` 不改动。`native-source-manifest.json` 逐文件记录原SHA、生成SHA及删除。密码算法、提取、导出、朋友圈、媒体与向导文件与源文件逐字节相同；聊天页只去统计按钮、弹层和处理代码，其余会话/分页消息/富文本/媒体逻辑保持原生。移除聊天统计、备份、MCP、在线更新和推广信息。许可证与原作者法律条款保留。插件机制保留，但不能重新注册移除功能的URL。
 
@@ -30,3 +30,25 @@
 
 
 1.6.2：附加导出UI禁止卡片收缩，日志默认48vh（至少320px）、可展开至75vh和拖动调高，原日志暂停/复制/滚动逻辑保留；导出结果及历史条目加入“复制目录路径”，复制本机实际绝对目录，沿用原剪贴板兼容实现。原export.js/html不变。
+
+1.7.0 compatibility: detect the selected user's original stories-in-wx-console,
+stories-in-wx and fixed installation roots. Snapshot missing output files into
+native/output in the background, using SQLite read-only backup for WAL consistency.
+Existing native files always win; original files are never overwritten/deleted.
+Merge only missing same-user DPAPI key records and deduplicate manual WeChat paths.
+List native and original exports directly with source labels, without bulk copying.
+Same relative filenames remain separate. Refresh the account card after import completes.
+Later changes to existing original files do not replace native copies; use native sync.
+
+SIWX_NATIVE_HOME isolates the process: host original roots are disabled unless
+SIWX_COMPAT_ROOTS explicitly supplies a JSON array of absolute local original roots.
+Set that variable to [] to disable compatibility. Symlinks, junctions and UNC roots
+are rejected. native/data/compat-imports.json records newly imported relative paths
+and SHA256. A rollback may remove only still-matching imported files; never delete
+pre-existing or subsequently changed data. Import requires additional free disk space.
+
+Launcher1.19 recognizes the pinned original5.2.0 executable in the fixed installation
+or selected user's private legacy path, original serve commands and background-task
+metadata. Exact hash/path/SID/session/command/creation-time/original handles are checked.
+Unknown builds, locations and other programs are retained. Menu16 scans8787-8887;
+the new service still binds127.0.0.1 only. The original launcher remains unchanged.

@@ -13,8 +13,8 @@ a=Analysis([str(ROOT/'app.py')],pathex=[str(BUILD),str(ROOT)],
 source_sha256={}
 native_source_sha256={}
 for name,source,*_ in a.pure:
- if name=="export_history":
-  assert Path(source).resolve()==(ROOT/"export_history.py").resolve()
+ if name in {"export_history","compat"}:
+  assert Path(source).resolve()==(ROOT/(name+".py")).resolve()
   native_source_sha256[name]=hashlib.sha256(Path(source).read_bytes()).hexdigest()
  if name=="siwx" or name.startswith("siwx."):
   path=Path(source).resolve()
