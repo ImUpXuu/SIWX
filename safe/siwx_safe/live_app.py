@@ -12,7 +12,7 @@ def main(argv=None):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="SIWX × wexport 精简版：命令行启动，网页提取、查看与导出；默认网络匿名访问")
-    parser.add_argument("--version", action="version", version="1.3.0")
+    parser.add_argument("--version", action="version", version="1.4.0")
     parser.add_argument("--data", type=Path, help="本人账号目录（包含db_storage），不指定则查找当前用户常用目录")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--host", choices=("0.0.0.0", "127.0.0.1"), default="0.0.0.0",

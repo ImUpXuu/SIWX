@@ -28,3 +28,15 @@ The adapter restricts the original extraction call to current-user WeChat PIDs.
 Read-only process access is intentionally retained and may trigger antivirus.
 No other Windows scanning, image-key, CLI, config, background, or upstream Web
 modules are bundled. The JSON-only offline spec rejects live modules.
+
+## Retained SNS and original interface (task348)
+
+The live edition additionally includes the original SIWX SNS XML parser subset,
+CDN reconstruction/ISAAC64/AES media logic in `siwx_safe/vendor/sns_{parser,cdn,isaac64}.py`,
+under this repository's AGPL-3.0 license. Logger/disk-cache and local image-guessing
+paths are not enabled. The adapter uses the opened user's existing in-memory SNS
+connection, strict bounded media transport, and opaque browser resource references.
+The original Vue3.5.13 MIT copyright/license header is retained in `live_ui/vue.js`.
+Original SNS Vue templates are compiled before packaging; no runtime eval needed.
+Original widgets and page styles are retained locally. Legal attribution stays in
+this file and LICENSE; promotional/source links are removed from product pages.

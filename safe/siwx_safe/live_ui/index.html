@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#f6f6f4">
 <title>stories-in-wx</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Crect%20width='64'%20height='64'%20rx='14'%20fill='%2307c160'/%3E%3Ctext%20x='32'%20y='44'%20font-size='36'%20text-anchor='middle'%20fill='%23ffffff'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/shared.css"><link rel="stylesheet" href="/chat.css"><link rel="stylesheet" href="/export.css"><link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/shared.css"><link rel="stylesheet" href="/chat.css"><link rel="stylesheet" href="/export.css"><link rel="stylesheet" href="/settings.css"><link rel="stylesheet" href="/logs.css"><link rel="stylesheet" href="/sns.css"><link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div class="shell">
@@ -31,8 +31,12 @@
     <nav class="menu" id="menu">
       <a href="#/chat" data-page="chat"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 4H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h4v4l5-4h7a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1z"/></svg></span><span>聊天查看</span></a>
       <a href="#/export" data-page="export"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg></span><span>导出</span></a>
+      <a href="#/sns" data-page="sns"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c3 2.8 3 15.2 0 18M12 3c-3 2.8-3 15.2 0 18"/></svg></span><span>朋友圈</span></a>
+      <a href="#/logs" data-page="logs"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 6H21M8.5 12H21M8.5 18H21"/><path d="M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg></span><span>日志</span></a>
+      <a href="#/settings" data-page="settings"><span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 6h-6M9 6H3M21 12h-9M6 12H3M21 18h-3M12 18H3"/><circle cx="12" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="15" cy="18" r="2"/></svg></span><span>设置</span></a>
     </nav>
 
+    <button id="side-wizard" class="side-tour" type="button">✦ 运行向导</button><button id="side-tour" class="side-tour" type="button">使用导览</button>
     <div class="side-foot">
       <div class="mini" id="side-wx" role="status">请选择账号</div><div class="side-tools"><button id="close-data" class="mini-btn" type="button">关闭数据</button><button id="stop" class="mini-btn" type="button">停止程序</button></div>
       <button id="side-theme" class="mini-btn" title="切换主题" aria-label="切换主题">☾</button>
@@ -186,11 +190,39 @@
     </div>
   </div>
 </div>
+</section><section id="sns-page" hidden><div id="sns-mount"></div></section><section id="settings-page" hidden><div class="settings">
+ <div class="card"><div class="card-head"><h2>运行状态</h2><span class="hint" id="s-version-meta">1.4.0</span></div><div class="s-actions">
+  <div class="s-item"><b>当前账号</b><span class="dim" id="s-current">未打开</span><button class="btn" id="s-account">选择 / 切换账号</button></div>
+  <div class="s-item"><b>重新运行向导</b><span class="dim">确认使用、选择账号、提取并解密，进入主界面</span><button class="btn" id="s-rerun-wizard">运行向导</button></div>
+  <div class="s-item"><b>刷新账号列表</b><span class="dim">重新读取当前启动配置发现的账号</span><button class="btn" id="s-refresh-accounts">刷新列表</button></div>
+ </div></div>
+ <div class="card"><div class="card-head"><h2>数据源管理</h2></div><div class="s-actions"><div class="s-item s-item-block"><b>账号列表</b><div id="s-ds-accounts" class="accounts"></div><p class="dim">需要使用其他数据目录时，在启动菜单 14 选择包含 db_storage 的账号目录，再重新启动。</p></div>
+ <div class="s-item s-item-danger"><b>关闭当前数据</b><span class="dim">释放内存中的解密数据与媒体，不删除微信源文件</span><button class="btn btn-danger" id="s-close-data">关闭数据</button></div></div></div>
+ <div class="card"><div class="card-head"><h2>界面与日志</h2></div><div class="s-actions"><div class="s-item"><b>主题</b><span class="dim">跟随当前浏览器保存</span><select id="s-theme" aria-label="主题"><option value="light">浅色</option><option value="dark">深色</option></select></div><div class="s-item"><b>运行日志</b><span class="dim">查看提取、关闭与导出阶段记录</span><button class="btn" id="s-view-logs">打开日志</button></div><div class="s-item"><b>导出运行日志</b><span class="dim">只记录操作阶段，不记录聊天、账号、路径或密钥</span><button class="btn" id="s-export-log">下载日志</button></div></div></div>
+</div></section><section id="logs-page" hidden><div class="logs">
+  <div class="card">
+    <div class="card-head"><h2>运行日志</h2>
+      <span class="hint">
+        <span id="log-count">0 条</span></span></div>
+    <div class="log-actions">
+      <!-- 级别筛选：自绘下拉（widgets.js），与全站下拉同一套交互与主题 -->
+      <select id="log-filter" aria-label="日志级别"><option value="">全部级别</option><option value="info">信息</option><option value="warn">警告</option><option value="error">错误</option></select>
+      <input id="log-text" class="log-filter" placeholder="文本搜索…" aria-label="文本搜索">
+      <button id="log-pause" class="btn" aria-pressed="false">暂停</button>
+      <button id="log-clear" class="btn">清空</button>
+      <button id="log-copy" class="btn">复制日志</button>
+      <button id="log-download" class="btn" type="button">下载</button>
+      <label class="chk"><input type="checkbox" id="log-ts"> 时间戳</label>
+      <label class="chk"><input type="checkbox" id="log-auto" checked> 自动滚动</label>
+    </div>
+    <div id="log-box" class="console" role="log" aria-live="off"></div>
+  </div>
+</div>
 </section></main>
 </div>
 <div id="account-modal" class="ob-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="ob-title">
-  <div class="ob-card"><div class="ob-head"><div class="ob-steps"><span class="g-chip on">1 选择账号</span><span class="g-chip">2 提取并打开</span></div><button id="ob-close" class="btn btn-sm ob-close" type="button" aria-label="关闭">×</button></div>
-  <div class="ob-body"><h2 id="ob-title" class="g-title">选择微信号</h2><p class="dim g-desc">请选择本人的微信账号，并保持微信登录。</p><div id="ob-accounts" class="accounts"></div>
-  <p id="ob-empty" class="empty" hidden>未找到账号。请在启动菜单 14 选择微信数据目录后重新启动。</p><label class="f-chk"><input id="ob-consent" type="checkbox">我确认仅处理本人有权访问的微信数据</label>
-  <div class="ob-actions"><button id="ob-open" class="btn btn-primary" type="button">提取并打开</button><span id="ob-status" role="status"></span></div></div></div></div>
-<div id="toast" role="status" hidden></div><script src="/app.js"></script></body></html>
+  <div class="ob-card"><div class="ob-head"><div class="ob-steps" id="ob-steps"></div><button id="ob-close" class="btn btn-sm ob-close" type="button" aria-label="关闭">×</button></div>
+  <div class="ob-body"><section id="ob-intro"><h2 class="g-title">运行向导</h2><p class="dim g-desc">选择本人的微信账号，提取并解密后查看聊天和朋友圈，或导出需要的记录。</p><div class="ob-disc disc-body"><h3>使用确认</h3><p>仅处理本人有权访问的数据。请保持微信已登录，确认你有权读取和导出这些记录。</p><p>源数据库只读，解密数据在内存中处理。导出的文件包含聊天或朋友圈内容，请妥善保存。</p></div><div class="ob-actions"><button id="ob-start" class="btn btn-primary" type="button">我已了解，开始设置 →</button><button id="ob-skip" class="btn" type="button">暂时跳过</button></div></section><section id="ob-account-step"><h2 id="ob-title" class="g-title">选择微信号</h2><p class="dim g-desc">请选择本人的微信账号，并保持微信登录。</p><div id="ob-accounts" class="accounts"></div>
+  <div class="ob-manual-entry"><button id="ob-manual-toggle" class="btn btn-sm" type="button">＋ 手动指定数据目录</button><div id="ob-manual-box" class="g-manual" hidden><label class="g-manual-title" for="ob-manual-path">微信数据目录</label><p class="dim">填写 xwechat_files、账号目录或 db_storage 路径。</p><div class="g-manual-row"><input id="ob-manual-path" class="g-input" placeholder="D:\example\xwechat_files"><button id="ob-manual-add" class="btn btn-primary" type="button">验证并添加</button></div><p id="ob-manual-msg" role="status"></p></div></div><p id="ob-empty" class="empty" hidden>未找到账号。请在启动菜单 14 选择微信数据目录后重新启动。</p><label class="f-chk"><input id="ob-consent" type="checkbox">我确认仅处理本人有权访问的微信数据</label>
+  <div class="ob-actions"><button id="ob-back-intro" class="btn" type="button">← 上一步</button><button id="ob-to-extract" class="btn btn-primary" type="button">下一步 →</button><button id="ob-open" hidden class="btn btn-primary" type="button">提取并打开</button><span id="ob-status" role="status"></span></div></section><section id="ob-extract-step" hidden><h2 class="g-title">提取并解密</h2><p class="dim g-desc" id="ob-extract-account"></p><div class="ob-actions"><button id="ob-back-account" class="btn" type="button">← 上一步</button><button id="ob-run" class="btn btn-primary" type="button">提取并解密</button><button id="ob-finish" class="btn btn-primary" hidden type="button">完成并继续 →</button><button id="ob-extract-skip" class="btn" type="button">暂时跳过，查看日志</button></div><div id="ob-progress" class="progress" hidden><div class="bar working"></div></div><div id="ob-log" class="console" role="log" hidden></div><p id="ob-result" role="status"></p></section><section id="ob-next-step" hidden><h2 class="g-title">接下来做什么</h2><p class="dim g-desc">账号已打开，可以开始浏览或导出。</p><div class="ob-next-grid"><button class="ob-next-card" data-wizard-go="chat" type="button"><span class="ob-next-txt"><b>聊天查看</b><span>会话、搜索和消息选择</span></span></button><button class="ob-next-card" data-wizard-go="sns" type="button"><span class="ob-next-txt"><b>朋友圈</b><span>动态、互动、媒体与导出</span></span></button><button class="ob-next-card" data-wizard-go="export" type="button"><span class="ob-next-txt"><b>导出记录</b><span>选择会话、范围与格式</span></span></button><button class="ob-next-card" data-wizard-go="settings" type="button"><span class="ob-next-txt"><b>设置</b><span>数据源与运行状态</span></span></button></div><div class="ob-actions"><button id="ob-enter" class="btn btn-primary" type="button">进入主界面</button></div></section></div></div></div>
+<div id="toast" role="status" hidden></div><script src="/vue.js"></script><script src="/widgets.js"></script><script src="/app.js"></script></body></html>

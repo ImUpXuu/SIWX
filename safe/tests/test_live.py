@@ -212,6 +212,34 @@ class WebTests(unittest.TestCase):
         self.thread.join(timeout=3)
         self.assertFalse(self.thread.is_alive())
 
+    def test_retained_wizard_status_logs_and_sns_http(self):
+        from test_moments import MomentSource, PNG
+        from siwx_safe.vendor import sns_cdn
+        self.server.engine.opener = lambda _: MomentSource()
+        self.assertEqual(200, self.request("/api/status")[0])
+        self.assertEqual(200, self.request("/api/sns/accounts")[0])
+        self.assertEqual(400, self.request("/api/sns/timeline")[0])
+        self.assertEqual(200, self.request("/api/open", {"account": 0, "consent": True})[0])
+        page = json.loads(self.request("/api/sns/timeline?limit=1")[2])
+        post = page["timeline"][0]
+        from urllib.parse import quote
+        url = "/api/sns/media?url=" + quote(post["medias"][0]["url"], safe="")
+        with patch.object(sns_cdn, "fetch", return_value=(PNG, {})):
+            status, _, data = self.request(url)
+            self.assertEqual(200, status)
+            self.assertEqual(PNG, data)
+            status, headers, data = self.request("/api/sns/export", {"format": "json", "keyword": "合成动态 24"})
+            self.assertEqual(200, status)
+            self.assertEqual(1, len(json.loads(data)))
+        self.assertEqual(400, self.request("/api/sns/media?url=https://127.0.0.1/private")[0])
+        status, _, data = self.request("/api/logs")
+        self.assertIn("账号数据已打开", data.decode())
+        self.assertNotIn("synthetic-media-token", data.decode())
+        self.assertEqual(200, self.request("/api/logs/clear", {})[0])
+        self.assertEqual([], json.loads(self.request("/api/logs")[2])["logs"])
+        self.request("/api/close", {})
+        self.assertEqual([], json.loads(self.request("/api/sns/accounts")[2])["accounts"])
+
     def test_original_layout_assets_and_removed_navigation(self):
         status, _, data = self.request("/")
         self.assertEqual(200, status)

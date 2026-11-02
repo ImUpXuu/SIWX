@@ -7,6 +7,7 @@ const state = {accounts: [], account: null, pendingAccount: null, opened: false,
   busy: false, stopped: false, download: null, log: [], logPaused: false};
 let messageFilter = {query: '', since: '', until: '', kind: ''};
 let toastTimer;
+let wizardScreen='intro', wizardActive=true, snsLoaded=false, snsMounted=false, logsPaused=false, logsRows=[], tourIndex=-1;
 function node(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; }
 function toast(text) { $('toast').textContent = text; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => {$('toast').hidden = true;}, 5000); }
 async function api(path, body, signal) {
@@ -24,7 +25,7 @@ async function run(task) {
   finally { state.busy = false; syncButtons(); }
 }
 function syncButtons() {
-  document.querySelectorAll('button,input,select').forEach(el => {el.disabled = state.busy || state.stopped;});
+  document.querySelectorAll('button,input,select').forEach(el => {if(!el.closest('#sns-page'))el.disabled = state.busy || state.stopped;});
   if (state.busy || state.stopped) { if (state.download) $('e-cancel').disabled = false; return; }
   for (const id of ['c-refresh','close-data']) $(id).disabled = !state.opened;
   for (const id of ['c-msg-search','c-msg-q','c-since','c-until','c-select']) $(id).disabled = !state.chat;
@@ -32,17 +33,33 @@ function syncButtons() {
   $('c-copy-selected').disabled = !state.selected.size;
   $('c-prev').disabled = !state.chat || state.offset <= 0;
   $('c-next').disabled = !state.chat || state.offset + state.rows.length >= state.total;
+  $('ob-to-extract').disabled=state.pendingAccount===null||!$('ob-consent').checked;
+  $('ob-run').disabled=state.pendingAccount===null;
   $('ob-open').disabled = state.pendingAccount === null || !$('ob-consent').checked;
   $('e-run').disabled = !state.opened || !exportSelection().length;
   $('e-roster-btn').disabled = !state.opened;
   $('view').setAttribute('aria-busy', 'false');
 }
 function route() {
-  const page = location.hash === '#/export' ? 'export' : 'chat';
-  $('chat-page').hidden = page !== 'chat'; $('export-page').hidden = page !== 'export';
-  document.querySelectorAll('#menu a').forEach(a => {a.classList.toggle('active', a.dataset.page === page); a.setAttribute('aria-current', a.dataset.page === page ? 'page' : 'false');});
-  if (page === 'export') { renderExport(); }
+  const requested=location.hash.replace('#/','');
+  const page=['chat','sns','export','logs','settings'].includes(requested)?requested:'chat';
+  for(const name of ['chat','sns','export','logs','settings'])$(name+'-page').hidden=name!==page;
+  document.querySelectorAll('#menu a').forEach(a=>{a.classList.toggle('active',a.dataset.page===page);a.setAttribute('aria-current',a.dataset.page===page?'page':'false');});
+  if(page==='export')renderExport();
+  if(page==='settings')renderSettings();
+  if(page==='logs')refreshLogs();
+  if(page==='sns')mountSns();
+  else if(snsMounted){window.SnsUI.destroy();snsMounted=false;}
 }
+async function mountSns(){
+  try{
+    if(!snsLoaded){await new Promise((resolve,reject)=>{const script=node('script');script.src='/sns.js';script.onload=resolve;script.onerror=()=>reject(new Error('朋友圈页面加载失败'));document.head.append(script);});snsLoaded=true;}
+    if($('sns-page').hidden)return;
+    if(snsMounted)window.SnsUI.destroy();
+    $('sns-mount').replaceChildren();snsMounted=true;await window.SnsUI.init($('sns-mount'));
+  }catch(error){$('sns-mount').replaceChildren(node('div','empty',error.message));}
+}
+
 function renderAccount() {
   const account = state.accounts.find(a => a.id === state.account);
   $('acc-name').textContent = account ? account.name : (state.accounts.length ? '选择微信号' : '暂无账号');
@@ -58,11 +75,12 @@ function renderAccount() {
   }
   if (!state.accounts.length) pop.append(node('div', 'acc-pop-head', '未发现微信账号'));
 }
-function showAccountModal(index = state.account) {
+function showAccountModal(index = state.account, full=false) {
   if (state.busy || state.stopped) return;
+  wizardActive=full;
   state.pendingAccount = index ?? state.accounts[0]?.id ?? null;
   $('ob-consent').checked = false; $('ob-status').textContent = ''; $('account-modal').hidden = false;
-  renderAccountChoices(); syncButtons(); $('ob-close').focus();
+  renderAccountChoices();showWizardScreen(full?'intro':'accounts');syncButtons();$('ob-close').focus();
 }
 function renderAccountChoices() {
   const list = $('ob-accounts'); list.replaceChildren(); $('ob-empty').hidden = !!state.accounts.length;
@@ -74,6 +92,7 @@ function renderAccountChoices() {
   }
 }
 function clearData() {
+  if(snsMounted){window.SnsUI.destroy();snsMounted=false;}
   state.opened = false; state.chats = []; state.chat = null; state.rows = []; state.total = 0;
   state.offset = 0; state.months = []; state.selected.clear(); state.selectedRows.clear(); state.selecting = false;
   state.exportChats.clear(); state.exportScope = null;
@@ -87,7 +106,8 @@ async function extract(index) {
   clearData(); $('ob-status').textContent = '正在提取并读取，请保持微信登录…';
   const result = await json('/api/open', {account: index, consent: true});
   state.account = index; state.opened = true; state.chats = await json('/api/chats');
-  $('account-modal').hidden = true; renderAccount(); renderChats(); renderExport();
+  if(!wizardActive)$('account-modal').hidden=true;renderAccount();renderChats();renderExport();renderSettings();
+  if(!wizardActive&&!$('sns-page').hidden)await mountSns();
   if (result.warnings) toast('部分数据库未能读取，当前展示可用记录。');
 }
 function matches(text, pattern) { if (!pattern) return true; try {return new RegExp(pattern, 'i').test(text);} catch {return text.toLowerCase().includes(pattern.toLowerCase());} }
@@ -180,7 +200,7 @@ async function downloadExport(){
 $('acc-card').onclick=()=>{if(state.busy||state.stopped)return;$('acc-pop').hidden=!$('acc-pop').hidden;$('acc-card').setAttribute('aria-expanded',String(!$('acc-pop').hidden));};
 document.addEventListener('click',e=>{if(!$('acc-card').contains(e.target)&&!$('acc-pop').contains(e.target)){$('acc-pop').hidden=true;$('acc-card').setAttribute('aria-expanded','false');}});
 $('ob-close').onclick=()=>{$('account-modal').hidden=true;};$('ob-consent').onchange=syncButtons;
-$('ob-open').onclick=()=>run(async()=>{if(!$('ob-consent').checked||state.pendingAccount===null)return;await extract(state.pendingAccount);});
+$('ob-open').onclick=()=>runWizardExtraction();
 $('c-search').oninput=renderChats;$('c-back').onclick=()=>{$('chat-wrap').classList.remove('open');};
 $('c-refresh').onclick=()=>run(async()=>{if(state.account!==null)await extract(state.account);});
 function searchMessages(){return run(async()=>{if(!state.chat)return;messageFilter=readChatFilter();state.selected.clear(); state.selectedRows.clear();await loadMessages(0);});}
@@ -206,8 +226,61 @@ $('e-run').onclick=()=>run(downloadExport);$('e-cancel').onclick=()=>state.downl
 $('e-log-pause').onclick=()=>{state.logPaused=!state.logPaused;$('e-log-pause').textContent=state.logPaused?'继续':'暂停';$('e-log-pause').setAttribute('aria-pressed',String(state.logPaused));if(!state.logPaused)$('e-log').textContent=state.log.join('\n');};$('e-log-copy').onclick=()=>copyText(state.log.join('\n'));
 $('close-data').onclick=()=>run(async()=>{await api('/api/close',{});clearData();toast('当前数据已关闭');});
 $('stop').onclick=()=>run(async()=>{if(!window.confirm('停止程序并关闭当前数据？'))return;await api('/api/stop',{});state.stopped=true;clearData();$('account-modal').hidden=true;toast('程序已停止，可以关闭此网页。');});
-function theme(value){document.documentElement.dataset.theme=value;try{localStorage.setItem('siwx-theme',value);}catch{}$('side-theme').textContent=value==='dark'?'☀':'☾';}
+function theme(value){if($('s-theme'))$('s-theme').value=value;document.documentElement.dataset.theme=value;try{localStorage.setItem('siwx-theme',value);}catch{}$('side-theme').textContent=value==='dark'?'☀':'☾';}
 $('side-theme').onclick=()=>theme(document.documentElement.dataset.theme==='dark'?'light':'dark');
 try{theme(localStorage.getItem('siwx-theme')==='dark'?'dark':'light');}catch{theme('light');}
 window.addEventListener('hashchange',route);document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!state.busy){$('account-modal').hidden=true;$('acc-pop').hidden=true;$('e-roster-modal').classList.add('hidden');$('c-timeline').classList.remove('pinned');}});
-route();run(async()=>{state.accounts=await json('/api/accounts');const current=await json('/api/state');state.account=current.account??state.accounts[0]?.id??null;state.opened=current.opened;if(state.opened)state.chats=await json('/api/chats');renderAccount();renderChats();renderExport();if(!state.opened){state.pendingAccount=state.account;$('account-modal').hidden=false;renderAccountChoices();}});
+
+window.SX={fetchJSON:async url=>json(url),copyText:async text=>{await copyText(text);return true;},
+  fmtTs:ts=>new Date(Number(ts)*1000).toLocaleString('zh-CN',{hour12:false}),
+  fmtDate:ts=>{const d=new Date(Number(ts)*1000);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');},
+  getAccount:()=>state.opened?'current':null,getAccountName:()=>state.accounts.find(a=>a.id===state.account)?.name||'微信',toast,recordEvent:log};
+function showWizardScreen(screen){
+  wizardScreen=screen;
+  for(const [name,id] of [['intro','ob-intro'],['accounts','ob-account-step'],['extract','ob-extract-step'],['next','ob-next-step']])$(id).hidden=name!==screen;
+  $('ob-steps').replaceChildren();const labels=['确认使用','选择账号','提取并解密','接下来做什么'];
+  const index=['intro','accounts','extract','next'].indexOf(screen);
+  labels.forEach((label,i)=>$('ob-steps').append(node('span','g-chip'+(i===index?' on':i<index?' done':''),(i+1)+' '+label)));
+  $('ob-title').textContent='选择微信号';
+  $('ob-extract-account').textContent='请保持本人微信登录。当前选择：'+(state.accounts.find(a=>a.id===state.pendingAccount)?.name||'未选择账号');
+}
+async function runWizardExtraction(){
+  if(!$('ob-consent').checked||state.pendingAccount===null)return;
+  showWizardScreen('extract');$('ob-progress').hidden=false;$('ob-log').hidden=false;$('ob-log').textContent='准备读取账号数据…';$('ob-result').textContent='';$('ob-run').hidden=false;$('ob-finish').hidden=true;
+  await run(async()=>{try{await extract(state.pendingAccount);$('ob-log').textContent+='\n账号数据读取完成。';$('ob-result').textContent='提取完成，可以查看聊天与朋友圈。';$('ob-run').hidden=true;$('ob-finish').hidden=false;if(!wizardActive){$('account-modal').hidden=true;route();}}
+   catch(error){$('ob-log').textContent+='\n提取未完成，请检查微信登录与目录后重试。';$('ob-result').textContent=error.message;throw error;}
+   finally{$('ob-progress').hidden=true;}});
+}
+function finishWizard(page='chat'){$('account-modal').hidden=true;wizardActive=false;location.hash='#/'+page;route();syncButtons();}
+$('side-wizard').onclick=()=>showAccountModal(state.account,true);
+$('ob-start').onclick=()=>showWizardScreen('accounts');$('ob-back-intro').onclick=()=>showWizardScreen('intro');
+$('ob-to-extract').onclick=()=>{if($('ob-consent').checked&&state.pendingAccount!==null){$('ob-result').textContent='';$('ob-log').hidden=true;$('ob-progress').hidden=true;$('ob-run').hidden=false;$('ob-finish').hidden=true;showWizardScreen('extract');}};
+$('ob-back-account').onclick=()=>showWizardScreen('accounts');$('ob-run').onclick=runWizardExtraction;
+$('ob-finish').onclick=()=>{if(wizardActive)showWizardScreen('next');else finishWizard();};$('ob-enter').onclick=()=>finishWizard();
+$('ob-skip').onclick=()=>finishWizard('settings');$('ob-extract-skip').onclick=()=>finishWizard('logs');
+document.querySelectorAll('[data-wizard-go]').forEach(b=>b.onclick=()=>finishWizard(b.dataset.wizardGo));
+$('ob-manual-toggle').onclick=()=>{$('ob-manual-box').hidden=!$('ob-manual-box').hidden;};
+$('ob-manual-add').onclick=()=>run(async()=>{const before=new Set(state.accounts.map(a=>a.id));$('ob-manual-msg').textContent='验证中…';const result=await json('/api/accounts/add',{path:$('ob-manual-path').value});state.accounts=result.accounts;state.pendingAccount=state.accounts.find(a=>!before.has(a.id))?.id??state.pendingAccount;$('ob-manual-msg').textContent='账号已添加';$('ob-manual-path').value='';renderAccount();renderAccountChoices();renderSettings();});
+function renderSettings(){
+ $('s-current').textContent=state.opened?(state.accounts.find(a=>a.id===state.account)?.name||'已打开'):'未打开账号';
+ $('s-theme').value=document.documentElement.dataset.theme==='dark'?'dark':'light';
+ const list=$('s-ds-accounts');list.replaceChildren();for(const a of state.accounts){const row=node('div','acc-box');row.append(node('b','',a.name));const b=node('button','btn btn-sm',a.id===state.account&&state.opened?'重新提取':'选择并提取');b.onclick=()=>showAccountModal(a.id);row.append(b);list.append(row);}
+ if(!state.accounts.length)list.append(node('div','empty','未发现账号，可从运行向导手动添加数据目录。'));
+}
+async function refreshLogs(){if(logsPaused)return;try{logsRows=(await json('/api/logs')).logs;renderLogs();}catch{if(!state.stopped)toast('日志读取未完成。');}}
+function filteredLogs(){return logsRows.filter(row=>(!$('log-filter').value||row.level===$('log-filter').value)&&row.message.toLowerCase().includes($('log-text').value.toLowerCase()));}
+function logsText(){return filteredLogs().map(row=>($('log-ts').checked?row.time+'  ':'')+'['+row.level.toUpperCase()+'] '+row.message).join('\n');}
+function renderLogs(){const rows=filteredLogs();$('log-count').textContent=rows.length+' 条';$('log-box').textContent=logsText()||'暂无操作记录';if($('log-auto').checked)$('log-box').scrollTop=$('log-box').scrollHeight;}
+async function downloadLogs(){try{logsRows=(await json('/api/logs')).logs;const url=URL.createObjectURL(new Blob([logsText()],{type:'text/plain;charset=utf-8'}));const a=node('a');a.href=url;a.download='siwx-operation-log.txt';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}catch(error){toast(error.message);}}
+$('s-rerun-wizard').onclick=()=>showAccountModal(state.account,true);$('s-account').onclick=()=>showAccountModal();
+$('s-refresh-accounts').onclick=()=>run(async()=>{state.accounts=await json('/api/accounts');renderAccount();renderSettings();toast('账号列表已刷新');});
+$('s-close-data').onclick=()=>run(async()=>{await api('/api/close',{});clearData();renderSettings();toast('当前数据已关闭');});
+$('s-theme').onchange=()=>theme($('s-theme').value);$('s-view-logs').onclick=()=>{location.hash='#/logs';};$('s-export-log').onclick=downloadLogs;
+$('log-filter').onchange=renderLogs;$('log-text').oninput=renderLogs;$('log-ts').onchange=renderLogs;$('log-auto').onchange=renderLogs;
+$('log-pause').onclick=()=>{logsPaused=!logsPaused;$('log-pause').textContent=logsPaused?'继续':'暂停';$('log-pause').setAttribute('aria-pressed',String(logsPaused));if(!logsPaused)refreshLogs();};
+$('log-clear').onclick=()=>run(async()=>{await api('/api/logs/clear',{});logsRows=[];state.log=[];renderLogs();});$('log-copy').onclick=()=>copyText(logsText());$('log-download').onclick=downloadLogs;
+setInterval(()=>{if(!$('logs-page').hidden&&!state.busy&&!state.stopped)refreshLogs();},2000);
+const tourSteps=[['#acc-card','选择账号','从这里切换本人的微信账号。'],['#side-wizard','运行向导','重新确认、选号、提取并打开数据。'],['#menu a[data-page=chat]','聊天查看','查找会话、筛选消息、复制或导出所选记录。'],['#menu a[data-page=sns]','朋友圈','浏览动态、互动与媒体，按发布者和日期筛选并导出。'],['#menu a[data-page=export]','导出','选择会话、日期与格式，下载文件或ZIP。'],['#menu a[data-page=logs]','运行日志','查看操作阶段、搜索、复制与下载。'],['#menu a[data-page=settings]','设置','管理账号、主题与运行向导。']];
+function showTour(index){document.querySelectorAll('.tour-target').forEach(n=>n.classList.remove('tour-target'));$('tour-panel')?.remove();tourIndex=index;if(index<0||index>=tourSteps.length)return;const [selector,title,text]=tourSteps[index],target=document.querySelector(selector);target?.classList.add('tour-target');target?.scrollIntoView({block:'nearest'});const panel=node('div','tour-panel');panel.id='tour-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-label','使用导览');panel.append(node('b','',title),node('p','',text));const actions=node('div','ob-actions');for(const [label,next] of [['上一步',index-1],[index===tourSteps.length-1?'完成':'下一步',index+1],['关闭',-1]]){const b=node('button','btn btn-sm',label);b.onclick=()=>showTour(next);actions.append(b);}panel.append(actions);document.body.append(panel);}
+$('side-tour').onclick=()=>showTour(0);
+route();run(async()=>{state.accounts=await json('/api/accounts');const current=await json('/api/state');state.account=current.account??state.accounts[0]?.id??null;state.opened=current.opened;if(state.opened)state.chats=await json('/api/chats');renderAccount();renderChats();renderExport();if(!state.opened){state.pendingAccount=state.account;wizardActive=true;$('account-modal').hidden=false;renderAccountChoices();showWizardScreen('intro');}});

@@ -6,6 +6,7 @@ process termination, whole-disk search, image-key scan, or network access.
 from __future__ import annotations
 
 from datetime import datetime, time
+from collections import deque
 import os
 from pathlib import Path
 import sys
@@ -106,9 +107,51 @@ class Engine:
         self.accounts, self.opener = list(accounts), opener
         self.source = None
         self.account_index = None
+        self.moments = None
+        self.events = deque(maxlen=500)
+        self.event("info", "程序已启动，等待选择账号。")
+
+    def event(self, level, message):
+        self.events.append({"time": datetime.now().isoformat(sep=" ", timespec="seconds"),
+                            "level": level, "message": message})
 
     def account_list(self):
         return [{"id": i, "name": a.label} for i, a in enumerate(self.accounts)]
+
+    def add_account_directory(self, path):
+        if not isinstance(path, str) or not path.strip() or len(path) > 4096:
+            raise ValueError("请输入微信数据目录。")
+        root = Path(path.strip())
+        if not root.is_absolute():
+            raise ValueError("请填写完整的本地微信数据目录。")
+        # Bounded explicit selection only: normalize db_storage/subdirectory back
+        # to its account directory, or enumerate direct xwechat_files children.
+        candidates = []
+        for candidate in (root, *list(root.parents)[:5]):
+            if candidate.name.casefold() == "db_storage":
+                candidates = [candidate.parent]
+                break
+            if candidate.name.casefold() == "xwechat_files":
+                if root == candidate:
+                    candidates = list(candidate.iterdir())[:100]
+                break
+        if not candidates:
+            candidates = [root]
+        added = 0
+        for candidate in candidates:
+            if not candidate.is_dir() or not (candidate / "db_storage").is_dir():
+                continue
+            cursor = candidate
+            if any(p.is_symlink() for p in (cursor, *cursor.parents)):
+                raise ValueError("请使用实际微信数据目录，不使用目录链接。")
+            account = Win4Source.discover(candidate)
+            if account and all(a.root is None or a.root.resolve() != account.root.resolve() for a in self.accounts):
+                self.accounts.append(account)
+                added += 1
+        if not added:
+            raise ValueError("未发现新的微信4.x账号，请选择包含 db_storage 的目录。")
+        self.event("info", "已添加微信数据目录。")
+        return {"added": added, "accounts": self.account_list()}
 
     def open(self, index, consent):
         if consent is not True:
@@ -117,11 +160,22 @@ class Engine:
             raise ValueError("请选择列表中的账号。")
         # Close old decrypted data before beginning a new extraction attempt.
         self.close()
-        self.source = self.opener(self.accounts[index])
+        self.event("info", "开始提取并读取账号数据库。")
+        try:
+            self.source = self.opener(self.accounts[index])
+        except Exception:
+            self.event("error", "提取未完成，请检查微信登录状态与数据目录后重试。")
+            raise
         self.account_index = index
+        from .sns_live import Moments
+        self.moments = Moments(self.source)
+        self.event("warn" if self.source.load_errors else "info", "部分数据库未能读取，已打开可用数据。" if self.source.load_errors else "账号数据已打开。")
         return {"opened": True, "warnings": len(self.source.load_errors)}
 
     def close(self):
+        if self.moments is not None:
+            self.moments.close()
+            self.moments = None
         if self.source is not None:
             try:
                 self.source.close()
@@ -130,6 +184,7 @@ class Engine:
                     self.source._keys.clear()
                 self.source = None
                 self.account_index = None
+                self.event("info", "当前账号数据已关闭。")
 
     def chats(self):
         if self.source is None:

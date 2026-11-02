@@ -7,6 +7,7 @@ import io
 from pathlib import Path
 import threading
 import zipfile
+from urllib.parse import urlsplit, parse_qs
 
 
 def interface_hosts():
@@ -29,7 +30,8 @@ STATIC = Path(__file__).with_name("live_ui")
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           **{"/" + name: (name, "text/css; charset=utf-8") for name in
-             ("app.css", "style.css", "chat.css", "export.css", "shared.css")}}
+             ("app.css", "style.css", "chat.css", "export.css", "shared.css", "settings.css", "logs.css", "sns.css")},
+          **{"/" + name: (name, "text/javascript; charset=utf-8") for name in ("sns.js", "sns-render.js", "widgets.js", "vue.js")}}
 
 
 class LocalServer(HTTPServer):
@@ -82,7 +84,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; "
-                         "style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; "
+                         "style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; base-uri 'none'; "
                          "frame-ancestors 'none'; form-action 'none'")
         if attachment:
             self.send_header("Content-Disposition", 'attachment; filename="' + attachment + '"')
@@ -97,6 +99,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path.startswith("/api/sns/") or path == "/api/chat/avatar":
+            self._sns_get(path)
+            return
         if path in ASSETS:
             filename, mime = ASSETS[path]
             self._send(200, (STATIC / filename).read_bytes(), mime)
@@ -105,6 +110,13 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/state":
             engine = self.server.engine
             self._json(200, {"opened": engine.source is not None, "account": engine.account_index})
+        elif self.path == "/api/status":
+            engine = self.server.engine
+            self._json(200, {"version": "1.4.0", "opened": engine.source is not None,
+                             "account": engine.account_index, "accounts": engine.account_list(),
+                             "warnings": len(engine.source.load_errors) if engine.source else 0})
+        elif self.path == "/api/logs":
+            self._json(200, {"logs": list(self.server.engine.events)})
         elif self.path == "/api/chats":
             try:
                 self._json(200, self.server.engine.chats())
@@ -112,6 +124,45 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": str(exc)})
         else:
             self._json(404, {"error": "无此功能。"})
+
+    def _sns_get(self, path):
+        try:
+            query = {key: values[0] for key, values in parse_qs(urlsplit(self.path).query, max_num_fields=20).items()}
+            engine = self.server.engine
+            sns = engine.moments
+            if path == "/api/sns/accounts":
+                accounts = []
+                if sns:
+                    try:
+                        accounts.append({"wxid": "current", "count": sns.count()})
+                    except ValueError:
+                        pass
+                self._json(200, {"accounts": accounts})
+                return
+            if sns is None:
+                raise ValueError("请先通过运行向导选择账号并提取。")
+            if path == "/api/sns/timeline":
+                self._json(200, sns.timeline(query))
+            elif path == "/api/sns/friends":
+                rows = sns.friends()
+                self._json(200, {"friends": rows, "total": len(rows)})
+            elif path == "/api/sns/detail":
+                self._json(200, {"post": sns.detail(query.get("tid"))})
+            elif path == "/api/sns/media":
+                data, mime = sns.media(query.get("url", ""))
+                self._send(200, data, mime)
+            elif path == "/api/chat/avatar":
+                pair = sns.avatar(query.get("username", ""))
+                if pair:
+                    self._send(200, *pair)
+                else:
+                    self._send(200, b'<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48"><rect width="48" height="48" rx="8" fill="#e7f8ef"/><circle cx="24" cy="17" r="8" fill="#07c160"/><path d="M8 45a16 16 0 0 1 32 0" fill="#07c160"/></svg>', "image/svg+xml")
+            else:
+                self._json(404, {"error": "无此朋友圈功能。"})
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+        except Exception:
+            self._json(500, {"error": "朋友圈读取未完成，请确认已提取朋友圈数据库后重试。"})
 
     def do_POST(self):
         try:
@@ -126,7 +177,19 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("请求必须是JSON对象。")
             engine = self.server.engine
-            if self.path == "/api/open":
+            if self.path == "/api/logs/clear":
+                engine.events.clear()
+                self._json(200, {"cleared": True})
+            elif self.path == "/api/accounts/add":
+                self._json(200, engine.add_account_directory(body.get("path")))
+            elif self.path == "/api/sns/export":
+                if engine.moments is None:
+                    raise ValueError("请先提取账号数据。")
+                engine.event("info", "开始导出朋友圈。")
+                data, mime, name = engine.moments.export(body)
+                engine.event("info", "朋友圈导出完成。")
+                self._send(200, data, mime, name)
+            elif self.path == "/api/open":
                 self._json(200, engine.open(body.get("account"), body.get("consent")))
             elif self.path == "/api/export" and "chats" in body:
                 chats = body["chats"]
