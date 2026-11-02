@@ -252,6 +252,9 @@ class Moments:
         if fmt == 'json': content = json.dumps(feeds, ensure_ascii=False, indent=2)
         elif fmt in ('txt','markdown'):
             content = '\n\n'.join(self._name(f['user_name'])+' · '+str(f['create_time'])+'\n'+f['content_desc']+'\n'+json.dumps({'medias':f['medias'],'likes':f['likes'],'comments':f['comments'],'card':f['card']},ensure_ascii=False) for f in feeds)
+            if fmt == 'markdown':
+                from .documents import _md
+                content = _md(content)
         else:
             parts = ['<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>朋友圈</title>']
             for feed in feeds:

@@ -42,6 +42,7 @@ class MomentTests(unittest.TestCase):
   self.assertEqual('application/zip',mime)
   with zipfile.ZipFile(io.BytesIO(body)) as archive:
    self.assertEqual(PNG,archive.read('media/0001.png'));self.assertIn(b'src="media/0001.png"',archive.read('moments.html'));report=json.loads(archive.read('export-report.json'));self.assertEqual(1,report['downloaded_media']);self.assertEqual(0,report['unavailable_media'])
+  markdown,_,_=self.sns.export({'format':'markdown','keyword':'合成动态 24'});self.assertNotIn(b'<script>',markdown);self.assertIn(b'\\<script\\>',markdown)
   with self.assertRaises(ValueError):self.sns.export({'format':'exe'})
  def test_dtd_invalid_rows_and_destination_guards(self):
   con=self.source._conns['sns'];con.execute('INSERT INTO SnsTimeLine VALUES(?,?,?)',(signed_tid(1709251200),'author_example','<!DOCTYPE foo [<!ENTITY x "bad">]><SnsDataItem>&x;</SnsDataItem>'));con.commit();self.assertEqual(26,self.sns.count());self.assertEqual(20,len(self.sns.timeline({})['timeline']))
