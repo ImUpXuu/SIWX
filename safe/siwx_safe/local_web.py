@@ -36,6 +36,7 @@ ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
 
 class LocalServer(HTTPServer):
     allow_reuse_address = False
+    request_queue_size = 128
 
     def __init__(self, engine, port=0, host="0.0.0.0"):
         if host not in ("127.0.0.1", "0.0.0.0"):
