@@ -7,10 +7,10 @@ foreach($name in @('ConvertFrom-ConsoleText','Test-SiwxProcessRecord','Open-Siwx
     $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$true)
     . ([ScriptBlock]::Create($node.Extent.Text))
 }
-$exe='C:\Tools\siwx-v5.2.0.exe';$sid='S-1-5-21-1-1001';$sessionId=2
+$exe='C:\Tools\siwx-lite.exe';$sid='S-1-5-21-1-1001';$sessionId=2
 function New-Fixture {
-    [pscustomobject]@{Id=101;ParentId=100;Name='siwx-v5.2.0.exe';Path=$exe;Sid=$sid;Session=$sessionId;
-        Created=[datetime]'2026-01-01T00:00:01Z';Command=('"'+$exe+'" serve --host 127.0.0.1 --port 8787 --no-open --trust-lan')}
+    [pscustomobject]@{Id=101;ParentId=100;Name='siwx-lite.exe';Path=$exe;Sid=$sid;Session=$sessionId;
+        Created=[datetime]'2026-01-01T00:00:01Z';Command=('"'+$exe+'" --host 0.0.0.0 --port 8787 --no-open')}
 }
 $record=New-Fixture
 if(-not (Test-SiwxProcessRecord $record $exe $sid $sessionId)){throw 'Valid owner rejected'}
@@ -18,7 +18,7 @@ foreach($field in @('Name','Path','Sid','Session','Created','Command')){
     $bad=New-Fixture
     switch($field){
         Name {$bad.Name='other.exe'}
-        Path {$bad.Path='C:\Other\siwx-v5.2.0.exe'}
+        Path {$bad.Path='C:\Other\siwx-lite.exe'}
         Sid {$bad.Sid='S-1-5-21-1-1002'}
         Session {$bad.Session=9}
         Created {$bad.Created=$null}
@@ -26,13 +26,11 @@ foreach($field in @('Name','Path','Sid','Session','Created','Command')){
     }
     if(Test-SiwxProcessRecord $bad $exe $sid $sessionId){throw "Unverified field accepted: $field"}
 }
-# Accept only the exact legacy install path, and match command to actual path.
-$legacyExePath='C:\Data\user_a\siwx-v5.2.0.exe'
-$moved=New-Fixture;$moved.Path=$legacyExePath;$moved.Command=$moved.Command.Replace($exe,$legacyExePath)
-if(-not (Test-SiwxProcessRecord $moved $exe $sid $sessionId)){throw 'Exact legacy path rejected'}
-$moved.Command=$moved.Command.Replace($legacyExePath,$exe)
-if(Test-SiwxProcessRecord $moved $exe $sid $sessionId){throw 'Legacy command/path mismatch accepted'}
-$legacyExePath=$null
+# Legacy/full-version locations must not be terminated by this Lite launcher.
+$legacy=New-Fixture;$legacy.Path='C:\Data\user_a\siwx-v5.2.0.exe';$legacy.Name='siwx-v5.2.0.exe'
+if(Test-SiwxProcessRecord $legacy $exe $sid $sessionId){throw 'Legacy/full-version process accepted'}
+$withData=New-Fixture;$withData.Command+=' --data "D:\example\user_a"'
+if(-not (Test-SiwxProcessRecord $withData $exe $sid $sessionId)){throw 'Quoted data argument rejected'}
 # A recycled PID must be rejected before attempting to open/kill the native process.
 $changed=New-Fixture;$changed.Created=$changed.Created.AddSeconds(2)
 function Get-SiwxProcessRecord {param($ProcessId) $changed}
@@ -103,7 +101,7 @@ try {
     $freePort=0
     foreach($candidate in 8787..8887){if(-not (Test-SiwxPort $candidate)){$freePort=$candidate;break}}
     if(-not $freePort){throw 'Test environment has no free fixture port'}
-    $socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $freePort)
+    $socket=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Any, $freePort)
     $socket.Start()
     if(-not (Test-SiwxPort $freePort)){throw 'Real bound port undetected'}
 } finally {$socket.Stop()}

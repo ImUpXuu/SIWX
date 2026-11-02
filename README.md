@@ -1,5 +1,6 @@
-> **命令行启动、网页控制（任务338，1.2.0）**：独立入口 `python safe/live_app.py`，
-> 独立Dufs入口已按原SIWX中文菜单重构，8787占用时核归属/自动换端口，支持Agent SYSTEM切换桌面用户；见 [Start-SiwxLite](scripts/Start-SiwxLite.md)，不替换旧一键入口。
+> **当前精简版（任务344，1.2.1）**：沿用原SIWX脚本的 WScript/CMD 会话链路，
+> 原 `siwx.ps1?v=344` 入口调用新目录包；菜单/启动说明见 [原SIWX脚本](scripts/README.md)。
+> 程序移除IP/Host/Origin/Sec-Fetch-Site来源门禁；原Lite v1.4入口保留为旧包历史入口。
 > 无桌面窗口、不自动打开浏览器，默认监听 `0.0.0.0:8787`。
 > 按用户明确选择不设令牌或密码，可连接端口的设备均可提取、查看、导出和停止。
 > 聊天统计、加密备份、MCP不打包。详见 [当前精简版说明](safe/LIVE-README.md)。

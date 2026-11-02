@@ -52,6 +52,9 @@ ALLOW_WXID = {
 ALLOW_CHATROOM = {"123456789@chatroom", "111111@chatroom", "123456@chatroom"}
 ALLOW_PHONE = {"13800138000", "13900000000"}
 ALLOW_HEX64 = {
+    # Public task344 Actions ZIP and its SHA256SUMS manifest, not account keys.
+    "8aba80879e4a5875e155e975fd5396b8527fa46a49012c4d0f104a7d75b97737",
+    "a23d6550a2e9289b50dd973138150613de4d8d2bbefd82fd11dedea2e0e83bec",
     # Public ImUpXuu/SIWX v5.2.0 Windows Release asset digest (2026-10-31).
     "dcecef343256f8d5c7335da82ea6a0311a0b1b2261a8a7dc763ba7bb7fba8dc6",
     "00112233445566778899aabbccddeeff1032547698badcfe0123456789abcdef",
