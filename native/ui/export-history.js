@@ -16,10 +16,10 @@
       result.replaceChildren();
       if(!data.files.length)result.append(el('div','empty',query?'没有匹配的导出文件。':'暂无导出文件，完成导出后会在这里保留展示。'));
       for(const file of data.files){
-        const row=el('div','ov-row');row.style.alignItems='start';row.style.gap='12px';
+        const row=el('div');row.style.display='flex';row.style.padding='12px 0';row.style.borderBottom='1px solid var(--line)';row.style.fontSize='13px';row.style.alignItems='start';row.style.gap='12px';
         const meta=el('div');meta.style.minWidth='0';meta.style.flex='1';meta.style.overflowWrap='anywhere';
         meta.append(el('b','',file.name),el('div','dim',file.path),el('div','dim',file.format+' · '+size(file.bytes)+' · '+file.modified.replace('T',' ')));
-        const link=el('a','btn btn-sm','下载');link.href=file.download;link.setAttribute('download','');row.append(meta,link);result.append(row);
+        const link=el('a','btn','下载');link.href=file.download;link.setAttribute('download','');row.append(meta,link);result.append(row);
       }
       card.querySelector('[data-history-count]').textContent='共 '+data.total+' 个文件'+(data.truncated?'（目录过大，已限制扫描范围）':'');
       card.querySelector('[data-history-page]').textContent=data.total?(Math.floor(offset/30)+1)+' / '+Math.ceil(data.total/30):'0 / 0';
@@ -32,12 +32,12 @@
     offset=0;query='';lastKey='';
     const card=el('section','card');card.id='e-history';const head=el('div','card-head'),count=el('span','hint');count.dataset.historyCount='';
     head.append(el('h2','','已导出文件'),count);card.append(head,el('p','dim','导出文件保存在本机磁盘，刷新、重启或更新软件后仍可查看；删除原文件后列表会同步更新。'));
-    const controls=el('div','s-inline'),search=el('input');search.type='search';search.placeholder='按文件名或目录搜索';search.setAttribute('aria-label','搜索已导出文件');search.style.minWidth='0';search.style.flex='1';
-    const refresh=el('button','btn btn-sm','刷新列表');refresh.type='button';refresh.id='e-history-refresh';
+    const controls=el('div'),search=el('input');search.type='search';search.placeholder='按文件名或目录搜索';search.setAttribute('aria-label','搜索已导出文件');search.style.minWidth='0';search.style.flex='1';
+    const refresh=el('button','btn','刷新列表');refresh.type='button';refresh.id='e-history-refresh';
     const list=el('div');list.dataset.historyList='';list.style.maxHeight='420px';list.style.overflow='auto';
-    const nav=el('div','s-inline'),prev=el('button','btn btn-sm','上一页'),next=el('button','btn btn-sm','下一页'),page=el('span','dim');prev.type=next.type='button';prev.dataset.historyPrev='';next.dataset.historyNext='';page.dataset.historyPage='';
+    const nav=el('div'),prev=el('button','btn','上一页'),next=el('button','btn','下一页'),page=el('span','dim');prev.type=next.type='button';prev.dataset.historyPrev='';next.dataset.historyNext='';page.dataset.historyPage='';
     let timer;search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(()=>{query=search.value.trim();offset=0;load(true);},250);});refresh.onclick=()=>load(true);prev.onclick=()=>{offset=Math.max(0,offset-30);load(true);};next.onclick=()=>{offset+=30;load(true);};
-    controls.append(search,refresh);nav.append(prev,page,next);card.append(controls,list,nav);host.append(card);mounted=card;load(true);
+    for(const bar of [controls,nav]){bar.style.display='flex';bar.style.alignItems='center';bar.style.gap='8px';bar.style.flexWrap='wrap';bar.style.marginTop='12px';}controls.append(search,refresh);nav.append(prev,page,next);card.append(controls,list,nav);host.append(card);mounted=card;load(true);
   }
   const observer=new MutationObserver(mount);observer.observe(document.getElementById('view'),{childList:true,subtree:true});mount();
   setInterval(()=>{if(mounted?.isConnected&&!document.hidden)load();},3000);
