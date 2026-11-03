@@ -187,6 +187,9 @@ try:
     _ZCTX = _zstd.ZstdDecompressor()
 except ImportError:
     _ZCTX = None
+# ZstdDecompressor is not thread-safe: concurrent Flask request threads
+# decoding shards through the shared instance segfault the process.
+_ZCTX_LOCK = threading.Lock()
 
 bp = Blueprint("chat_api", __name__, url_prefix="/api/chat")
 
@@ -521,7 +524,8 @@ def _decode_content(content) -> str:
     raw = bytes(content)
     if raw[:4] == ZSTD_MAGIC and _ZCTX is not None:
         try:
-            raw = _ZCTX.decompressobj().decompress(raw)
+            with _ZCTX_LOCK:
+                raw = _ZCTX.decompressobj().decompress(raw)
         except Exception as e:
             # 只记 hex 头 + 长度，绝不透传正文（_FILE_LOG 存未脱敏原文）
             _logger.detailed("parse", f"[content] zstd 解压失败 len={len(raw)} "
