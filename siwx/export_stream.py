@@ -61,9 +61,9 @@ def _enrich_row(row, names, my_base, self_ids, is_group, chat, account,
         sender_wxid = ""
 
     t = ltype & 0xFFFF
-    # md5/气泡 md5/语音元数据/表情包元数据采集与 49/57 引用分流统一走 api_chat 公共函数
+    # md5/气泡 md5/语音元数据/表情包元数据/视频元数据采集与 49/57 引用分流统一走 api_chat 公共函数
     # （原与 build_messages / messages 两处逐字重复，改判定需三处同步）
-    md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
+    md5, bubble_md5, voice_meta, sticker, video_meta = enrich_message_row(t, text, packed)
 
     if t in (3, 47) and not md5 and not bubble_md5:
         # 审计 §4.2：三级来源全靠 local_id+ts，成功率骤降但此前无日志
@@ -105,6 +105,7 @@ def _enrich_row(row, names, my_base, self_ids, is_group, chat, account,
         "md5": md5,
         "bubbleMd5": bubble_md5,
         "voice": voice_meta,
+        "video": video_meta,
         "sticker": sticker,
         "channels": channels,
         "quote": quote,

@@ -48,6 +48,9 @@ _FILE_KEY = "\x00file"
 # 视频消息附件的槽位前缀（视频 md5 只用于磁盘定位，不进导出消息形状，
 # media_map 键与图片 md5 键隔离）
 _VIDEO_KEY = "\x00video"
+# 视频海报（<md5>_thumb.jpg）槽位：与视频主体同 localId/ts、前缀隔离。
+# 海报属可选增强——缺了 <video> 自出首帧，不算导出失败
+_VPOST_KEY = "\x00vpost"
 
 
 class ExportCancelled(Exception):
@@ -193,6 +196,12 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
                                        v_ts, v_chat))
                 elif kind == "video" or dtype == "4":
                     rec_subitems["video"] += 1
+                    # 子项视频随直拷链路导出：md5 由 resolver 从原始消息行
+                    # 回填（enrich 对 43 行统一提取），定位只需账号根目录
+                    if it.get("md5"):
+                        videos.append((it["md5"],
+                                       it.get("srcLocalId") or 0,
+                                       it.get("srcCreateTime") or 0))
                 elif kind == "file" or dtype == "6":
                     rec_subitems["file"] += 1
         if msg.get("localType") == 34:
@@ -208,7 +217,12 @@ def _collect_metadata(acc_out_dir, chat, start_ts, end_ts, account, names=None):
                                  msg["localId"], ts, url))
         # P2-2：视频(43)/文件(6、49-appmsg type=6) 附件纳入导出范围
         if msg.get("localType") == 43:
-            vmd5 = media.extract_md5_from_xml(msg.get("rawContent") or "")
+            # enrich 已按实机命中率定优先级（packed field8 > XML 属性），
+            # 直接用消息形状的 md5；XML 属性仅作 enrich 无果时的兜底。
+            # 实机：XML 属性 md5 与磁盘文件名不是同一个值（155 个 mp4
+            # 里 0 命中），packed field8 才是磁盘命名依据（命中 9 个）。
+            vmd5 = msg.get("md5") or \
+                media.extract_md5_from_xml(msg.get("rawContent") or "")
             if vmd5:
                 videos.append((vmd5, msg["localId"], ts))
         else:
@@ -266,9 +280,19 @@ def _file_key(local_id, ts) -> tuple:
     return (_FILE_KEY, int(local_id or 0), int(ts or 0))
 
 
-def _video_key(local_id, ts) -> tuple:
-    """视频消息附件的组合键（磁盘定位用内容 md5，media_map 键走独立槽位）。"""
-    return (_VIDEO_KEY, int(local_id or 0), int(ts or 0))
+def _video_key(md5, local_id, ts) -> tuple:
+    """视频消息附件的组合键（磁盘定位用内容 md5，media_map 键走独立槽位）。
+
+    md5 进键：多分片会话 local_id 独立编号会撞号（图片侧实测 19210 撞号键），
+    裸 (localId, ts) 同样存在跨分片互挂面；enrich 已统一提取视频 md5
+    （XML 属性缺位时退 packed_info field8），白拿的定位精度不用白不用。
+    """
+    return (_VIDEO_KEY, (md5 or ""), int(local_id or 0), int(ts or 0))
+
+
+def _vpost_key(local_id, ts) -> tuple:
+    """视频海报槽位键：与视频主体同 (localId, ts)，前缀隔离。"""
+    return (_VPOST_KEY, int(local_id or 0), int(ts or 0))
 
 
 def _iter_record_media(record):
@@ -316,11 +340,22 @@ def _attach_record_media(record, media_map) -> None:
     (\\x00voice, srcLocalId, srcCreateTime) 语音槽位（P2-3）。
     """
     for it in _iter_record_media(record):
-        mf = media_map.get(_media_key(it.get("md5"), it.get("bubbleMd5"),
-                                      it.get("srcLocalId") or 0,
-                                      it.get("srcCreateTime") or 0))
+        if it.get("kind") == "video" and it.get("md5"):
+            # 子项视频走视频槽位键（md5 来自 resolver 回填的原始消息行）
+            mf = media_map.get(_video_key(it["md5"],
+                                          it.get("srcLocalId") or 0,
+                                          it.get("srcCreateTime") or 0))
+        else:
+            mf = media_map.get(_media_key(it.get("md5"), it.get("bubbleMd5"),
+                                          it.get("srcLocalId") or 0,
+                                          it.get("srcCreateTime") or 0))
         if mf and "/voice_" not in mf:
             it["mediaFile"] = mf
+            if "/video_" in mf:
+                poster = media_map.get(_vpost_key(it.get("srcLocalId") or 0,
+                                                  it.get("srcCreateTime") or 0))
+                if poster:
+                    it["videoPoster"] = poster
     # P2-3：语音子项回填。图片槽位与语音槽位互斥的语义不变——上面的
     # md5 键命中带 "/voice_" 前缀仍拒挂；这里显式按语音槽位键取。
     for it in _iter_record_voice_items(record):
@@ -356,7 +391,7 @@ def _attach_media(msg: dict, media_map: dict) -> None:
     if t == 34:
         mf = media_map.get(_voice_key(msg.get("localId"), ts))
     elif t == 43:
-        mf = media_map.get(_video_key(msg.get("localId"), ts))
+        mf = media_map.get(_video_key(msg.get("md5"), msg.get("localId"), ts))
     elif t in (6, 49):
         mf = media_map.get(_file_key(msg.get("localId"), ts))
     else:
@@ -383,6 +418,11 @@ def _attach_media(msg: dict, media_map: dict) -> None:
             ring=False)
         return
     msg["mediaFile"] = mf
+    if t == 43:
+        # 视频海报可选：缺了 <video> 自出首帧，不算失败
+        poster = media_map.get(_vpost_key(msg.get("localId"), ts))
+        if poster:
+            msg["videoPoster"] = poster
 
 
 def _log_media_failures(kind: str, failures: list, total: int) -> None:
@@ -578,12 +618,17 @@ def _export_video_media(account, videos, media_map, dest, progress=None):
     dest.mkdir(parents=True, exist_ok=True)
     root = _account_msg_root(account)
     index = {}
+    thumb_index = {}
     if root is not None:
         video_root = root / "msg" / "video"
         if video_root.is_dir():
             # 一次建索引：md5(stem) → 路径。逐条 rglob 在视频量大时是 O(n×m)
             for f in video_root.rglob("*.mp4"):
                 index.setdefault(f.stem.lower(), f)
+            # 缩略图索引：<md5>_thumb.jpg 与视频同目录，作 HTML 导出的 poster
+            thumb_index = {}
+            for f in video_root.rglob("*_thumb.jpg"):
+                thumb_index.setdefault(f.name[:-10].lower(), f)
     failures = []
     for i, (md5, local_id, ts) in enumerate(videos):
         src = index.get((md5 or "").lower())
@@ -601,7 +646,17 @@ def _export_video_media(account, videos, media_map, dest, progress=None):
             failures.append((md5, local_id, ts, f"{type(e).__name__}: {e}"))
             continue
         stats["ok"] += 1
-        media_map[_video_key(local_id, ts)] = f"media/{dst.name}"
+        media_map[_video_key(md5, local_id, ts)] = f"media/{dst.name}"
+        # 海报成对拷贝（可选）：名字与视频本体同前缀，缺了不影响导出
+        tsrc = thumb_index.get((md5 or "").lower()) if root is not None else None
+        if tsrc is not None:
+            tdst = dest / f"video_{i:04d}_{(md5 or 'vid')[:12]}_thumb.jpg"
+            try:
+                _atomic_copyfile(tsrc, tdst)
+                media_map[_vpost_key(local_id, ts)] = f"media/{tdst.name}"
+            except Exception as e:  # noqa: BLE001 海报可选，失败只留痕
+                logger.detailed("media", f"视频海报拷贝失败 "
+                                         f"md5={(md5 or '')[:8]}: {e}", ring=False)
         if (i + 1) % 50 == 0 and progress:
             progress(0, f"视频 {i + 1}/{len(videos)}")
     _log_media_failures("视频", failures, len(videos))

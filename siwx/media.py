@@ -615,6 +615,76 @@ def thumb_paths(wxid_full: str, chat: str, local_id: int, ts: int):
     return out
 
 
+# ── 视频（4.x 明文直存，无需解密）────────────────────────────────────
+# 实测 WeChat 4.1.x：视频落盘即标准 MP4（ftyp mp42）、缩略图即 JPEG，均不加密，
+# 与图片的 V0/V1/V2 加密完全不同。存放于 msg/video/<年-月>/<md5>.mp4 +
+# <md5>_thumb.jpg；文件名 md5 来自消息 packed_info_data（protobuf field 8，
+# "\x42\x20"+32hex），与视频内容 md5 无关（实测 5/5 均不同）。
+# cache/**/VideoTemp/ 是流式临时目录，实测恒为空，不作为来源。
+_VIDEO_IDX_MEMO: dict = {}
+
+
+def video_index(wxid_full: str) -> dict:
+    """该账号 msg/video/ 下 {md5: {"video": Path, "thumb": Path}} 索引（TTL memo）。
+
+    月份目录未知（覆盖年份不定），一次全量扫描建索引（实测 749 文件毫秒级），
+    之后按 md5 直查。多数据根（换盘/迁移残留）全合并：同 md5 取更大的文件，
+    防半成品/中断下载的空壳顶掉完整文件。
+    """
+    now = time.time()
+    hit = _VIDEO_IDX_MEMO.get(wxid_full)
+    if hit is not None and now - hit[0] < _CACHE_ROOTS_TTL:
+        return hit[1]
+    from siwx.discover import find_wechat_data_dirs
+    idx: dict = {}
+    for wxid, db in find_wechat_data_dirs():
+        if wxid != wxid_full:
+            continue
+        video_root = Path(db).parent / "msg" / "video"
+        if not video_root.is_dir():
+            continue
+        try:
+            months = sorted(video_root.iterdir())
+        except OSError:
+            continue
+        for month in months:
+            if not month.is_dir():
+                continue
+            try:
+                files = list(month.iterdir())
+            except OSError:
+                continue
+            for f in files:
+                if not f.is_file():
+                    continue
+                name = f.name
+                if name.endswith(".mp4"):
+                    md5, key = name[:-4], "video"
+                elif name.endswith("_thumb.jpg"):
+                    md5, key = name[:-10], "thumb"
+                else:
+                    continue
+                ent = idx.setdefault(md5, {})
+                old = ent.get(key)
+                try:
+                    if old is None or f.stat().st_size > old.stat().st_size:
+                        ent[key] = f
+                except OSError:
+                    continue
+    _VIDEO_IDX_MEMO[wxid_full] = (now, idx)
+    return idx
+
+
+def locate_video(wxid_full: str, md5: str):
+    """按 packed_info md5 定位视频与缩略图 → (video_path|None, thumb_path|None)。"""
+    if not md5:
+        return None, None
+    ent = video_index(wxid_full).get(md5.lower())
+    if not ent:
+        return None, None
+    return ent.get("video"), ent.get("thumb")
+
+
 def attach_paths(wxid_full: str, chat: str, xml_md5: str,
                  bubble_md5: str = None):
     """按消息 XML md5 直查原图目录：msg/attach/{md5(chat)}/**/Img/<md5>*.dat。

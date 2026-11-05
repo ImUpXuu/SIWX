@@ -186,6 +186,23 @@
   border: 1px solid var(--line); border-radius: 4px; padding: 1px 7px;
   margin-top: 3px; align-self: flex-start; max-width: 100%; }
 .m-sticker-text { font-size: 12px; color: var(--muted); }
+/* 视频气泡（4.x 明文 MP4）：poster + 播放按钮，点击后原地换 <video> */
+.m-video { position: relative; width: min(240px, 62vw); min-height: 135px;
+  border-radius: var(--radius-sm); overflow: hidden; cursor: pointer;
+  background: linear-gradient(135deg, #20242b, #2c313a);
+  border: 1px solid var(--line); }
+.m-video-poster { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; }
+.m-video-poster.m-video-noposter { display: none; }
+.m-video-play { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 44px; height: 44px; border-radius: 50%; background: rgba(0, 0, 0, .55);
+  color: #fff; display: flex; align-items: center; justify-content: center;
+  pointer-events: none; }
+.m-video-dur { position: absolute; right: 6px; bottom: 6px; font-size: 11px;
+  color: #fff; background: rgba(0, 0, 0, .55); border-radius: 4px;
+  padding: 1px 6px; pointer-events: none; font-variant-numeric: tabular-nums; }
+.m-video-el { display: block; width: min(240px, 62vw); max-height: 320px;
+  border-radius: var(--radius-sm); background: #000; }
+.m-video-miss { font-size: 12px; color: var(--muted); padding: 10px 12px; }
 .m-finder { max-width: min(280px, 68vw); border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; background: var(--panel, transparent); }
 .m-finder-cover { position: relative; display: block; background: #000; min-height: 60px; }
 .m-finder-cover img { display: block; max-width: 100%; max-height: 300px; margin: 0 auto; cursor: zoom-in; }

@@ -100,6 +100,9 @@ def _msg_entry(m):
     }
     if m.get("mediaFile"):
         entry["mediaPath"] = m["mediaFile"]
+    if m.get("videoPoster"):
+        # 视频海报（<md5>_thumb.jpg）：缺了 <video> 自出首帧，属可选增强
+        entry["videoPoster"] = m["videoPoster"]
     if m.get("quote"):
         entry["quote"] = {"sender": m["quote"]["displayname"],
                           "content": m["quote"]["content"],

@@ -1003,6 +1003,9 @@ def _parse_recordinfo(text: str, resolve_many=None, _depth: int = 0) -> dict:
                     it["md5"] = r["md5"]
                 if r.get("bubbleMd5"):
                     it["bubbleMd5"] = r["bubbleMd5"]
+                if r.get("video"):
+                    # 合并转发子项里的视频：原始消息行的视频元数据直传
+                    it["video"] = r["video"]
                 if r.get("text"):
                     it["resolvedText"] = r["text"][:200]
                 if r.get("type") is not None:
@@ -1127,9 +1130,10 @@ def make_record_resolver(acc: Path, chat: str):
                     # 群聊原文带 "wxid:\n" 前缀，展示层不需要
                     m = SENDER_PREFIX_RE.match(raw[:100]) if raw else None
                     body = raw[m.end():] if m else raw
-                    md5, bubble, _v, _s = enrich_message_row(t, raw, packed)
+                    md5, bubble, _v, _s, _vm = enrich_message_row(t, raw, packed)
                     out[int(sid)] = {"localId": lid, "ts": ts or 0, "type": t,
-                                     "text": body, "md5": md5, "bubbleMd5": bubble}
+                                     "text": body, "md5": md5, "bubbleMd5": bubble,
+                                     "video": _vm}
         return out
 
     def resolve_many(ids) -> dict:
@@ -1276,6 +1280,30 @@ def parse_quote_or_link(t: int, text: str, local_id=None, ts=None, resolve_many=
     return quote, link, record, channels
 
 
+def _parse_video_meta(text: str):
+    """type 43 视频：从 <videomsg> 采集播放时长/体积，供前端角标与导出。
+
+    属性形如 playlength="152"（秒）、length="4085923"（字节）；转发场景标签
+    可多行，必须 re.S。两属性全缺（某些系统转发的空壳）返回 None。
+    """
+    if not text or "<videomsg" not in text:
+        return None
+    m = re.search(r"<videomsg\b[^>]*>", text, re.S)
+    if not m:
+        return None
+    tag = m.group(0)
+
+    def _int(attr: str):
+        v = re.search(rf'\b{attr}\s*=\s*"(\d+)"', tag)
+        return int(v.group(1)) if v else None
+
+    dur = _int("playlength")
+    size = _int("length")
+    if dur is None and size is None:
+        return None
+    return {"duration": dur, "size": size}
+
+
 def _parse_emoji_meta(text: str):
     """type 47 动画表情：从消息 XML 提取 CDN 直链与尺寸。
 
@@ -1298,15 +1326,35 @@ def _parse_emoji_meta(text: str):
 
 
 def enrich_message_row(t: int, text: str, packed):
-    """md5 / 气泡 md5 / 语音元数据 / 表情包元数据采集（原三处逐字重复逻辑收敛于此）。"""
+    """md5 / 气泡 md5 / 语音元数据 / 表情包元数据 / 视频元数据采集（原三处逐字重复逻辑收敛于此）。"""
     md5 = media.extract_md5_from_xml(text) if t in (3, 47) else None
     voice_meta = voice.parse_voice_meta(text) if t == 34 else None
     sticker = _parse_emoji_meta(text) if t == 47 else None
+    video_meta = _parse_video_meta(text) if t == 43 else None
     bubble_md5 = None
     if t in (3, 47) and packed:
         m2 = re.search(rb"[0-9a-f]{32}", bytes(packed))
         bubble_md5 = m2.group().decode() if m2 else None
-    return md5, bubble_md5, voice_meta, sticker
+    if t == 43:
+        # 4.x 视频的消息→文件关联键，优先级按实机命中率定：
+        # ① packed_info_data 的 protobuf field 8（"\x42\x20"+32hex）——真库
+        #    实测磁盘文件名跟的是它（155 个 mp4 里命中 9 个）；
+        # ② field8 形态缺席时退 packed 首枚 32hex；
+        # ③ XML <videomsg md5=...> 属性——实测与磁盘文件名不是同一个 md5
+        #    （同一批消息 0 命中），仅作为上两种都缺时的兜底。
+        # 与文件内容 md5 也无关（实测 5/5 均不同）。
+        md5 = None
+        if packed:
+            pk = bytes(packed)
+            m2 = re.search(rb"\x42\x20([0-9a-f]{32})", pk)
+            if m2:
+                md5 = m2.group(1).decode()
+            else:
+                m3 = re.search(rb"[0-9a-f]{32}", pk)
+                md5 = m3.group().decode() if m3 else None
+        if not md5:
+            md5 = media.extract_md5_from_xml(text)
+    return md5, bubble_md5, voice_meta, sticker, video_meta
 
 
 def message_kind(t: int, quote, link, channels=None, record=None) -> str:
@@ -1395,7 +1443,7 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
             sender_wxid = ""
 
         t = ltype & 0xFFFF
-        md5, bubble_md5, voice_meta, sticker = enrich_message_row(t, text, packed)
+        md5, bubble_md5, voice_meta, sticker, video_meta = enrich_message_row(t, text, packed)
 
         quote, link, record, channels = parse_quote_or_link(
             t, text, local_id=local_id, ts=ts, resolve_many=resolve_many)
@@ -1414,6 +1462,7 @@ def build_messages(acc: Path, chat: str, start_ts=None, end_ts=None,
             "md5": md5,
             "bubble_md5": bubble_md5,
             "voice": voice_meta,
+            "video": video_meta,
             "sticker": sticker,
             "channels": channels,
             "quote": quote,
@@ -1606,7 +1655,7 @@ def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
     if is_group and not is_me and sender_wxid == chat:
         sender_wxid = ""
 
-    md5, bubble_md5, voice_meta, sticker = enrich_message_row(base_t, text, packed)
+    md5, bubble_md5, voice_meta, sticker, video_meta = enrich_message_row(base_t, text, packed)
     quote, link, record, channels = parse_quote_or_link(
         base_t, text, local_id=local_id, ts=ts, resolve_many=resolve_many)
     kind = message_kind(base_t, quote, link, channels, record)
@@ -1617,7 +1666,7 @@ def _enrich_chat_row(local_id, server_id, t, ts, origin, rsid, text, packed,
         "sender_name": names.get(sender_wxid, sender_wxid) if sender_wxid
         else (names.get(chat, chat) if not is_group else ""),
         "is_me": bool(is_me), "md5": md5, "bubble_md5": bubble_md5,
-        "voice": voice_meta, "sticker": sticker, "channels": channels,
+        "voice": voice_meta, "video": video_meta, "sticker": sticker, "channels": channels,
         "quote": quote, "link": link, "record": record,
         "text": _fmt(t, text) if base_t != 1 else text,
     }
@@ -2244,6 +2293,49 @@ def media_image():
                                 f"ts={ts}: {type(e).__name__}: {e}")
         return jsonify({"error": f"图片读取失败: {type(e).__name__}",
                         "reason": "decrypt_failed"}), 404
+
+
+@bp.get("/media/video")
+def media_video():
+    """视频（type 43）与缩略图按需投递（4.x 明文 MP4，无解密环节）。
+
+    4.x 视频落盘于微信数据目录 msg/video/<月>/<md5>.mp4（md5 = 消息
+    packed_info_data 的 field 8），本端点只做定位与文件流式回传：
+    - send_file(conditional=True) 自带 Range/206——<video> 拖进度条必需；
+    - thumb=1 回缩略图（poster 用），download=1 走附件下载。
+    本机无此文件（从未点开播放/已被微信清理）返回 404 JSON + reason，
+    前端据此显示"视频未在本机"占位而不是无限转圈。
+    """
+    from flask import send_file
+    account = request.args.get("account", "")
+    md5 = (request.args.get("md5", "") or "").lower().strip()
+    want_thumb = request.args.get("thumb", "") in ("1", "true")
+    download = request.args.get("download", "") in ("1", "true")
+    try:
+        if not account or not md5:
+            return jsonify({"error": "参数缺失"}), 400
+        if not re.fullmatch(r"[0-9a-f]{32}", md5):
+            return jsonify({"error": "md5 参数非法"}), 400
+        vp, tp = media.locate_video(account, md5)
+        path = tp if want_thumb else vp
+        if path is None or not path.is_file():
+            _logger.detailed("api", f"[video] 本机无文件 account={account} "
+                                    f"md5={md5[:8]} thumb={want_thumb}")
+            return jsonify({"error": "视频未在本机",
+                            "reason": "not_on_disk"}), 404
+        if want_thumb:
+            return send_file(path, mimetype="image/jpeg", conditional=True)
+        # 大文件（实测单个 35MB+）：整读进内存会拖垮 UI 进程，必须文件流
+        resp = send_file(path, mimetype="video/mp4", conditional=True,
+                         as_attachment=download,
+                         download_name=f"siwx_video_{md5[:8]}.mp4")
+        resp.headers["Cache-Control"] = "private, max-age=86400"
+        return resp
+    except Exception as e:  # noqa: BLE001 端点级兜底：单视频失败不能升级成 500
+        _logger.detailed("api", f"[video] 未预期异常 account={account} "
+                                f"md5={md5[:8]}: {type(e).__name__}: {e}")
+        return jsonify({"error": f"视频读取失败: {type(e).__name__}",
+                        "reason": "read_failed"}), 404
 
 
 # ── 动画表情（type 47）───────────────────────────────────────────────

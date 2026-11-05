@@ -228,7 +228,8 @@
     if (msg.mediaPath) {
       var p = esc(msg.mediaPath);
       if (t === 3) return '<img class="msg-image" src="'+p+'" loading="lazy" onclick="window.__lbAt('+i+')" onerror="window.__imgErr(this)">';
-      if (t === 43) return '<video class="msg-video" controls preload="metadata" src="'+p+'"></video>';
+      if (t === 43) return '<video class="msg-video" controls preload="metadata" src="'+p+'"'+
+        (msg.videoPoster ? ' poster="'+safeMedia(msg.videoPoster)+'"' : '')+'></video>';
       if (t === 47) return '<img class="msg-emoji" src="'+p+'" loading="lazy" onclick="window.__lbAt('+i+')" onerror="window.__stickerErr(this)">';
       if (t === 34) {
         var vt2 = voiceTrans(raw);
@@ -374,6 +375,11 @@
         // issue #31：子项图片已随导出解密，直接用相对路径引用
         h += '<div class="msg-record-item">'+rs+
              '<img class="msg-record-img" src="'+esc(it.mediaFile)+'" alt="图片" loading="lazy">'+rt+'</div>';
+      } else if (it.kind === 'video' && it.mediaFile) {
+        // 子项视频随导出直拷（4.x 明文 MP4）；海报可选
+        h += '<div class="msg-record-item">'+rs+
+             '<video class="msg-video msg-record-video" controls preload="metadata" src="'+esc(it.mediaFile)+'"'+
+             (it.videoPoster ? ' poster="'+esc(it.videoPoster)+'"' : '')+'></video>'+rt+'</div>';
       } else if (it.kind === 'record' && it.record) {
         h += '<div class="msg-record-item msg-record-nested">'+rs+renderRecord(it.record)+rt+'</div>';
       } else {

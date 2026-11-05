@@ -3140,6 +3140,165 @@ class TestRecordMediaExport(unittest.TestCase):
         self.assertNotIn("mediaFile", rec["items"][0])
 
 
+# ── 22c. 视频预览与导出（4.x 明文 MP4 直存）─────────────────────
+
+class TestVideoMedia(TempRootCase):
+    """4.x 视频链路：packed_info field8 md5 → msg/video/<月>/<md5>.mp4。
+
+    实测依据：4.1.x 视频落盘即标准 MP4（无加密），文件名 md5 来自消息
+    packed_info_data 的 protobuf field 8（"\x42\x20"+32hex），与内容 md5 无关。
+    """
+
+    MD5 = "ab" * 16
+    VIDEO_XML = ('<msg><videomsg aeskey="k" cdnvideourl="305f" length="4085923" '
+                 'playlength="152" fromusername="wxid_demo_a" compress="2" '
+                 'cameratype="2" source="0"/></msg>')
+    PACKED = b"\x08\x1d\x10\x02\x22\x22\x42\x20" + ("ab" * 16).encode() + b"\x58\x00"
+
+    def setUp(self):
+        super().setUp()
+        from siwx import media
+        media._VIDEO_IDX_MEMO.clear()   # TTL memo 必须逐用例清空
+
+    def _fake_wechat(self, account):
+        """假微信数据根：<tmp>/wxroot/<account>/{db_storage, msg/video/2025-01}。"""
+        root = self.tmp / "wxroot" / account
+        db_dir = root / "db_storage"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        vdir = root / "msg" / "video" / "2025-01"
+        vdir.mkdir(parents=True, exist_ok=True)
+        return db_dir, vdir
+
+    def test_enrich_extracts_video_md5_and_meta(self):
+        from siwx.api_chat import enrich_message_row
+        md5, bubble, voice_meta, sticker, video_meta = enrich_message_row(
+            43, self.VIDEO_XML, self.PACKED)
+        self.assertEqual(md5, self.MD5)
+        self.assertIsNone(bubble)
+        self.assertIsNone(voice_meta)
+        self.assertEqual(video_meta, {"duration": 152, "size": 4085923})
+        # 空壳（无 packed / 无属性）不炸
+        md5b, _, _, _, vm2 = enrich_message_row(43, "<msg><videomsg/></msg>", None)
+        self.assertIsNone(md5b)
+        self.assertIsNone(vm2)
+        # field8 形态缺席时退回首枚 32hex
+        md5c, _, _, _, _ = enrich_message_row(43, self.VIDEO_XML,
+                                              b"\x08\x01" + ("cd" * 16).encode())
+        self.assertEqual(md5c, "cd" * 16)
+        # packed field8 优先于 XML 属性（实机：磁盘文件名跟 packed，XML
+        # 属性是另一个 md5；155 个 mp4 实测 XML 0 命中 / packed 命中 9）
+        xml_md5 = "ef" * 16
+        md5d, _, _, _, _ = enrich_message_row(
+            43, self.VIDEO_XML.replace('cdnvideourl="305f"',
+                                       f'cdnvideourl="305f" md5="{xml_md5}"'),
+            self.PACKED)
+        self.assertEqual(md5d, self.MD5)   # packed field8 的 ab*16
+        # packed 全缺时仍可用 XML 属性兜底（v5.3.0 老数据的形态）
+        md5e, _, _, _, _ = enrich_message_row(
+            43, self.VIDEO_XML.replace('cdnvideourl="305f"',
+                                       f'cdnvideourl="305f" md5="{xml_md5}"'),
+            None)
+        self.assertEqual(md5e, xml_md5)
+
+    def test_locate_video_finds_file_and_thumb(self):
+        from siwx import media
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        db_dir, vdir = self._fake_wechat(account)
+        (vdir / f"{self.MD5}.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"v" * 64)
+        (vdir / f"{self.MD5}_thumb.jpg").write_bytes(b"\xff\xd8\xff" + b"t" * 32)
+        with mock.patch("siwx.discover.find_wechat_data_dirs",
+                        return_value=[(account, db_dir)]):
+            vp, tp = media.locate_video(account, self.MD5)
+            self.assertTrue(vp and vp.is_file() and vp.name.endswith(".mp4"))
+            self.assertTrue(tp and tp.name.endswith("_thumb.jpg"))
+            self.assertEqual(media.locate_video(account, "ff" * 16), (None, None))
+            self.assertEqual(media.locate_video(account, ""), (None, None))
+
+    def test_video_endpoint_serves_range_and_thumb(self):
+        acc, account, chat = make_account(self.tmp, n_texts=1)
+        db_dir, vdir = self._fake_wechat(account)
+        body = b"\x00\x00\x00\x18ftypmp42" + bytes(range(256))
+        (vdir / f"{self.MD5}.mp4").write_bytes(body)
+        (vdir / f"{self.MD5}_thumb.jpg").write_bytes(b"\xff\xd8\xffthumb")
+        from siwx.server import app
+        c = app.test_client()
+        with mock.patch("siwx.discover.find_wechat_data_dirs",
+                        return_value=[(account, db_dir)]):
+            r = c.get(f"/api/chat/media/video?account={account}&md5={self.MD5}")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.data, body)
+            self.assertEqual(r.headers.get("Content-Type"), "video/mp4")
+            # Range：<video> 拖进度条必需（conditional=True 走 206）
+            r2 = c.get(f"/api/chat/media/video?account={account}&md5={self.MD5}",
+                       headers={"Range": "bytes=0-99"})
+            self.assertEqual(r2.status_code, 206)
+            self.assertEqual(len(r2.data), 100)
+            r3 = c.get(f"/api/chat/media/video?account={account}&md5={self.MD5}&thumb=1")
+            self.assertEqual(r3.status_code, 200)
+            self.assertEqual(r3.data, b"\xff\xd8\xffthumb")
+            # 参数守卫 + 文件不在本机
+            self.assertEqual(
+                c.get(f"/api/chat/media/video?account={account}&md5=xyz").status_code,
+                400)
+            r4 = c.get(f"/api/chat/media/video?account={account}&md5={'ff' * 16}")
+            self.assertEqual(r4.status_code, 404)
+            self.assertEqual(r4.get_json().get("reason"), "not_on_disk")
+
+    def test_export_copies_video_and_fills_media_file(self):
+        acc, account, chat = make_account(self.tmp, n_texts=2)
+        db = acc / "message" / "message_0.db"
+        t = _msg_table(chat)
+        conn = sqlite3.connect(db)
+        conn.execute(f"INSERT INTO [{t}] VALUES (?,?,?,?,?,?,?,?)",
+                     (99, 5555, 43, 1_700_000_100, 0, 1,
+                      self.VIDEO_XML.encode("utf-8"), self.PACKED))
+        conn.commit()
+        conn.close()
+        db_dir, vdir = self._fake_wechat(account)
+        (vdir / f"{self.MD5}.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42vid")
+        (vdir / f"{self.MD5}_thumb.jpg").write_bytes(b"\xff\xd8\xffth")
+        # 合并后的定位链路走 media_backup._account_root（经 _account_msg_root）
+        wx_root = self.tmp / "wxroot" / account
+        with mock.patch.object(exporter, "_account_msg_root",
+                               lambda acc: wx_root):
+            res = exporter.run_export(
+                acc, account, chat, "联系人B", "html",
+                want_messages=True, want_media=True, want_avatars=False,
+                export_root=self.tmp / "exports", pack="none",
+                progress=lambda p, m: None)
+        out = Path(res["export_dir"]) / "media"
+        vids = sorted(out.glob("video_*.mp4"))
+        thumbs = sorted(out.glob("video_*_thumb.jpg"))
+        self.assertEqual(len(vids), 1)
+        self.assertEqual(vids[0].read_bytes(), b"\x00\x00\x00\x18ftypmp42vid")
+        self.assertEqual(len(thumbs), 1)
+        self.assertEqual(res["video_count"], 1)
+        manifest = json.loads(
+            (Path(res["export_dir"]) / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["media"]["videos_ok"], 1)
+        self.assertEqual(manifest["media"]["videos_skipped"], 0)
+        html = Path(res["file"]).read_text(encoding="utf-8")
+        self.assertIn(f"media/{vids[0].name}", html)
+        self.assertIn(f"media/{thumbs[0].name}", html)
+
+    def test_attach_video_slot_isolation(self):
+        """视频槽位与图片互斥：图片消息吃不到 video_ 前缀的媒体映射。"""
+        from siwx import exporter
+        img = {"localType": 3, "localId": 9, "createTime": 100,
+               "md5": self.MD5, "bubbleMd5": None}
+        exporter._attach_media(img, {exporter._video_key(self.MD5, 9, 100):
+                                     "media/video_x.mp4"})
+        self.assertNotIn("mediaFile", img)
+        vid = {"localType": 43, "localId": 9, "createTime": 100,
+               "md5": self.MD5}
+        exporter._attach_media(vid, {exporter._video_key(self.MD5, 9, 100):
+                                     "media/video_x.mp4",
+                                     exporter._vpost_key(9, 100):
+                                     "media/video_x_thumb.jpg"})
+        self.assertEqual(vid["mediaFile"], "media/video_x.mp4")
+        self.assertEqual(vid["videoPoster"], "media/video_x_thumb.jpg")
+
+
 # ── 23. S6/S1：密钥不落盘 + 更新链 fail-closed ─────────────────
 
 class TestManifestKeyStrip(unittest.TestCase):

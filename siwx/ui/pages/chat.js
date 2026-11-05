@@ -216,6 +216,12 @@ async function init() {
   el('c-msgs').addEventListener('error', (ev) => {
     const img = ev.target;
     if (!img || img.tagName !== 'IMG') return;
+    if (img.dataset.videoPoster !== undefined) {
+      // 视频海报缺失（本机没有该视频文件）：隐藏 img，卡片走 CSS 暗色占位，
+      // 播放按钮仍在——点击后 <video> 的 404 会给出明确文案
+      img.classList.add('m-video-noposter');
+      return;
+    }
     if (img.dataset.ava !== undefined) {
       avaFailed.add(img.dataset.ava);
       img.remove();
@@ -251,6 +257,30 @@ async function init() {
     if (!row) return;
     ev.preventDefault();
     openRangeMenu(row.dataset.key, ev.clientX, ev.clientY);
+  });
+  // 视频气泡：点击 poster 换成 <video controls autoplay>（只有点开的视频才
+  // 拉流量）。加载失败（文件不在本机）给出可操作文案，与图片占位口径一致
+  el('c-msgs').addEventListener('click', (ev) => {
+    if (selectionMode) return;
+    const card = ev.target.closest('.m-video');
+    if (!card || card.dataset.playing) return;
+    ev.preventDefault();
+    card.dataset.playing = '1';
+    const v = document.createElement('video');
+    v.className = 'm-video-el';
+    v.controls = true;
+    v.autoplay = true;
+    v.playsInline = true;
+    v.preload = 'auto';
+    v.src = card.dataset.vsrc || '';
+    v.addEventListener('error', () => {
+      const tip = document.createElement('span');
+      tip.className = 'm-video-miss';
+      tip.textContent = '视频未在本机 · 在微信中播放一次后再试';
+      card.replaceChildren(tip);
+      card.classList.add('m-video-missed');
+    });
+    card.replaceChildren(v);
   });
   // 触屏长按 500ms = 右键；菜单弹出后随后的 click 不再翻转选中
   let pressTimer = null;
@@ -829,6 +859,15 @@ function voiceDuration(v) {
   return ms > 0 ? `${(ms / 1000).toFixed(1)} 秒` : '语音';
 }
 
+function videoDuration(s) {
+  // playlength 是秒（videomsg XML 属性）；0/缺省返回空串（角标不渲染）
+  const n = Number(s || 0);
+  if (!(n > 0)) return '';
+  const mm = Math.floor(n / 60);
+  const ss = Math.round(n % 60);
+  return `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
 function msgKey(m) {
   return `${m.ts || 0}:${m.id || 0}:${m.platformMessageId || ''}`;
 }
@@ -887,6 +926,18 @@ function recordItemHtml(it) {
     return `<div class="m-record-item">${sender}` +
            `<img class="m-record-img" loading="lazy" src="${src}" alt="图片" data-retry="${esc(src)}">` +
            time + `</div>`;
+  }
+  if (it.kind === 'video' && it.md5) {
+    // 合并转发子项视频：md5 由解析器从原始消息行回填，端点与主消息流同
+    const vurl = `/api/chat/media/video?account=${encodeURIComponent(account)}` +
+                 `&md5=${encodeURIComponent(it.md5)}`;
+    const dur = videoDuration(it.video && it.video.duration);
+    return `<div class="m-record-item">${sender}` +
+           `<div class="m-video" data-vsrc="${esc(vurl)}" tabindex="0" role="button" aria-label="播放视频">` +
+           `<img class="m-video-poster" loading="lazy" data-video-poster="1" src="${esc(vurl)}&thumb=1" alt="视频">` +
+           `<span class="m-video-play"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg></span>` +
+           (dur ? `<span class="m-video-dur">${esc(dur)}</span>` : '') +
+           `</div>` + time + `</div>`;
   }
   if (it.kind === 'record' && it.record) {
     return `<div class="m-record-item m-record-nested">${sender}` +
@@ -972,6 +1023,18 @@ function bubble(m) {
     inner = `<div class="m-voice"><span>${esc(voiceDuration(m.voice))}</span>` +
             `<audio controls preload="none" src="${wav}"></audio>` +
             `<a href="${silk}" download="voice_${m.id || 'msg'}.silk">下载 SILK</a></div>`;
+  } else if (m.kind === 'video') {
+    // 4.x 视频明文直存（msg/video/<月>/<md5>.mp4）：缩略图 poster，点击才换成
+    // <video>——列表里几十个视频不能一进来就拉流量。本机无文件时 video 端点
+    // 404 → error 委托显示"未在本机"占位（从未点开播放/已被微信清理）
+    const vurl = `/api/chat/media/video?account=${encodeURIComponent(account)}` +
+                 `&md5=${encodeURIComponent(m.md5 || '')}`;
+    const dur = videoDuration(m.video && m.video.duration);
+    inner = `<div class="m-video" data-vsrc="${esc(vurl)}" tabindex="0" role="button" aria-label="播放视频">` +
+            `<img class="m-video-poster" loading="lazy" data-video-poster="1" src="${esc(vurl)}&thumb=1" alt="视频">` +
+            `<span class="m-video-play"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></svg></span>` +
+            (dur ? `<span class="m-video-dur">${esc(dur)}</span>` : '') +
+            `</div>`;
   } else if (m.kind === 'image') {
     // hq=1：本地有 _h 高清原图时直接取高清（issue #34）。此前聊天页按默认
     // 排序取"聊天显示版"（实测中位 38KB vs 高清 437KB），画面发糊；本地
