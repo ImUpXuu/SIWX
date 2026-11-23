@@ -11,7 +11,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request
+from flask import (Blueprint, Response, jsonify, request,
+                   send_from_directory)
 
 from siwx import logger as log
 from siwx import paths
@@ -324,6 +325,32 @@ def emoji():
         return jsonify({"error": r["error"]}), 502
     return Response(r["data"], mimetype=r["mime"],
                     headers={"X-SIWX-SNS-Via": r["via"] or ""})
+
+
+@bp.get("/faces")
+def faces():
+    """朋友圈内联小黄脸：返回权威名称表（不带方括号）。
+
+    朋友圈正文/评论里存的是 ``[庆祝]`` 这类文本标签，前端拿这份名单把
+    已知标签替换成 ``/api/sns/face`` 的内联图。素材与聊天页、导出管线
+    共用 ``siwx/wx_faces.py``，不额外维护一份名单。
+    """
+    from siwx import wx_faces
+    resp = jsonify({"names": [n[1:-1] for n in wx_faces.load_faces()]})
+    # 表情素材随版本固定，允许浏览器缓存一天，避免每开一页都拉一次名单
+    resp.headers["Cache-Control"] = "private, max-age=86400"
+    return resp
+
+
+@bp.get("/face")
+def face():
+    """单个表情 PNG。名字先查权威表定文件序号，不拼接用户输入路径。"""
+    from siwx import wx_faces
+    p = wx_faces.face_file(request.args.get("name", ""))
+    if not p:
+        return jsonify({"error": "未知表情"}), 404
+    return send_from_directory(p.parent, p.name, mimetype="image/png",
+                               max_age=86400)
 
 
 @bp.get("/friends")

@@ -257,6 +257,8 @@ html[data-theme="dark"] .sns-cover { background: #2c343d; }
 .sns-name { font-size: 14.5px; font-weight: 600; color: var(--wx-link); margin-bottom: 3px; }
 .sns-text { font-size: 14.5px; line-height: 1.47; color: var(--wx-text); white-space: pre-wrap; word-break: break-word; }
 .sns-text a { color: var(--wx-link); }
+/* 内联小黄脸（与聊天页、导出页同一素材源；正文与评论共用） */
+.wx-face { width: 20px; height: 20px; vertical-align: -4px; margin: 0 1px; }
 .sns-loc { margin-top: 5px; font-size: 12px; color: var(--wx-link); cursor: default; }
 
 /* 图片 / 视频九宫格 */
