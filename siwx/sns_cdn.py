@@ -254,6 +254,31 @@ def decrypt_isaac(data: bytes, key: str | int) -> bytes:
     return bytes(a ^ b for a, b in zip(data, ks))
 
 
+# 微信对 CDN 视频（snsvideodownload / encfilekey 类）只加密前 128KB，其余是明文。
+# 实测边界：解密 131071/131072 字节时 ffmpeg 解码 0 错误；自 131073 起开始出错，
+# 说明后半段若是明文再被 XOR 一遍就会被打乱 —— 表现即「mp4 只有前 1 秒能播」。
+VIDEO_ENC_HEAD = 131072
+
+# 视频缓存版本号。修复「整文件 XOR」缺陷后必须让旧缓存失效：老版本写进
+# sns_media 的 mp4 是后段被多 XOR 一遍的坏文件，缓存命中会直接返回，导致
+# 换了新 exe 仍然「只有前 1 秒能播」。视频缓存名加前缀，旧文件自然不再命中；
+# 图片解密逻辑未变，文件名保持原样，避免无谓重下。
+VIDEO_CACHE_TAG = "v2"
+
+
+def decrypt_media(data: bytes, key: str | int) -> bytes:
+    """按媒体类型解密朋友圈 CDN 资源（图片整文件加密，视频只加密前 128KB）。"""
+    if len(data) <= VIDEO_ENC_HEAD:
+        # 不超过 128KB：无论图片还是视频都是「全文件」范围，解一次即可
+        return decrypt_isaac(data, key)
+    dec_head = decrypt_isaac(data[:VIDEO_ENC_HEAD], key)
+    _, mime = detect_mime(dec_head)
+    if mime and mime.startswith("video"):
+        return dec_head + data[VIDEO_ENC_HEAD:]
+    # 图片/其他类型：仍按整文件 XOR
+    return decrypt_isaac(data, key)
+
+
 def _aes_gcm_key_tries(aes_key: str):
     """表情 AES 密钥的候选解释（5 种常见变体，逐个尝试）。"""
     from Crypto.Cipher import AES  # noqa: F401  (延迟导入，仅在需要时用)
@@ -351,21 +376,25 @@ def _atomic_write(path: Path, data: bytes) -> bool:
         return False
 
 
-def cached_path(cache_dir, url: str, ext: str | None = None) -> Path | None:
+def cached_path(cache_dir, url: str, ext: str | None = None,
+                tag: str | None = None) -> Path | None:
     """缓存文件路径；``cache_dir`` 为空表示不启用缓存。"""
     if not cache_dir:
         return None
     d = Path(cache_dir)
     suffix = f".{ext}" if ext else ""
-    return d / f"{cache_key(url)}{suffix}"
+    name = f"{cache_key(url)}{suffix}"
+    if tag:
+        name = f"{tag}_{name}"
+    return d / name
 
 
-def read_cached(cache_dir, url: str):
+def read_cached(cache_dir, url: str, tag: str | None = None):
     """读取已缓存媒体，返回 (bytes, ext, mime)；未命中返回 None。"""
     d = Path(cache_dir) if cache_dir else None
     if not d or not d.is_dir():
         return None
-    stem = cache_key(url)
+    stem = f"{tag}_{cache_key(url)}" if tag else cache_key(url)
     for p in d.glob(f"{stem}.*"):
         if p.suffix == ".part":
             continue
@@ -382,6 +411,27 @@ def read_cached(cache_dir, url: str):
         ext = p.suffix.lstrip(".")
         mime = detect_mime(data)[1] or "application/octet-stream"
         return data, ext, mime
+    return None
+
+
+def cached_video_file(cache_dir, url: str) -> Path | None:
+    """查找已落盘的视频缓存文件（含视频版本化命名），未命中返回 None。
+
+    预览接口需要把文件交给 ``send_file`` 走 Range/206，不能整份读进内存，
+    所以这里只回路径。必须与 :func:`read_cached` 用同一套命名，否则旧版
+    「整文件 XOR」写下的坏 mp4 又会被预览直接吐出去。
+    """
+    if not cache_dir:
+        return None
+    d = Path(cache_dir)
+    if not d.is_dir():
+        return None
+    stem = f"{VIDEO_CACHE_TAG}_{cache_key(url)}" if is_video_url(url) else cache_key(url)
+    for p in d.glob(f"{stem}.*"):
+        if p.suffix == ".part":
+            continue
+        if p.suffix.lower() in (".mp4", ".mov", ".webm"):
+            return p
     return None
 
 
@@ -472,7 +522,10 @@ def fetch_media(url: str, key: str | int | None = None,
         _log_media_failure(url, out)
         return out
 
-    hit = read_cached(cache_dir, url) if cache_dir else None
+    # 视频缓存带版本前缀：旧「整文件 XOR」时代的坏 mp4 不再命中（见 VIDEO_CACHE_TAG）
+    ctag = VIDEO_CACHE_TAG if is_video_url(url) else None
+
+    hit = read_cached(cache_dir, url, tag=ctag) if cache_dir else None
     if hit:
         data, ext, mime = hit
         out.update(ok=True, data=data, ext=ext, mime=mime, cached=True)
@@ -505,7 +558,7 @@ def fetch_media(url: str, key: str | int | None = None,
         need = (x_enc == "1" or ext is None) and has_key
         if need:
             try:
-                body = decrypt_isaac(body, key)
+                body = decrypt_media(body, key)
                 out["encrypted"] = True
                 ext, mime = detect_mime(body)
             except Exception as e:  # noqa: BLE001
@@ -522,7 +575,7 @@ def fetch_media(url: str, key: str | int | None = None,
             continue
 
         if cache_dir:
-            cp = cached_path(cache_dir, url, ext)
+            cp = cached_path(cache_dir, url, ext, tag=ctag)
             # 审计 §4.7：_atomic_write 失败返回 False，此前被静默忽略
             if not _atomic_write(cp, body):
                 try:

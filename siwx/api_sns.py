@@ -483,17 +483,13 @@ def media():
     # 用户实测"实况照片有概率卡"（首次打开等 CDN 全量下载，拖动重下）。
     # 图片不走这条：缓存的是未 strip 微信尾部的原始字节，需按结果处理。
     if cache is not None and cache.is_dir():
-        stem = sns_cdn.cache_key(url)
-        for p in cache.glob(f"{stem}.*"):
-            if p.suffix == ".part":
-                continue
-            if p.suffix.lower() in (".mp4", ".mov", ".webm"):
-                from flask import send_file
-                resp = send_file(p, mimetype="video/mp4", conditional=True)
-                resp.headers["X-SIWX-SNS-Cached"] = "1"
-                resp.headers["Cache-Control"] = "private, max-age=86400"
-                return resp
-            break
+        hit = sns_cdn.cached_video_file(cache, url)
+        if hit is not None:
+            from flask import send_file
+            resp = send_file(hit, mimetype="video/mp4", conditional=True)
+            resp.headers["X-SIWX-SNS-Cached"] = "1"
+            resp.headers["Cache-Control"] = "private, max-age=86400"
+            return resp
     result = sns_cdn.fetch_media(url, key=key, token=token, cache_dir=cache)
     if not result["ok"]:
         # 失败原因由 sns_cdn 落 logs/siwx.log（含 reason / 试了几个域名 / HTTP 码）
