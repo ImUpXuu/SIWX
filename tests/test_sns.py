@@ -1616,6 +1616,120 @@ class TestSnsFrontendFaces(unittest.TestCase):
         self.assertIn(".wx-face { width: 20px; height: 20px;", self.css)
 
 
+# ── 动态图片（实况照片 mp4）只加密前 128KB ─────────────────────────────
+# 微信 CDN 对 snsvideodownload 类资源只加密前 128KB，其后是明文。旧实现整文件
+# XOR 会把明文尾部再异或一遍，mp4 从 128KB 起全部损坏（现象「只有前 1 秒能播」）。
+# 这组用例把边界、旧缺陷位置、以及「图片不受影响」钉死，避免后续再退回整文件解密。
+
+class TestSnsMediaHeadDecrypt(unittest.TestCase):
+    KEY = 1234567890
+    H = sns_cdn.VIDEO_ENC_HEAD
+
+    @staticmethod
+    def _fake_mp4(n: int) -> bytes:
+        head = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2mp41"
+        return head + bytes((i * 37 + 11) % 256 for i in range(n - len(head)))
+
+    def test_video_roundtrip_when_only_head_encrypted(self):
+        plain = self._fake_mp4(self.H + 200_000)
+        cipher = sns_cdn.decrypt_isaac(plain[:self.H], self.KEY) + plain[self.H:]
+        # 前提：密文认不出格式，否则 fetch_media 根本不会走解密分支
+        self.assertIsNone(sns_cdn.detect_mime(cipher)[0])
+        self.assertEqual(sns_cdn.decrypt_media(cipher, self.KEY), plain)
+
+    def test_exactly_head_size_is_fully_encrypted(self):
+        plain = self._fake_mp4(self.H)
+        cipher = sns_cdn.decrypt_isaac(plain, self.KEY)
+        self.assertEqual(sns_cdn.decrypt_media(cipher, self.KEY), plain)
+
+    def test_smaller_than_head_is_fully_encrypted(self):
+        plain = self._fake_mp4(self.H // 2)
+        cipher = sns_cdn.decrypt_isaac(plain, self.KEY)
+        self.assertEqual(sns_cdn.decrypt_media(cipher, self.KEY), plain)
+
+    def test_large_image_still_whole_file_encrypted(self):
+        """图片仍是整文件加密：>128KB 也不能走「头部解密 + 尾部透传」。"""
+        plain = b"\x89PNG\r\n\x1a\n" + bytes((i * 13) % 256 for i in range(self.H + 5000))
+        cipher = sns_cdn.decrypt_isaac(plain, self.KEY)
+        self.assertEqual(sns_cdn.decrypt_media(cipher, self.KEY), plain)
+
+    def test_legacy_whole_file_xor_breaks_exactly_at_boundary(self):
+        """固化旧实现缺陷位置：首个坏字节恰在 128KB，与「只播 1 秒」的观感对应。"""
+        plain = self._fake_mp4(self.H + 50_000)
+        cipher = sns_cdn.decrypt_isaac(plain[:self.H], self.KEY) + plain[self.H:]
+        legacy = sns_cdn.decrypt_isaac(cipher, self.KEY)
+        self.assertNotEqual(legacy, plain)
+        first = next(i for i, (a, b) in enumerate(zip(legacy, plain)) if a != b)
+        self.assertEqual(first, self.H)
+
+
+class TestSnsVideoCacheVersioning(unittest.TestCase):
+    """缓存版本化：旧「整文件 XOR」产物必须失效，新旧命名不能互相命中。"""
+
+    URL = "https://snsvideodownload.qpic.cn/mmsns/demo/0?k=1"
+    KEY = 1234567890
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory(prefix="siwx_sns_vcache_",
+                                                ignore_cleanup_errors=True)
+        self.cache = Path(self._tmp.name)
+        self.stem = sns_cdn.cache_key(self.URL)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_cached_video_file_ignores_legacy_artifact(self):
+        legacy = self.cache / f"{self.stem}.mp4"
+        legacy.write_bytes(b"legacy-broken")
+        self.assertIsNone(sns_cdn.cached_video_file(self.cache, self.URL))
+        fresh = self.cache / f"{sns_cdn.VIDEO_CACHE_TAG}_{self.stem}.mp4"
+        fresh.write_bytes(b"fresh")
+        self.assertEqual(sns_cdn.cached_video_file(self.cache, self.URL), fresh)
+
+    def test_tagged_path_and_read_cached_agree(self):
+        p = sns_cdn.cached_path(self.cache, self.URL, "mp4",
+                                tag=sns_cdn.VIDEO_CACHE_TAG)
+        self.assertEqual(p.name, f"{sns_cdn.VIDEO_CACHE_TAG}_{self.stem}.mp4")
+        p.write_bytes(b"fresh")
+        data, ext, _mime = sns_cdn.read_cached(self.cache, self.URL,
+                                               tag=sns_cdn.VIDEO_CACHE_TAG)
+        self.assertEqual((data, ext), (b"fresh", "mp4"))
+        # 不带 tag 的读取看不到 v2 产物（图片路径保持原命名，互不影响）
+        self.assertIsNone(sns_cdn.read_cached(self.cache, self.URL))
+
+    def test_untagged_cache_invisible_to_tagged_read(self):
+        (self.cache / f"{self.stem}.mp4").write_bytes(b"legacy")
+        self.assertIsNone(sns_cdn.read_cached(self.cache, self.URL,
+                                              tag=sns_cdn.VIDEO_CACHE_TAG))
+
+    def test_fetch_media_redownloads_and_writes_tagged_cache(self):
+        """旧坏缓存存在时必须重下并写成 v2_ 文件，第二次才允许命中缓存。"""
+        from unittest import mock
+        H = sns_cdn.VIDEO_ENC_HEAD
+        plain = TestSnsMediaHeadDecrypt._fake_mp4(H + 40_000)
+        cipher = (sns_cdn.decrypt_isaac(plain[:H], self.KEY)
+                  + plain[H:])
+        (self.cache / f"{self.stem}.mp4").write_bytes(b"legacy-broken")
+        with mock.patch.object(sns_cdn, "fetch", return_value=(cipher, {})):
+            r = sns_cdn.fetch_media(self.URL, key=self.KEY,
+                                    cache_dir=self.cache, hosts=1)
+        self.assertTrue(r["ok"], r.get("error"))
+        self.assertTrue(r["encrypted"])
+        self.assertFalse(r["cached"])
+        self.assertEqual(r["data"], plain)
+        fresh = self.cache / f"{sns_cdn.VIDEO_CACHE_TAG}_{self.stem}.mp4"
+        self.assertTrue(fresh.is_file())
+        self.assertEqual(fresh.read_bytes(), plain)
+        with mock.patch.object(sns_cdn, "fetch",
+                               side_effect=AssertionError("不应重新下载")):
+            r2 = sns_cdn.fetch_media(self.URL, key=self.KEY,
+                                     cache_dir=self.cache, hosts=1)
+        self.assertTrue(r2["ok"], r2.get("error"))
+        self.assertTrue(r2["cached"])
+        self.assertEqual(r2["data"], plain)
+
+
 def _to_json_text(obj) -> str:
     import json as _json
     return _json.dumps(obj, ensure_ascii=False)
