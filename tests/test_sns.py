@@ -1461,6 +1461,161 @@ class TestSnsMcp(IsolatedRootCase):
             self.assertTrue(t["description"])
 
 
+# ── 小黄脸（微信内置表情）─────────────────────────────────────────────
+# 朋友圈正文/评论里存的是 `[庆祝]` 这类文本标签，三处出口要一致：
+# 前端 v-html 渲染 /api/sns/face 的图、HTML 导出内联 base64、其余格式留原文。
+
+class TestSnsFaceHtml(unittest.TestCase):
+    """导出侧替换器：只换权威表里的名字，且替换发生在转义之后。"""
+
+    def test_known_face_becomes_inline_img(self):
+        from siwx import sns_export as E
+        html = E._face_html("开工了[庆祝]")
+        self.assertIn('<img class="wx-face"', html)
+        self.assertIn("data:image/png;base64,", html)
+        self.assertIn('alt="[庆祝]"', html)
+        self.assertIn("开工了", html)
+        # 标签只保留在 alt/title（无障碍与鼠标悬停），正文位置不再有 [庆祝]
+        self.assertEqual(html.count("[庆祝]"), 2)
+        self.assertNotIn(">[庆祝]<", html)
+
+    def test_unknown_token_kept_verbatim(self):
+        from siwx import sns_export as E
+        self.assertEqual(E._face_html("抬一手[这是不存在的表情]"),
+                         "抬一手[这是不存在的表情]")
+
+    def test_mixed_only_known_replaced(self):
+        from siwx import sns_export as E
+        html = E._face_html("[微笑]配[瞎写的]")
+        self.assertEqual(html.count("<img"), 1)
+        self.assertIn("[瞎写的]", html)
+
+    def test_escape_happens_before_replace(self):
+        from siwx import sns_export as E
+        html = E._face_html("<script>alert(1)</script>[微笑]")
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)
+        self.assertIn('<img class="wx-face"', html)
+
+    def test_empty(self):
+        from siwx import sns_export as E
+        self.assertEqual(E._face_html(""), "")
+        self.assertEqual(E._face_html(None), "")
+
+    def test_only_used_faces_inlined(self):
+        """只注入用到的图：146 个全量塞进去会让导出文件膨胀近 1MB。"""
+        from siwx import sns_export as E
+        html = E._face_html("[微笑]")
+        self.assertEqual(html.count("data:image/png;base64,"), 1)
+
+
+class TestSnsExportFaces(unittest.TestCase):
+    """导出管线：HTML 内联表情，markdown/json/txt 保持 `[表情名]` 原文。"""
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory(prefix="siwx_sns_face_",
+                                                ignore_cleanup_errors=True)
+        self.tmp = Path(self._tmp.name)
+        self.db = self.tmp / "sns" / "sns.db"
+        base = (1700000000 * 1000) << 23
+        _make_sns_db(self.db, [(_to_signed64(base + 1), "wxid_a", "今天[庆祝]真好"),
+                               (_to_signed64(base + 2), "wxid_b", "纯文字动态")])
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_html_export_inlines_face(self):
+        from siwx import sns_export as E
+        r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt="html",
+                             export_root=self.tmp / "out")
+        self.assertTrue(r["ok"], r.get("error"))
+        html = Path(r["file"]).read_text(encoding="utf-8")
+        self.assertIn('<img class="wx-face"', html)
+        self.assertIn("data:image/png;base64,", html)
+        self.assertNotIn(">[庆祝]<", html)     # 正文位置已换成图
+        self.assertEqual(html.count('alt="[庆祝]"'), 1)
+        # 样式随文件自带，离线也能对齐基线
+        self.assertIn(".wx-face{width:20px", html)
+
+    def test_other_formats_keep_token(self):
+        from siwx import sns_export as E
+        for fmt in ("markdown", "json", "txt"):
+            with self.subTest(fmt=fmt):
+                r = E.run_sns_export(self.db, fx.DEMO_SELF, fmt=fmt,
+                                     export_root=self.tmp / "out")
+                self.assertTrue(r["ok"], r.get("error"))
+                text = Path(r["file"]).read_text(encoding="utf-8")
+                self.assertIn("[庆祝]", text)
+                self.assertNotIn("wx-face", text)
+
+
+class TestSnsFaceApi(IsolatedRootCase):
+    """表情接口：名单来自 wx_faces 权威表，单图按名字查表定序号。"""
+
+    @staticmethod
+    def _client():
+        from siwx.server import app
+        return app.test_client()
+
+    def test_faces_lists_authoritative_names(self):
+        from siwx import wx_faces
+        r = self._client().get("/api/sns/faces")
+        self.assertEqual(r.status_code, 200)
+        names = r.get_json()["names"]
+        self.assertEqual(len(names), len(wx_faces.NAMES))
+        self.assertIn("庆祝", names)
+        # 前端按"不带方括号"的名字比对 token
+        self.assertNotIn("[庆祝]", names)
+        self.assertIn("max-age=86400", r.headers.get("Cache-Control", ""))
+
+    def test_face_returns_png(self):
+        c = self._client()
+        for name in ("庆祝", "微笑"):
+            with self.subTest(name=name):
+                r = c.get("/api/sns/face", query_string={"name": name})
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.mimetype, "image/png")
+                self.assertTrue(r.data.startswith(b"\x89PNG"))
+
+    def test_face_rejects_unknown_and_path_like(self):
+        c = self._client()
+        # 名字先查表再定序号，路径穿越串不可能命中
+        for bad in ("", "不存在", "[庆祝]", "../emoji/f000.png", "f000"):
+            with self.subTest(name=bad):
+                r = c.get("/api/sns/face", query_string={"name": bad})
+                self.assertEqual(r.status_code, 404)
+                self.assertIn("error", r.get_json())
+
+
+class TestSnsFrontendFaces(unittest.TestCase):
+    """前端静态断言：正文与评论都走 faceHtml，名单在首屏渲染前就位。"""
+
+    def setUp(self):
+        self.js = (ROOT / "siwx" / "ui" / "pages" / "sns.js").read_text(encoding="utf-8")
+        self.css = (ROOT / "siwx" / "ui" / "pages" / "sns.css").read_text(encoding="utf-8")
+
+    def test_text_and_comment_use_face_html(self):
+        self.assertIn('v-html="faceHtml(post.content_desc)"', self.js)
+        self.assertIn('v-html="faceHtml(c.content)"', self.js)
+        self.assertNotIn('class="sns-text">{{ post.content_desc }}', self.js)
+
+    def test_escape_before_replace(self):
+        # faceHtml 内部先 esc()，替换的是转义后的文本，不新增 XSS 面
+        self.assertIn("safeUrl, esc } = window.SX;", self.js)
+        self.assertIn("const s = esc(text || '');", self.js)
+
+    def test_degrades_without_names(self):
+        self.assertIn("if (!faceNames.size) return s;", self.js)
+
+    def test_names_loaded_before_first_paint(self):
+        self.assertIn("/api/sns/faces", self.js)
+        self.assertIn("await loadFaceNames();", self.js)
+
+    def test_css_has_wx_face(self):
+        self.assertIn(".wx-face { width: 20px; height: 20px;", self.css)
+
+
 def _to_json_text(obj) -> str:
     import json as _json
     return _json.dumps(obj, ensure_ascii=False)

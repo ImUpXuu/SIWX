@@ -11,7 +11,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request
+from flask import (Blueprint, Response, jsonify, request,
+                   send_from_directory)
 
 from siwx import logger as log
 from siwx import paths
@@ -326,6 +327,32 @@ def emoji():
                     headers={"X-SIWX-SNS-Via": r["via"] or ""})
 
 
+@bp.get("/faces")
+def faces():
+    """朋友圈内联小黄脸：返回权威名称表（不带方括号）。
+
+    朋友圈正文/评论里存的是 ``[庆祝]`` 这类文本标签，前端拿这份名单把
+    已知标签替换成 ``/api/sns/face`` 的内联图。素材与聊天页、导出管线
+    共用 ``siwx/wx_faces.py``，不额外维护一份名单。
+    """
+    from siwx import wx_faces
+    resp = jsonify({"names": [n[1:-1] for n in wx_faces.load_faces()]})
+    # 表情素材随版本固定，允许浏览器缓存一天，避免每开一页都拉一次名单
+    resp.headers["Cache-Control"] = "private, max-age=86400"
+    return resp
+
+
+@bp.get("/face")
+def face():
+    """单个表情 PNG。名字先查权威表定文件序号，不拼接用户输入路径。"""
+    from siwx import wx_faces
+    p = wx_faces.face_file(request.args.get("name", ""))
+    if not p:
+        return jsonify({"error": "未知表情"}), 404
+    return send_from_directory(p.parent, p.name, mimetype="image/png",
+                               max_age=86400)
+
+
 @bp.get("/friends")
 def friends():
     """按发布者聚合（纯 SQL GROUP BY，实测 ~111ms vs 全量解析 1230ms）。
@@ -483,17 +510,13 @@ def media():
     # 用户实测"实况照片有概率卡"（首次打开等 CDN 全量下载，拖动重下）。
     # 图片不走这条：缓存的是未 strip 微信尾部的原始字节，需按结果处理。
     if cache is not None and cache.is_dir():
-        stem = sns_cdn.cache_key(url)
-        for p in cache.glob(f"{stem}.*"):
-            if p.suffix == ".part":
-                continue
-            if p.suffix.lower() in (".mp4", ".mov", ".webm"):
-                from flask import send_file
-                resp = send_file(p, mimetype="video/mp4", conditional=True)
-                resp.headers["X-SIWX-SNS-Cached"] = "1"
-                resp.headers["Cache-Control"] = "private, max-age=86400"
-                return resp
-            break
+        hit = sns_cdn.cached_video_file(cache, url)
+        if hit is not None:
+            from flask import send_file
+            resp = send_file(hit, mimetype="video/mp4", conditional=True)
+            resp.headers["X-SIWX-SNS-Cached"] = "1"
+            resp.headers["Cache-Control"] = "private, max-age=86400"
+            return resp
     result = sns_cdn.fetch_media(url, key=key, token=token, cache_dir=cache)
     if not result["ok"]:
         # 失败原因由 sns_cdn 落 logs/siwx.log（含 reason / 试了几个域名 / HTTP 码）

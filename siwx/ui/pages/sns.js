@@ -11,7 +11,7 @@
  */
 import { createDropdown, openMenu } from '/widgets.js?v=2026100601';
 
-const { fetchJSON, copyText, fmtTs, fmtDate, safeUrl } = window.SX;
+const { fetchJSON, copyText, fmtTs, fmtDate, safeUrl, esc } = window.SX;
 const pad = n => String(n).padStart(2, '0');
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -260,6 +260,32 @@ function fmtDur(sec) {
   return `${Math.floor(n / 60)}:${pad(n % 60)}`;
 }
 
+/* ── 小黄脸（微信内置表情）────────────────────────────────────
+ * 朋友圈正文/评论里存的是 [庆祝] 这类文本标签，这里把它们替换成官方表情图。
+ * 名单来自 /api/sns/faces（与聊天页、导出共用 wx_faces.py 的权威表），
+ * 名单未到或后端缺失时保持纯文本；未知名标签原样保留（不能吞掉原文）。
+ * 替换发生在 esc() 之后，所以文本里的 < > & 已被转义，不存在 XSS 面。 */
+let faceNames = new Set();
+async function loadFaceNames() {
+  try {
+    const d = await fetchJSON('/api/sns/faces');
+    faceNames = new Set(d.names || []);
+  } catch (e) {
+    faceNames = new Set();               // 后端不支持时退化为纯文本
+  }
+}
+const FACE_TOKEN_RE = /\[[^\[\]\n]{1,20}\]/g;
+function faceHtml(text) {
+  const s = esc(text || '');
+  if (!faceNames.size) return s;
+  return s.replace(FACE_TOKEN_RE, tok => {
+    const name = tok.slice(1, -1);
+    if (!faceNames.has(name)) return tok;
+    return `<img class="wx-face" alt="${tok}" title="${tok}" loading="lazy"`
+         + ` src="/api/sns/face?name=${encodeURIComponent(name)}">`;
+  });
+}
+
 /* 轻反馈走全局 toast（壳层统一体系）；store.notice 只承载常驻提示
    （如"本地朋友圈图片只包含已下载资源"这类说明性文案） */
 function toast(text, err) {
@@ -380,7 +406,7 @@ const SnsPost = {
     },
   },
   methods: {
-    relTime, fullTime, mediaUrl, emojiUrl, displayOf, fmtDur,
+    relTime, fullTime, mediaUrl, emojiUrl, displayOf, fmtDur, faceHtml,
     /* P2-1：card.url 来自联系人可控的 content_url，必须过 common.js safeUrl
      * 的 scheme 白名单（https?:|/|./|../|#），javascript:/data: 等一律拒绝；
      * 拒绝时返回 null，Vue 会把 href 属性整个去掉，卡片降级为不可点的文本。 */
@@ -442,7 +468,7 @@ const SnsPost = {
       <sns-ava :username="uname" :display="display"></sns-ava>
       <div class="sns-main">
         <div class="sns-name">{{ display }}</div>
-        <div v-if="post.content_desc" class="sns-text">{{ post.content_desc }}</div>
+        <div v-if="post.content_desc" class="sns-text" v-html="faceHtml(post.content_desc)"></div>
 
         <template v-if="card">
           <a v-if="card.kind === 'music'" class="sns-card sns-card--music"
@@ -515,7 +541,7 @@ const SnsPost = {
             v-for="(x, i) in likes" :key="i"><span v-if="i" class="sep">，</span>{{ displayOf(x.username, x.nickname) }}</template></div>
           <div v-if="comments.length" class="sns-comments" :class="{ 'has-like': likes.length }">
             <div v-for="(c, i) in shownComments" :key="i" class="sns-comment">
-              <b>{{ displayOf(c.username, c.nickname) }}</b>：<span v-if="c.ref_username" class="dim">回复 {{ displayOf(c.ref_username, '') }} </span>{{ c.content || '' }}<template
+              <b>{{ displayOf(c.username, c.nickname) }}</b>：<span v-if="c.ref_username" class="dim">回复 {{ displayOf(c.ref_username, '') }} </span><span v-html="faceHtml(c.content)"></span><template
                 v-for="(e, j) in (c.emojis || [])" :key="'e' + j"><img class="cm-emoji" loading="lazy" :src="emojiUrl(e)" alt="表情" @error="$event.target.remove()"></template><template
                 v-for="(im, j) in (c.images || []).filter(x => x.url)" :key="'i' + j"><img class="cm-img" loading="lazy" :src="mediaUrl(im)" alt="评论图片" @error="$event.target.remove()"></template>
             </div>
@@ -898,6 +924,10 @@ export async function init(view) {
     return;
   }
   store.account = global;
+
+  // 小黄脸名单要在首屏渲染前就绪：faceHtml 依赖模块级 Set，不是响应式，
+  // 晚了不会重绘（失败静默，退化为纯文本，不阻塞主流程）
+  await loadFaceNames();
 
   try {
     const d = await fetchJSON('/api/sns/accounts');

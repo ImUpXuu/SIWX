@@ -21,6 +21,7 @@ from pathlib import Path
 from . import logger as _logger
 from . import sns
 from . import sns_cdn
+from . import wx_faces
 from .exporter import _safe_name
 
 # 媒体下载失败要有地方查（logs/siwx.log，“运行日志”页会 tail 它）
@@ -501,6 +502,35 @@ def _write_markdown(path: Path, feeds, media_map, meta=None) -> int:
     return n
 
 
+_FACE_TOKEN_RE = re.compile(r"\[[^\[\]\n]{1,20}\]")
+
+
+def _face_html(text) -> str:
+    """HTML 导出：把已知 ``[表情名]`` 换成官方小黄脸（base64 内联，保持自包含）。
+
+    先整体 ``html.escape`` 再替换 token，所以文本里的 ``<``/``&`` 不会变成标签；
+    只注入本文本实际用到的表情（146 个全量塞进去会让文件膨胀 ~1MB）。
+    未知名标签与 markdown/json/txt 导出一样，保留 ``[表情名]`` 原文。
+    """
+    s = _html.escape(str(text or ""))
+    if not s:
+        return ""
+    uris = wx_faces.datauris(wx_faces.find_used(s))
+    if not uris:
+        return s
+
+    def _sub(m):
+        tok = m.group(0)
+        uri = uris.get(tok)
+        if not uri:
+            return tok
+        alt = _html.escape(tok)
+        return (f'<img class="wx-face" alt="{alt}" title="{alt}" '
+                f'src="{uri}">')
+
+    return _FACE_TOKEN_RE.sub(_sub, s)
+
+
 _HTML_HEAD = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -530,6 +560,7 @@ body{max-width:760px;margin:0 auto;padding:24px 16px;background:#f5f5f5;
 .cm{margin-top:8px;border-top:1px dashed #e5e5e5;padding-top:8px;font-size:13px}
 .cm b{color:#576b95}
 .cm .e{width:20px;height:20px;vertical-align:-4px;margin-left:2px}
+.wx-face{width:20px;height:20px;vertical-align:-4px;margin:0 1px}
 </style></head><body>
 """
 
@@ -544,7 +575,7 @@ def _write_html(path: Path, feeds, media_map, meta=None) -> int:
             f.write(f'<div class="head"><span class="who">{_html.escape(str(d["author"] or ""))}</span>'
                     f'<span class="time">{_html.escape(d["timeText"])}</span></div>')
             if d["text"]:
-                f.write(f'<div class="text">{_html.escape(d["text"])}</div>')
+                f.write(f'<div class="text">{_face_html(d["text"])}</div>')
             f.write(_html_card(d.get("card")))
             if d["media"]:
                 f.write('<div class="grid">')
@@ -584,7 +615,7 @@ def _write_html(path: Path, feeds, media_map, meta=None) -> int:
                         f'<img class="cm-img" loading="lazy" src="{_html.escape(str(im.get("downloadUrl") or im.get("url") or ""))}" alt="评论图">'
                         for im in (c.get("images") or []) if (im.get("downloadUrl") or im.get("url")))
                     f.write(f'<div><b>{_html.escape(str(c["name"] or ""))}</b>：'
-                            f'{_html.escape(str(c["text"] or ""))}{emo}{cimg}</div>')
+                            f'{_face_html(c["text"])}{emo}{cimg}</div>')
                 f.write("</div>")
             f.write("</article>\n")
             n += 1
